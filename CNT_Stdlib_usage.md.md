@@ -76,7 +76,7 @@ fn main() {
     }
 
     // Warning: Using unwrap() can panic if the value is None!
-    // let value = result2.unwrap(); // Error! Panics.
+     let value = result2.unwrap(); // Error! Panics.
 }
 ```
 Result<T, E> Enum: Used to represent either a successful result (Ok) or an error (Err). It is common for operations that can fail (file operations, networking, time, parsing, etc.). It has two variants: core::Result::Ok(value) (the successful result value) and core::Result::Err(error) (the error value).
@@ -106,7 +106,7 @@ fn main() {
     }
 
     // Warning: Using unwrap() can panic if the Result is Err!
-    // let content = fs::read_to_string("non_existent_file.txt").unwrap(); // Error! Panics.
+     let content = fs::read_to_string("non_existent_file.txt").unwrap(); // Error! Panics.
 }
 ```
 Ordering Enum: Represents the outcome of a comparison (core::Ordering::Less, core::Ordering::Equal, core::Ordering::Greater). Used with methods like cmp or in sorting algorithms.
