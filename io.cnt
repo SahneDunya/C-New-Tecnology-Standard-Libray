@@ -1,0 +1,50 @@
+// std/io.cnt
+// Standard library I/O module
+// This file declares the public interface for input/output operations.
+// The actual implementation is provided elsewhere (e.g., linked from a compiled library).
+
+// --- Console Output Functions ---
+
+// Prints a string slice to standard output.
+// This function does not append a newline.
+// Implementation typically interfaces with the operating system.
+pub fn print(message: string) -> void;
+
+// Prints a string slice to standard output, followed by a newline character.
+pub fn println(message: string) -> void;
+
+
+// --- Console Input Functions ---
+
+// Reads a single line from standard input until a newline character is encountered
+// or the end of the input stream is reached (EOF).
+// Returns the read line as a string.
+// Note: This is a simplified declaration. A real-world implementation would
+// likely return a Result<string, io::Error> to handle potential input errors
+// or the case of reading an empty line/EOF at the beginning.
+pub fn read_line() -> string;
+
+
+// --- File I/O Concepts (Declarations - Full implementation is complex) ---
+// File operations require more complex types for file handles and errors.
+// These types would likely be defined within the 'io' module itself or imported from 'core'.
+
+// Example declarations (commented out as full implementation is not covered yet):
+ pub struct File; // Represents an open file handle
+ pub enum Error { /* ... variants like NotFound, PermissionDenied, IoError ... */ } // I/O error types
+
+ pub fn open(path: string, mode: string) -> Result<File, io::Error>; // Open a file, returns File handle or Error
+ pub fn read(file: &mut File, buffer: &mut [u8]) -> Result<int, io::Error>; // Read into buffer, return bytes read or Error
+ pub fn write(file: &mut File, data: &[u8]) -> Result<int, io::Error>; // Write from slice, return bytes written or Error
+ pub fn close(file: File) -> Result<void, io::Error>; // Close a file (consumes the File handle) - Note: Drop often handles closing
+
+
+// --- Other potentially useful I/O functions ---
+ pub fn flush_stdout() -> void; // Ensure buffered output is written
+
+
+// Note on `string` type: In CNT, `string` is currently described as a slice (`&str` like).
+// Input functions like `read_line` might need to return an owned string type
+// (e.g., `std::collections::string::String` if implemented) or use mutable buffers.
+// The `string` type in this declaration assumes it works for both passing and returning.
+// A more precise implementation might require a dedicated 'OwnedString' type.

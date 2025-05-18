@@ -1,0 +1,144 @@
+// std/math.cnt
+// Standard library Math module
+// This file declares the public interface for common mathematical functions and constants.
+// The actual implementation is typically provided by linking against the system's math library.
+
+// --- Constants ---
+
+// The mathematical constant pi (π).
+pub let PI: float = 3.14159265358979323846; // Higher precision
+
+// The mathematical constant e.
+pub let E: float = 2.71828182845904523536; // Higher precision
+
+
+// --- Floating-Point Functions (Operating on 'float' type) ---
+
+// Computes the sine of x (in radians).
+pub fn sin(x: float) -> float;
+
+// Computes the cosine of x (in radians).
+pub fn cos(x: float) -> float;
+
+// Computes the tangent of x (in radians).
+pub fn tan(x: float) -> float;
+
+// Computes the principal value of the arc sine of x.
+// Returns a value in the range [-PI/2, PI/2] radians.
+pub fn asin(x: float) -> float;
+
+// Computes the principal value of the arc cosine of x.
+// Returns a value in the range [0, PI] radians.
+pub fn acos(x: float) -> float;
+
+// Computes the principal value of the arc tangent of x.
+// Returns a value in the range [-PI/2, PI/2] radians.
+pub fn atan(x: float) -> float;
+
+// Computes the principal value of the arc tangent of y/x, using the signs
+// of both arguments to determine the quadrant of the return value.
+// Returns a value in the range [-PI, PI] radians.
+pub fn atan2(y: float, x: float) -> float;
+
+// Computes the hyperbolic sine of x.
+pub fn sinh(x: float) -> float;
+
+// Computes the hyperbolic cosine of x.
+pub fn cosh(x: float) -> float;
+
+// Computes the hyperbolic tangent of x.
+pub fn tanh(x: float) -> float;
+
+// Computes the exponential function of x (e^x).
+pub fn exp(x: float) -> float;
+
+// Computes 2 raised to the power of x (2^x).
+pub fn exp2(x: float) -> float;
+
+// Computes the base-e logarithm of x (ln(x)).
+pub fn log(x: float) -> float; // Often aliased as ln
+
+// Computes the base-10 logarithm of x (log10(x)).
+pub fn log10(x: float) -> float;
+
+// Computes the base-2 logarithm of x (log2(x)).
+pub fn log2(x: float) -> float;
+
+// Computes x raised to the power of y (x^y).
+pub fn pow(x: float, y: float) -> float;
+
+// Computes the square root of x (√x).
+pub fn sqrt(x: float) -> float;
+
+// Computes the cubic root of x (³√x).
+pub fn cbrt(x: float) -> float;
+
+// Computes the absolute value of x.
+pub fn abs_float(x: float) -> float;
+
+// Returns the largest integer value not greater than x (rounds down).
+pub fn floor(x: float) -> float;
+
+// Returns the smallest integer value not less than x (rounds up).
+pub fn ceil(x: float) -> float;
+
+// Returns the integer value closest to x, rounding halfway cases away from zero.
+pub fn round(x: float) -> float;
+
+// Returns the integer value closest to x, truncating the fractional part.
+pub fn trunc(x: float) -> float;
+
+// Returns the floating-point remainder of x divided by y.
+pub fn fmod(x: float, y: float) -> float;
+
+// Returns the floating-point value that is x with the sign of y.
+pub fn copysign(x: float, y: float) -> float;
+
+
+// --- Integer Functions (Operating on 'int' type) ---
+// Assumes 'int' needs its own versions for some operations.
+
+// Returns the absolute value of x.
+pub fn abs_int(x: int) -> int;
+
+
+// --- Min/Max Functions ---
+// These ideally would be generic or overloaded, but declaring specific versions for now.
+
+// Returns the smaller of x and y.
+pub fn min_float(x: float, y: float) -> float;
+
+// Returns the larger of x and y.
+pub fn max_float(x: float, y: float) -> float;
+
+// Returns the smaller of x and y.
+pub fn min_int(x: int, y: int) -> int;
+
+// Returns the larger of x and y.
+pub fn max_int(x: int, y: int) -> int;
+
+
+// --- Floating-Point Property Checks ---
+
+// Checks if x is Not-a-Number (NaN).
+pub fn is_nan(x: float) -> bool;
+
+// Checks if x is positive or negative infinity.
+pub fn is_infinite(x: float) -> bool;
+
+// Checks if x is a finite number.
+pub fn is_finite(x: float) -> bool;
+
+// Checks if x is normal, subnormal, zero, infinite, or NaN.
+ pub fn classify(x: float) -> fp_classification_type; // Requires an enum for classification type
+
+
+// --- Other Potential Functions ---
+ pub fn clamp_float(x: float, min: float, max: float) -> float; // Clamp x to the range [min, max]
+ pub fn lerp(a: float, b: float, t: float) -> float; // Linear interpolation between a and b
+
+
+// Note on Implementation:
+// The implementation of these functions (the function bodies) is not in this file.
+// They are expected to be provided by a compiled library that your CNT compiler links against.
+// This library would likely wrap the standard C math library (`libm`).

@@ -1,0 +1,234 @@
+// std/net.cnt
+// Standard library Networking module
+// This module provides types and functions for networking, primarily TCP/UDP.
+
+// Import necessary types from other standard library modules.
+// Assuming Result<T, E> is defined in std::core.
+import std::core; // Imports items from std::core, including core::Result
+// Assuming basic integer types like u8, u16 exist.
+// Assuming string type exists.
+// Assuming byte slice syntax like &[u8], &mut [u8] exists.
+// Assuming core::void exists.
+
+// --- Error Handling for Network Operations ---
+
+// Represents the types of errors that can occur during network operations.
+// [Intended API]
+pub enum Error {
+    AddressError(string);       // Error parsing or resolving an address.
+    ConnectionRefused;        // Connection actively refused by the peer.
+    ConnectionReset;          // Connection reset by the peer.
+    ConnectionAborted;        // Connection aborted (e.g., by local OS).
+    SocketTimeout;            // Operation timed out.
+    NetworkUnreachable;       // Network is unreachable.
+    HostUnreachable;          // Host is unreachable.
+    NoData;                   // No data available (for non-blocking, or read past EOF).
+    WouldBlock;               // Operation would block (for non-blocking sockets).
+    AddressInUse;             // Address already in use.
+    InvalidInput;             // Invalid arguments provided.
+    IoError(string);          // Other underlying I/O or OS-specific errors.
+    // Add other specific error kinds (e.g., NotConnected, AlreadyConnected)
+}
+
+// --- IP Address ---
+
+// Represents an IP address (IPv4 or IPv6).
+// [Intended API]
+pub enum IpAddr {
+    V4(/* ... IPv4 representation, e.g., u8[4] */);
+    V6(/* ... IPv6 representation, e.g., u16[8] */);
+    // Maybe None or Unspecified variant?
+}
+
+// Implementation block for IpAddr methods (e.g., to_string)
+ impl IpAddr { /* ... */ }
+
+
+// --- Socket Address ---
+
+// Represents a socket address (IP address and port).
+// [Intended API]
+pub struct SocketAddr; // Placeholder struct
+
+// Implementation block for SocketAddr methods
+// [Intended API - requires compiler support for impl blocks]
+ impl SocketAddr {
+    // Creates a new SocketAddr from an IP address and a port number.
+     pub fn from_parts(ip: IpAddr, port: u16) -> SocketAddr;
+
+    // Parses a string like "127.0.0.1:8080" or "[::1]:80" into a SocketAddr.
+    // Returns Ok(SocketAddr) on success or Err(Error::AddressError) on failure.
+     pub fn from_string(addr: string) -> core::Result<SocketAddr, net::Error>;
+
+    // Returns the IP address part of the socket address.
+     pub fn ip(&self) -> IpAddr;
+
+    // Returns the port number part of the socket address.
+     pub fn port(&self) -> u16;
+
+    // Returns the string representation of the socket address.
+     pub fn to_string(&self) -> string; // Requires Display trait or dedicated method
+
+ } // Example impl block closing
+
+// Alternative standalone function style for SocketAddr construction/parsing:
+pub fn socket_addr_from_parts(ip: IpAddr, port: u16) -> SocketAddr;
+pub fn socket_addr_from_string(addr: string) -> core::Result<SocketAddr, net::Error>;
+pub fn socket_addr_ip(addr: &SocketAddr) -> IpAddr;
+pub fn socket_addr_port(addr: &SocketAddr) -> u16;
+
+
+// --- TCP Listener ---
+
+// A socket type that listens for incoming TCP connections.
+// [Intended API]
+pub struct TcpListener; // Placeholder struct
+
+// Implementation block for TcpListener methods
+// impl TcpListener {
+    // Creates a new TcpListener bound to the specified address.
+    // Returns Ok(TcpListener) on success or Err(Error) on failure (e.g., address in use).
+    // [Intended API - requires static methods or standalone function]
+     pub fn bind(addr: SocketAddr) -> core::Result<Self, net::Error>; // Self refers to TcpListener
+    // Alternative standalone function style:
+    pub fn tcp_listener_bind(addr: SocketAddr) -> core::Result<TcpListener, net::Error>;
+
+
+    // Accepts a new incoming connection from this listener.
+    // This function blocks until a connection is established.
+    // Returns a Result containing the connected TcpStream and the peer's address, or an Error.
+    // Requires an immutable reference as accept doesn't modify the listener's state, just gets a new connection.
+    // [Intended API - requires methods]
+     pub fn accept(&self) -> core::Result<(TcpStream, SocketAddr), net::Error>; // Returns a tuple
+    // Alternative standalone function style:
+    pub fn tcp_listener_accept(listener: &TcpListener) -> core::Result<core::Tuple<TcpStream, SocketAddr>, net::Error>; // Requires Tuple type
+
+    // Returns the local address that this listener is bound to.
+     pub fn local_addr(&self) -> core::Result<SocketAddr, net::Error>;
+     pub fn tcp_listener_local_addr(listener: &TcpListener) -> core::Result<SocketAddr, net::Error>;
+
+ } // Example impl block closing
+
+
+// --- TCP Stream ---
+
+// A connected TCP stream.
+// It implements Read and Write traits (if traits exist).
+// [Intended API]
+pub struct TcpStream; // Placeholder struct
+
+// Implementation block for TcpStream methods
+ impl TcpStream {
+    // Connects to the specified remote address.
+    // Returns Ok(TcpStream) on success or Err(Error) on failure (e.g., connection refused).
+    // [Intended API - requires static methods or standalone function]
+     pub fn connect(addr: SocketAddr) -> core::Result<Self, net::Error>; // Self refers to TcpStream
+    // Alternative standalone function style:
+    pub fn tcp_stream_connect(addr: SocketAddr) -> core::Result<TcpStream, net::Error>;
+
+
+    // Returns the local address of this stream.
+     pub fn local_addr(&self) -> core::Result<SocketAddr, net::Error>;
+    // Alternative standalone: pub fn tcp_stream_local_addr(stream: &TcpStream) -> core::Result<SocketAddr, net::Error>;
+
+    // Returns the remote address of this stream.
+     pub fn peer_addr(&self) -> core::Result<SocketAddr, net::Error>;
+    // Alternative standalone: pub fn tcp_stream_peer_addr(stream: &TcpStream) -> core::Result<SocketAddr, net::Error>;
+
+
+    // Reads data from the stream into the provided buffer.
+    // Returns Ok(bytes_read) (int) or Err(Error) on failure.
+    // Returns Ok(0) if the connection has been closed by the peer.
+    // Requires a mutable reference to the stream.
+    // [Intended API - requires methods and byte slice support]
+     pub fn read(&mut self, buf: &mut [u8]) -> core::Result<int, net::Error>;
+     // Alternative standalone function style:
+     pub fn tcp_stream_read(stream: &mut TcpStream, buf: &mut [u8]) -> core::Result<int, net::Error>;
+
+
+    // Writes data from the provided buffer into the stream.
+    // Returns Ok(bytes_written) (int) or Err(Error) on failure.
+    // Requires a mutable reference to the stream.
+    // [Intended API - requires methods and byte slice support]
+     pub fn write(&mut self, buf: &[u8]) -> core::Result<int, net::Error>;
+     // Alternative standalone function style:
+     pub fn tcp_stream_write(stream: &mut TcpStream, buf: &[u8]) -> core::Result<int, net::Error>;
+
+
+    // Shuts down the read, write, or both halves of the connection.
+    // [Intended API - requires methods and enum]
+     pub fn shutdown(&self, how: Shutdown) -> core::Result<void, net::Error>;
+     // Alternative standalone function style:
+     pub fn tcp_stream_shutdown(stream: &TcpStream, how: Shutdown) -> core::Result<void, net::Error>;
+
+    // Note: Dropping a TcpStream automatically closes the connection.
+    // An explicit `close` function might not be needed if Drop is handled correctly.
+
+ } // Example impl block closing
+
+
+// --- UDP Socket ---
+
+// A UDP socket for sending and receiving datagrams.
+// [Intended API]
+pub struct UdpSocket; // Placeholder struct
+
+// Implementation block for UdpSocket methods
+ impl UdpSocket {
+    // Creates a new UdpSocket bound to the specified address.
+    // Returns Ok(UdpSocket) on success or Err(Error) on failure.
+    // [Intended API - requires static methods or standalone function]
+     pub fn bind(addr: SocketAddr) -> core::Result<Self, net::Error>;
+    // Alternative standalone function style:
+    pub fn udp_socket_bind(addr: SocketAddr) -> core::Result<UdpSocket, net::Error>;
+
+
+    // Returns the local address that this socket is bound to.
+     pub fn local_addr(&self) -> core::Result<SocketAddr, net::Error>;
+    // Alternative standalone: pub fn udp_socket_local_addr(socket: &UdpSocket) -> core::Result<SocketAddr, net::Error>;
+
+
+    // Sends data from the buffer to the specified address.
+    // Returns Ok(bytes_sent) (int) or Err(Error) on failure.
+    // Requires an immutable reference as sending doesn't modify the socket's internal state (usually).
+    // [Intended API - requires methods and byte slice support]
+     pub fn send_to(&self, buf: &[u8], target_addr: SocketAddr) -> core::Result<int, net::Error>;
+     // Alternative standalone function style:
+     pub fn udp_socket_send_to(socket: &UdpSocket, buf: &[u8], target_addr: SocketAddr) -> core::Result<int, net::Error>;
+
+
+    // Receives data from the socket into the provided buffer.
+    // Returns Ok((bytes_read, sender_address)) or Err(Error) on failure.
+    // This function blocks until a datagram is received.
+    // Requires a mutable reference as receiving modifies the buffer.
+    // [Intended API - requires methods, byte slice support, and Tuple type]
+     pub fn recv_from(&mut self, buf: &mut [u8]) -> core::Result<(int, SocketAddr), net::Error>;
+     // Alternative standalone function style:
+     pub fn udp_socket_recv_from(socket: &mut UdpSocket, buf: &mut [u8]) -> core::Result<core::Tuple<int, SocketAddr>, net::Error>;
+
+    // Note: Dropping a UdpSocket automatically closes the socket.
+
+ } // Example impl block closing
+
+
+// --- Socket Shutdown ---
+
+// Used with `TcpStream::shutdown` to specify whether to shut down
+// the read half, the write half, or both halves of a TCP connection.
+// [Intended API]
+pub enum Shutdown {
+    Read;  // Shut down the read half.
+    Write; // Shut down the write half.
+    Both;  // Shut down both halves.
+}
+
+
+// --- Other Potential Types/Functions ---
+ pub enum IpAddrv4; // For IPv4 specific addresses
+ pub enum IpAddrv6; // For IPv6 specific addresses
+ pub fn lookup_host(host: string) -> core::Result<Iterator<SocketAddr>, net::Error>; // DNS resolution
+
+
+// Note on Implementation:
+// Implementation requires interacting with the operating system's networking APIs (sockets, bind, listen, accept, connect, send, recv, close, etc.)
+// via FFI (Foreign Function Interface). This is a complex module to implement fully.

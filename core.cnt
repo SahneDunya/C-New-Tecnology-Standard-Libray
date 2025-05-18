@@ -1,0 +1,230 @@
+// std/core.cnt
+// Standard library Core module
+// This module contains fundamental types, traits, and functions
+// that are essential for the entire language and standard library.
+// Items in this module are often automatically available or easily imported.
+
+// NOTE: This module heavily relies on features like explicit generics (<T, E> syntax),
+// traits, and potentially compiler-specific built-ins (like primitive type definitions
+// and magic for Copy/Drop).
+// The declarations below use syntax to illustrate the *intended* API.
+// You will need to implement support for these features in your compiler's Parser,
+// Sema, and CodeGen components.
+
+
+// --- Primitive and Fundamental Types ---
+// These types are typically built-in keywords in the language syntax and
+// directly supported by the compiler's TypeSystem and CodeGen.
+// Their declarations here are conceptual representations or aliases for clarity.
+
+// Boolean type, represents truth values.
+ pub struct bool; // Conceptual / Alias
+
+// Character type, represents a Unicode scalar value (UTF-8).
+ pub struct char; // Conceptual / Alias (often represented by a u8 or u32 internally depending on design)
+
+// Signed integer types with fixed width.
+// The default 'int' type's size is architecture-dependent.
+ pub struct int;  // Default integer size (e.g., i32 or i64 depending on target)
+pub struct i8;   // 8-bit signed integer
+pub struct i16;  // 16-bit signed integer
+pub struct i32;  // 32-bit signed integer
+pub struct i64;  // 64-bit signed integer
+
+// Unsigned integer types with fixed width.
+// pub struct uint; // Default unsigned integer size (architecture-dependent)
+pub struct u8;   // 8-bit unsigned integer
+pub struct u16;  // 16-bit unsigned integer
+pub struct u32;  // 32-bit unsigned integer
+pub struct u64;  // 64-bit unsigned integer
+
+// Floating-point types with fixed width.
+// The default 'float' type's size is architecture-dependent.
+ pub struct float; // Default float size (e.g., f32 or f64 depending on target)
+pub struct f32;   // 32-bit floating-point (IEEE 754)
+pub struct f64;   // 64-bit floating-point (IEEE 754)
+
+// The unit type, representing the absence of a value.
+// Often written as `()`. Conceptually an empty tuple/struct.
+pub struct void; // Represents the '()' type
+
+// String slice type. Represents a dynamically-sized view into a UTF-8 string in memory. Immutable.
+// Internally, this is typically a "fat pointer" (data pointer + length).
+ pub struct string; // Conceptual / Alias for &[u8] with UTF-8 guarantee, or { *const u8, size_t } struct
+
+// Integer type sufficient to represent the size of any object in memory.
+// Its size matches the pointer size of the target architecture.
+// [Intended API - requires architecture-dependent type or alias]
+pub type size_t = core::u64; // Example: Alias for u64 on a 64-bit target
+
+// Signed counterpart of `size_t`.
+// [Intended API]
+pub type isize = core::i64; // Example: Alias for i64 on a 64-bit target
+
+
+// --- Option Type ---
+
+// Represents a value that can be either present (`Some`) or absent (`None`).
+// Used for nullable values or operations that might not return a result.
+// [Intended API - requires compiler support for explicit generics]
+pub enum Option<T> {
+    Some(T); // Contains a value of type T.
+    None;    // Represents the absence of a value.
+}
+
+// Helper functions/methods for Option (often via impl blocks or traits)
+// [Intended API - requires impl blocks or standalone functions, and generics]
+ pub fn option_is_some<T>(opt: &Option<T>) -> core::bool;
+ pub fn option_unwrap<T>(opt: Option<T>) -> T; // Panics if None. Consumes opt.
+ pub fn option_unwrap_or<T>(opt: Option<T>, default: T) -> T; // Consumes opt.
+
+
+// --- Result Type ---
+
+// Represents a value that can be either a successful result (`Ok`) or an error (`Err`).
+// The standard way to handle fallible operations in CNT.
+// [Intended API - requires compiler support for explicit generics]
+pub enum Result<T, E> {
+    Ok(T);  // Contains the success value of type T.
+    Err(E); // Contains the error value of type E.
+}
+
+// Helper functions/methods for Result (often via impl blocks or traits)
+// [Intended API - requires impl blocks or standalone functions, and generics]
+ pub fn result_is_ok<T, E>(res: &Result<T, E>) -> core::bool;
+ pub fn result_unwrap<T, E>(res: Result<T, E>) -> T; // Panics if Err. Consumes res.
+ pub fn result_unwrap_err<T, E>(res: Result<T, E>) -> E; // Panics if Ok. Consumes res.
+// // Add combinators like `and_then`, `or_else`, `map`, `map_err` etc.
+
+
+// --- Ordering ---
+
+// Represents the outcome of a comparison between two values.
+// Used by comparison functions and the `cmp` method.
+// [Intended API]
+pub enum Ordering {
+    Less;    // The first value is less than the second.
+    Equal;   // The first value is equal to the second.
+    Greater; // The first value is greater than the second.
+}
+
+
+// --- Tuple Types (Placeholder) ---
+// Tuple types like (T1, T2) are fundamental composite types.
+// They might be compiler built-ins or represented by structs in core.
+// Defining them here conceptually or as structs requiring generics.
+// [Intended API - may require compiler built-ins or generic struct support]
+ pub struct Tuple2<T1, T2>(T1, T2); // Example for a 2-element tuple
+ pub struct Tuple3<T1, T2, T3>(T1, T2, T3); // Example for a 3-element tuple
+// ... and so on for different arities, or a variadic generic tuple type.
+
+
+// --- Fundamental Traits (Placeholder) ---
+// These traits define fundamental properties or capabilities that are often
+// recognized and handled specially by the compiler (e.g., for Copy/Drop semantics,
+// operator overloading, printing).
+// [Intended API - requires compiler support for a trait system]
+
+// Marker trait indicating that a type can be safely copied bitwise.
+// Types implementing Copy do not have their ownership moved on assignment,
+// function calls, or returns; instead, their value is duplicated.
+// The compiler automatically determines if a type implements Copy based on its structure
+// and whether it has a Drop implementation.
+pub trait Copy;
+
+// Marker trait indicating that a type needs cleanup when its owner goes out of scope.
+// Types implementing Drop have a compiler-generated 'drop' function called automatically
+// when the value is no longer accessible (owner goes out of scope, value is moved).
+// The compiler automatically determines if a type implements Drop based on its structure
+// and whether it has a field or variant that implements Drop, or if it's a built-in type
+// that manages resources (like owned String or Vec).
+pub trait Drop;
+
+// Trait for types that can be compared for equality and inequality.
+// Implementing this trait allows the use of `==` and `!=` operators.
+// [Intended API - requires PartialEq trait support]
+ pub trait PartialEq<Other = Self> {
+     pub fn eq(&self, other: &Other) -> core::bool; // Required method (==)
+      pub fn ne(&self, other: &Other) -> core::bool { !self.eq(other) } // Default method (!=)
+ }
+
+// Trait for types that can be compared for ordering (less than, greater than, equal).
+// Implementing this trait allows the use of `<`, `>`, `<=`, `>=` operators
+// and the `cmp` method, which returns an `Ordering`.
+// Requires `PartialEq`.
+// [Intended API - requires PartialOrd trait support]
+ pub trait PartialOrd<Other = Self>: PartialEq<Other> {
+      pub fn partial_cmp(&self, other: &Other) -> core::Option<Ordering>; // Required method (for floating point NaN)
+      pub fn lt(&self, other: &Other) -> core::bool { ... } // Default method (<)
+      pub fn le(&self, other: &Other) -> core::bool { ... } // Default method (<=)
+      pub fn gt(&self, other: &Other) -> core::bool { ... } // Default method (>)
+      pub fn ge(&self, other: &Other) -> core::bool { ... } // Default method (>=)
+ }
+
+// Trait for types that can be compared for a total ordering (all values are comparable).
+// Requires `PartialOrd`. Useful for sorting.
+// [Intended API - requires Ord trait support]
+ pub trait Ord: PartialOrd + Eq { // Eq trait is marker for total equality, often derived from PartialEq
+      pub fn cmp(&self, other: &Self) -> core::Ordering; // Required method
+//     // // Default methods using cmp
+      pub fn max(self, other: Self) -> Self;
+      pub fn min(self, other: Self) -> Self;
+ }
+
+// Trait for types that can be formatted for debugging output.
+// Used by debugging macros/functions (e.g., print! equivalent for debug).
+// Compiler might provide a derive macro for this (if macros exist).
+// [Intended API - requires trait system]
+ pub trait Debug {
+     pub fn fmt(&self, f: &mut Formatter) -> Result<core::void, Error>; // Requires Formatter type
+ }
+
+// Trait for types that can be formatted for display output (end-user friendly string representation).
+// Used by printing functions (e.g., print! equivalent for display).
+// Compiler might provide a derive macro for this (if macros exist).
+// [Intended API - requires trait system]
+ pub trait Display {
+     pub fn fmt(&self, f: &mut Formatter) -> Result<core::void, Error>; // Requires Formatter type
+ }
+
+ pub struct Formatter; // Placeholder for formatting logic state
+ pub struct Error;    // Placeholder Error type for formatting operations (e.g., write error)
+
+
+// --- Panic and Error Handling ---
+
+// Terminates the current thread or process immediately due to an unrecoverable error.
+// Prints the panic message to stderr.
+// [Intended API - compiler intrinsic or FFI]
+pub fn panic(message: string) -> core::void;
+
+// Halts the program if the condition is false. Panics with a message if condition is false.
+// Useful for sanity checks during development.
+// [Intended API - compiler intrinsic or macro]
+ pub fn assert(condition: core::bool, message: string) -> core::void;
+ pub fn assert_eq<A: PartialEq<B>, B>(left: A, right: B, message: string) -> core::void; // Requires generics, PartialEq
+
+
+// --- Basic Conversion (using Display trait if available) ---
+
+// Converts a value implementing the Display trait into a string slice.
+// [Intended API - requires generics and Display trait]
+ pub fn to_string<T: Display>(value: T) -> string;
+// Note: This might return an owned string (String) instead of a slice.
+ pub fn to_string<T: Display>(value: T) -> std::collections::string::String; // Requires String type from collections
+
+
+// --- Memory Operations (Low-level - Placeholder) ---
+// Functions for raw memory manipulation. Unsafe operations often go here.
+// [Intended API - compiler intrinsics or FFI]
+ pub fn memcpy(dest: *mut core::u8, src: *const core::u8, count: core::size_t) -> core::void; // Raw memory copy
+ pub fn memset(dest: *mut core::u8, value: core::u8, count: core::size_t) -> core::void; // Fill memory
+
+
+// Note on Implementation:
+// The types (especially primitives, Option, Result enums), traits (Copy, Drop, PartialEq),
+// and functions (panic, assert) in the core module are deeply intertwined with the compiler's
+// internal workings (type checking, ownership system, code generation patterns).
+// Many of these will likely be handled as compiler built-ins or require specific, low-level
+// compiler support rather than being implemented purely in CNT source code.
+// FFI might be needed for interactions with the operating system for panic or low-level memory.

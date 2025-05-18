@@ -1,0 +1,137 @@
+// std/thread.cnt
+// Standard library Threading module
+// This module provides facilities for creating and managing threads.
+
+// NOTE: The current CNT compiler design outlined so far does NOT include
+// full support for function pointers or closures as first-class types that can
+// be easily passed as function arguments. The declarations below use a syntax
+// like `fn() -> void` to illustrate the *intended* API.
+// You will need to implement support for callable types in your compiler.
+
+// Import necessary types from other standard library modules.
+// Assuming Result<T, E> is defined in std::core.
+import std::core; // Imports items from std::core, including core::Result
+ import std::time; // For sleep duration (if a dedicated Duration type exists)
+
+// --- Error Handling for Thread Operations ---
+
+// Represents the types of errors that can occur during thread operations.
+// [Intended API]
+pub enum Error {
+    SpawnError(string); // Failed to create the thread (e.g., system resource limits).
+    JoinError(string);  // Failed to join the thread (e.g., the thread panicked or terminated abnormally).
+    // Add other error kinds like DetachError if applicable.
+}
+
+// --- Thread Identifier ---
+
+// Represents the unique identifier of a running thread.
+// Can be used to distinguish threads.
+// [Intended API]
+pub struct ThreadId; // Placeholder struct for a thread identifier
+
+// Implementation block for ThreadId methods (if needed)
+ impl ThreadId {
+     pub fn as_int(&self) -> int; // Example: Get the underlying integer representation (use an appropriate integer type like u64)
+     pub fn current() -> ThreadId; // Example: Get the ID of the current thread
+ }
+
+
+// --- Thread Handle ---
+
+// A handle to a running thread.
+// This struct represents ownership of the underlying operating system thread resource.
+// The thread continues execution in the background after being spawned.
+// The handle must be `join`ed to wait for the thread and retrieve its result/status,
+// or `detach`ed to let the operating system clean up resources automatically upon termination.
+// If a `Thread` handle is dropped without being joined or detached, it typically leads
+// to an abnormal program termination or resource leak.
+// [Intended API]
+pub struct Thread; // Placeholder struct for a thread handle
+
+// Implementation block for Thread methods.
+// This syntax assumes the compiler supports 'impl' blocks for types and methods.
+// Alternatively, these could be standalone functions that take Thread/&Thread as the first argument.
+// [Intended API - requires compiler support for impl blocks or standalone functions]
+ impl Thread { // Example syntax for an implementation block
+
+    // Gets the `ThreadId` of this thread.
+    // Requires an immutable reference to the thread handle.
+    // [Intended API - requires compiler support for methods]
+     pub fn id(&self) -> ThreadId;
+    // Alternative standalone function style:
+    pub fn thread_id(thread: &Thread) -> ThreadId;
+
+
+    // Waits for the thread to finish.
+    // This function consumes the thread handle (`self` is moved into the function),
+    // ensuring the thread is properly cleaned up after completion.
+    // Returns Ok(void) on successful completion or Err(Error) if the thread terminated abnormally (e.g., panicked).
+    // [Intended API - requires compiler support for methods, move semantics for self, and Result]
+     pub fn join(self) -> core::Result<void, thread::Error>;
+    // Alternative standalone function style:
+    pub fn thread_join(thread: Thread) -> core::Result<void, thread::Error>;
+
+
+    // Detaches the thread, allowing it to run independently in the background.
+    // The operating system will clean up the thread's resources upon termination.
+    // This function consumes the thread handle (`self` is moved into the function).
+    // After detaching, the original handle is no longer valid, and the thread cannot be joined.
+    // [Intended API - requires compiler support for methods and move semantics for self]
+     pub fn detach(self) -> void;
+    // Alternative standalone function style:
+    pub fn thread_detach(thread: Thread) -> void;
+
+// } // Example impl block closing
+
+
+// --- Threading Functions ---
+
+// Spawns a new thread and executes the provided function 'f' in it.
+// The function 'f' represents the entry point or code to be run in the new thread.
+// Returns a `core::Result` containing a handle to the new thread (`Ok(Thread)`)
+// or an error (`Err(thread::Error)`) if the thread could not be created by the operating system.
+// The function 'f' should not capture variables from the surrounding scope directly
+// unless the compiler supports moving or copying the environment (closures).
+// [Intended API - requires compiler support for function pointers/closures and Result]
+pub fn spawn(f: fn() -> void) -> core::Result<thread::Thread, fs::Error>; // Should return thread::Error
+
+// Gets a handle to the currently executing thread.
+// [Intended API]
+pub fn current() -> Thread; // Note: Getting a handle to the current thread might have different ownership semantics than a spawned thread.
+
+// Gets the `ThreadId` of the currently executing thread.
+// This is a simpler way to get the ID without needing a Thread handle.
+// [Intended API]
+pub fn current_id() -> ThreadId;
+
+
+// --- Thread Control ---
+
+// Yields execution of the current thread to the thread scheduler.
+// This allows other threads to run.
+// [Intended API]
+pub fn yield_now() -> void;
+
+// Causes the current thread to sleep for the specified duration.
+// Duration is given in milliseconds for simplicity in this declaration.
+// A real library would likely use a dedicated `Duration` type from a time module.
+// [Intended API - Simplified duration type]
+pub fn sleep(millis: int) -> void;
+
+
+// --- Thread-Local Storage (Advanced - Placeholder) ---
+// Provides a way to store data that is local to each individual thread.
+// Typically requires more complex language features like statics and macros.
+// [Intended API - Requires compiler support for thread-local statics and macros]
+ pub struct LocalKey<T>; // Represents a key used to access thread-local data of type T.
+  impl LocalKey<T> {
+      pub fn with<F, R>(self: &'static Self, f: F) -> R; // Access the thread-local value using a closure F
+  }
+  pub macro_rules! thread_local { ... } // Macro to define thread-local statics
+
+
+// Note on Implementation:
+// Implementation requires interacting with the operating system's threading APIs (pthreads on Unix-like systems, Windows API on Windows)
+// via FFI (Foreign Function Interface). The complexity lies in safely passing the function/closure 'f' and any captured environment
+// to the new OS thread's entry point.

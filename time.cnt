@@ -1,0 +1,238 @@
+// std/time.cnt
+// Standard library Time module
+// This module provides types and functions for dealing with time, durations, and timestamps.
+
+// Import necessary types from other standard library modules.
+// Assuming Result<T, E> and basic integer/void types (u64, i64, u32, bool, void) are defined in std::core.
+import std::core; // Imports core::Result, core::u64, core::i64, core::u32, core::bool, core::void
+
+
+// --- Error Handling for Time Operations ---
+
+// Represents the types of errors that can occur during time operations.
+// [Intended API]
+pub enum Error {
+    SystemTimeError(string); // Error retrieving system time (e.g., clock not available, permission issues).
+    DurationError(string);   // Error creating or manipulating a duration (e.g., overflow during arithmetic).
+    // Add other specific error kinds if needed (e.g., ParseError for time strings).
+}
+
+
+// --- Duration ---
+
+// Represents a span of time, such as two minutes or 50 milliseconds.
+// Durations are non-negative.
+// [Intended API]
+pub struct Duration {
+    secs: core::u64;  // Whole seconds of the duration.
+    nanos: core::u32; // Fractional part of the duration in nanoseconds (0-999,999,999).
+}
+
+// Implementation block for Duration methods.
+// [Intended API - requires compiler support for impl blocks and potential operator overloading]
+ impl Duration { // Example syntax for an implementation block
+
+    // Creates a new `Duration` from the given number of seconds and additional nanoseconds.
+    // Panics if the nanoseconds are greater than 999,999,999.
+     pub fn new(secs: core::u64, nanos: core::u32) -> Duration;
+    // Alternative standalone function style:
+    pub fn duration_new(secs: core::u64, nanos: core::u32) -> Duration;
+
+
+    // Creates a new `Duration` from the given number of whole seconds.
+     pub fn from_secs(secs: core::u64) -> Duration;
+    // Alternative standalone:
+    pub fn duration_from_secs(secs: core::u64) -> Duration;
+
+    // Creates a new `Duration` from the given number of whole milliseconds.
+     pub fn from_millis(millis: core::u64) -> Duration;
+    // Alternative standalone:
+    pub fn duration_from_millis(millis: core::u64) -> Duration;
+
+    // Creates a new `Duration` from the given number of whole microseconds.
+     pub fn from_micros(micros: core::u64) -> Duration;
+    // Alternative standalone:
+    pub fn duration_from_micros(micros: core::u64) -> Duration;
+
+    // Creates a new `Duration` from the given number of whole nanoseconds.
+     pub fn from_nanos(nanos: core::u64) -> Duration;
+    // Alternative standalone:
+    pub fn duration_from_nanos(nanos: core::u64) -> Duration;
+
+
+    // Returns the total number of whole seconds in the duration.
+     pub fn as_secs(&self) -> core::u64;
+    // Alternative standalone:
+    pub fn duration_as_secs(duration: &Duration) -> core::u64;
+
+    // Returns the total number of whole milliseconds in the duration.
+     pub fn as_millis(&self) -> core::u64;
+    // Alternative standalone:
+    pub fn duration_as_millis(duration: &Duration) -> core::u64;
+
+    // Returns the total number of whole nanoseconds in the duration.
+     pub fn as_nanos(&self) -> core::u64;
+    // Alternative standalone:
+    pub fn duration_as_nanos(duration: &Duration) -> core::u64;
+
+
+    // Returns the nanosecond part of the duration.
+    // This is the fractional part after the number of whole seconds.
+     pub fn subsec_nanos(&self) -> core::u32;
+    // Alternative standalone:
+    pub fn duration_subsec_nanos(duration: &Duration) -> core::u32;
+
+
+    // Checked addition of durations. Returns Err(DurationError) if overflow occurs.
+     pub fn checked_add(&self, other: Duration) -> core::Result<Duration, time::Error>;
+    // Alternative standalone:
+    pub fn duration_checked_add(a: &Duration, b: &Duration) -> core::Result<Duration, time::Error>;
+
+
+    // Checked subtraction of durations. Returns Err(DurationError) if overflow or underflow (result would be negative) occurs.
+     pub fn checked_sub(&self, other: Duration) -> core::Result<Duration, time::Error>;
+    // Alternative standalone:
+    pub fn duration_checked_sub(a: &Duration, b: &Duration) -> core::Result<Duration, time::Error>;
+
+
+    // Checked multiplication of a duration by an unsigned integer. Returns Err(DurationError) if overflow occurs.
+     pub fn checked_mul(&self, other: core::u32) -> core::Result<Duration, time::Error>;
+    // Alternative standalone:
+    pub fn duration_checked_mul(duration: &Duration, factor: core::u32) -> core::Result<Duration, time::Error>;
+
+
+    // Checked division of a duration by an unsigned integer. Returns Err(DurationError) if the divisor is zero or overflow occurs.
+     pub fn checked_div(&self, other: core::u32) -> core::Result<Duration, time::Error>;
+    // Alternative standalone:
+    pub fn duration_checked_div(duration: &Duration, divisor: core::u32) -> core::Result<Duration, time::Error>;
+
+
+    // Comparison methods (if operator overloading for ==, <, etc. is not supported)
+     pub fn eq(&self, other: &Duration) -> core::bool; // Requires PartialEq trait
+     pub fn cmp(&self, other: &Duration) -> core::Ordering; // Requires PartialOrd/Ord traits, and Ordering enum
+
+
+ } // Example impl block closing
+
+// Comparison operators would typically be defined if operator overloading or traits are supported.
+ pub fn duration_eq(a: &Duration, b: &Duration) -> core::bool; // ==
+ pub fn duration_lt(a: &Duration, b: &Duration) -> core::bool; // <
+// ... other comparison operators
+
+
+// Arithmetic operators would typically be defined if operator overloading is supported.
+ pub fn duration_add(a: Duration, b: Duration) -> Duration; // + (might panic on overflow, or use checked_add)
+ pub fn duration_sub(a: Duration, b: Duration) -> Duration; // - (might panic on underflow, or use checked_sub)
+// ... other arithmetic operators
+
+
+// --- SystemTime ---
+
+// Represents a point in time relative to the Unix epoch (January 1, 1970 00:00:00 UTC).
+// This is often used for file timestamps or system-wide time.
+// It is not guaranteed to be monotonic (can be affected by clock changes).
+// [Intended API]
+pub struct SystemTime; // Placeholder struct
+
+// Implementation block for SystemTime methods.
+// [Intended API - requires compiler support for impl blocks]
+ impl SystemTime { // Example syntax
+
+    // Returns the current system time.
+    // This function may fail if the system clock is not available or readable.
+    // Returns Ok(SystemTime) on success or Err(Error::SystemTimeError) on failure.
+    // [Intended API - requires static methods and Result]
+     pub fn now() -> core::Result<SystemTime, time::Error>;
+    // Alternative standalone function style:
+    pub fn system_time_now() -> core::Result<SystemTime, time::Error>;
+
+
+    // Returns the SystemTime corresponding to the Unix epoch (January 1, 1970 00:00:00 UTC).
+    // [Intended API - requires static methods]
+     pub fn unix_epoch() -> SystemTime;
+    // Alternative standalone function style:
+    pub fn system_time_unix_epoch() -> SystemTime;
+
+
+    // Returns the amount of time elapsed from the epoch to this SystemTime.
+    // Returns Ok(Duration) or Err(Error) if the SystemTime is before the epoch (result would be negative).
+    // [Intended API - requires methods and Result]
+     pub fn duration_since_epoch(&self) -> core::Result<Duration, time::Error>;
+    // Alternative standalone function style:
+    pub fn system_time_duration_since_epoch(time: &SystemTime) -> core::Result<Duration, time::Error>;
+
+
+    // Returns the amount of time elapsed from this SystemTime to the epoch.
+    // Returns Ok(Duration) or Err(Error) if the SystemTime is after the epoch (result would be negative duration).
+    // [Intended API - requires methods and Result]
+     pub fn duration_until_epoch(&self) -> core::Result<Duration, time::Error>;
+    // Alternative standalone function style:
+    pub fn system_time_duration_until_epoch(time: &SystemTime) -> core::Result<Duration, time::Error>;
+
+
+    // Adds a duration to this SystemTime.
+    // Returns a new SystemTime or an Error if the result is out of the representable range.
+    // [Intended API - requires methods and Result]
+     pub fn checked_add(&self, duration: Duration) -> core::Result<SystemTime, time::Error>;
+
+    // Subtracts a duration from this SystemTime.
+    // Returns a new SystemTime or an Error if the result is out of the representable range.
+    // [Intended API - requires methods and Result]
+     pub fn checked_sub(&self, duration: Duration) -> core::Result<SystemTime, time::Error>;
+
+    // Computes the difference between two SystemTime values.
+    // Returns Ok(Duration) or Err(Error) if the result underflows (self is before earlier).
+    // [Intended API - requires methods and Result]
+     pub fn duration_since(&self, earlier: SystemTime) -> core::Result<Duration, time::Error>;
+
+
+    // Comparison methods (if operator overloading for ==, <, etc. is not supported)
+     pub fn eq(&self, other: &SystemTime) -> core::bool; // Requires PartialEq trait
+     pub fn cmp(&self, other: &SystemTime) -> core::Ordering; // Requires PartialOrd/Ord traits, and Ordering enum
+
+
+ } // Example impl block closing
+
+// Arithmetic operators would typically be defined if operator overloading is supported.
+ pub fn system_time_add_duration(time: SystemTime, duration: Duration) -> SystemTime; // time + duration (might panic or return Result)
+ pub fn system_time_sub_duration(time: SystemTime, duration: Duration) -> SystemTime; // time - duration (might panic or return Result)
+ pub fn system_time_sub_system_time(a: SystemTime, b: SystemTime) -> Duration; // a - b (Resulting duration, might error if a < b)
+
+
+// --- Instant (Advanced - Monotonic Time) ---
+// Represents a point in time measured by a monotonic clock.
+// Useful for measuring durations, not affected by system clock changes or time zone.
+// More suitable for benchmarking.
+// [Intended API - Requires compiler support for impl blocks]
+ pub struct Instant; // Placeholder
+  impl Instant {
+      pub fn now() -> Instant; // Get current monotonic time
+      pub fn elapsed(&self) -> Duration; // Duration since this instant
+      pub fn checked_add(&self, duration: Duration) -> core::Result<Instant, time::Error>;
+      pub fn checked_sub(&self, duration: Duration) -> core::Result<Instant, time::Error>;
+// //     // Comparison methods (eq, cmp)
+  }
+
+
+// --- Thread Sleeping ---
+
+// Causes the current thread to sleep for the specified duration.
+// This function blocks the calling thread.
+// Returns Ok(void) on success. May return Err(Error::SystemTimeError or similar) if interrupted or fails.
+// [Intended API - uses Duration type]
+pub fn sleep(duration: Duration) -> core::Result<core::void, time::Error>;
+
+// Note: A simpler version without Result might just be:
+ pub fn sleep(duration: Duration) -> core::void; // If interruption errors are not handled
+
+
+// --- Time Formatting and Parsing (Advanced) ---
+// Typically requires dedicated functions or a sub-module.
+ pub fn format_time(time: &SystemTime, format_string: string) -> core::Result<string, time::Error>;
+ pub fn parse_time(time_string: string, format_string: string) -> core::Result<SystemTime, time::Error>;
+
+
+// Note on Implementation:
+// Implementation requires interacting with the operating system's time APIs (e.g., gettimeofday, clock_gettime, Sleep, nanosleep, GetSystemTime, FileTimeToSystemTime)
+// via FFI (Foreign Function Interface). Handling different time sources (system clock vs. monotonic clock) is important.
+// Error handling involves mapping OS-specific error codes to the time::Error enum.
