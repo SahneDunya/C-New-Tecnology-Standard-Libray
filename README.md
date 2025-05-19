@@ -5,3 +5,7 @@ C New Technology Standard Library is a standard library developed by Sahne Düny
 1. file extension: source file: .cnt, Header file: .hnt (Header files are not needed in the programming language but can be used optionally)
 2. Underlying programming language: C/C++
 3. Which programming language was this project developed in?: C New Tecnology
+4. Mainly supported programming: Object-oriented (OOP)
+5. Memory management: ownership and borrowing
+6. Control structures: match (Pattern Matching)
+7. Module system: import
