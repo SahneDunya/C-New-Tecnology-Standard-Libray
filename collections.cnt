@@ -1,0 +1,139 @@
+// collections.cnt
+// Standart Koleksiyonlar modülü
+
+// List<T> yapısı için harici C veya sistem fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, List'in underlying veri yapısının (örn. dinamik dizi) bellek yönetimini
+// ve temel işlemlerini (ekleme, silme, boyutlandırma) düşük seviyede halleder.
+// T için bellek kopyalama/taşıma (copy/move) operasyonlarını da desteklemesi gerekir.
+extern fn _cnt_list_new<T>() -> List<T>;
+extern fn _cnt_list_push<T>(list: &mut List<T>, item: T) -> void;
+extern fn _cnt_list_pop<T>(list: &mut List<T>) -> Option<T>; // Option<T> dönüş tipi varsayılır
+extern fn _cnt_list_get<T>(list: &List<T>, index: int) -> Option<&T>; // Option<&T> dönüş tipi varsayılır
+extern fn _cnt_list_set<T>(list: &mut List<T>, index: int, item: T) -> bool; // Başarılıysa true, değilse false
+extern fn _cnt_list_len<T>(list: &List<T>) -> int;
+extern fn _cnt_list_clear<T>(list: &mut List<T>) -> void;
+// CNT'de "Drop" implementasyonu varsa, List'in scope dışına çıktığında elemanlarının temizlenmesi için
+// dahili bir mekanizma olması gerekir.
+
+/// `Option<T>` Enum'u: Bir değerin varlığını veya yokluğunu temsil eder.
+/// Bu, bir fonksiyonun değer döndürmeyebileceği durumlar için güvenli bir yoldur.
+enum Option<T> {
+    /// Bir değerin var olduğunu temsil eder.
+    Some(T);
+    /// Bir değerin olmadığını temsil eder.
+    None;
+}
+
+/// `List<T>`: Dinamik boyutlu, sıralı eleman koleksiyonu.
+/// Elemanlar bellekte bitişik (contiguous) olarak saklanır.
+/// `T` tipindeki tüm elemanların sahipliğini yönetir.
+pub struct List<T> {
+    // Dahili implementasyon detayları (örn. *void data_ptr, int capacity, int len)
+    // Dışarıya açılmaz, sadece _cnt_list_... fonksiyonları tarafından kullanılır.
+    _phantom_data: T; // Jenerik tipi belirtmek için (runtime'da bir karşılığı olmayabilir)
+}
+
+/// Yeni, boş bir `List<T>` oluşturur.
+///
+/// # Dönüş Değeri
+/// Yeni oluşturulmuş boş liste.
+pub fn new<T>() -> List<T> {
+    _cnt_list_new::<T>()
+}
+
+/// Listenin sonuna bir eleman ekler.
+/// Elemanın sahipliği listeye taşınır (move).
+///
+/// # Parametreler
+/// - `list`: Elemanın ekleneceği mutable liste referansı.
+/// - `item`: Listeye eklenecek eleman.
+pub fn push<T>(list: &mut List<T>, item: T) -> void {
+    _cnt_list_push(list, item);
+}
+
+/// Listenin sonundaki elemanı çıkarır ve döndürür.
+/// Eğer liste boşsa `Option::None` döndürür.
+/// Çıkarılan elemanın sahipliği çağıran tarafa aktarılır.
+///
+/// # Parametreler
+/// - `list`: Elemanın çıkarılacağı mutable liste referansı.
+///
+/// # Dönüş Değeri
+/// Listenin sonundaki elemanı içeren `Option::Some(T)` veya liste boşsa `Option::None`.
+pub fn pop<T>(list: &mut List<T>) -> Option<T> {
+    _cnt_list_pop(list)
+}
+
+/// Belirli bir indeksteki elemanın immutable referansını döndürür.
+/// Eğer indeks geçerli değilse `Option::None` döndürür.
+///
+/// # Parametreler
+/// - `list`: Elemanın alınacağı liste referansı.
+/// - `index`: Alınacak elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// Elemanın immutable referansını içeren `Option::Some(&T)` veya indeks geçersizse `Option::None`.
+pub fn get<T>(list: &List<T>, index: int) -> Option<&T> {
+    // Range kontrolü _cnt_list_get içinde veya burada yapılabilir.
+    if index < 0 || index >= len(list) {
+        return Option::None;
+    }
+    _cnt_list_get(list, index)
+}
+
+/// Belirli bir indeksteki elemanı günceller.
+/// Eğer indeks geçerli değilse `false` döndürür.
+/// Eski elemanın sahipliği serbest bırakılır, yeni elemanın sahipliği listeye taşınır.
+///
+/// # Parametreler
+/// - `list`: Elemanın güncelleneceği mutable liste referansı.
+/// - `index`: Güncellenecek elemanın indeksi.
+/// - `item`: Yeni eleman.
+///
+/// # Dönüş Değeri
+/// Güncelleme başarılıysa `true`, değilse `false`.
+pub fn set<T>(list: &mut List<T>, index: int, item: T) -> bool {
+    // Range kontrolü _cnt_list_set içinde veya burada yapılabilir.
+    if index < 0 || index >= len(list) {
+        return false;
+    }
+    _cnt_list_set(list, index, item)
+}
+
+
+/// Listenin eleman sayısını döndürür.
+///
+/// # Parametreler
+/// - `list`: Eleman sayısı alınacak liste referansı.
+///
+/// # Dönüş Değeri
+/// Listenin eleman sayısı.
+pub fn len<T>(list: &List<T>) -> int {
+    _cnt_list_len(list)
+}
+
+/// Listenin boş olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `list`: Kontrol edilecek liste referansı.
+///
+/// # Dönüş Değeri
+/// Liste boşsa `true`, değilse `false`.
+pub fn is_empty<T>(list: &List<T>) -> bool {
+    _cnt_list_len(list) == 0
+}
+
+/// Listedeki tüm elemanları temizler, listeyi boşaltır.
+/// Temizlenen elemanların sahipliği serbest bırakılır.
+///
+/// # Parametreler
+/// - `list`: Temizlenecek mutable liste referansı.
+pub fn clear<T>(list: &mut List<T>) -> void {
+    _cnt_list_clear(list);
+}
+
+// ---- Diğer İstenirse Eklenebilecek List Metotları ----
+// pub fn insert<T>(list: &mut List<T>, index: int, item: T) -> bool; // Belirli bir indekse eleman ekler
+// pub fn remove<T>(list: &mut List<T>, index: int) -> Option<T>; // Belirli bir indeksteki elemanı siler ve döndürür
+// pub fn contains<T>(list: &List<T>, item: &T) -> bool; // Liste bir elemanı içeriyor mu? (Equality Trait gerektirir)
+// pub fn iter<T>(list: &List<T>) -> Iterator<T>; // Liste üzerinde iterasyon (Iterator Trait gerektirir)
