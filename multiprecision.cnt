@@ -1,0 +1,546 @@
+// multiprecision.cnt
+// Çok Hassasiyetli Aritmetik Modülü
+// Keyfi boyutta tam sayı ve kayan nokta işlemleri için veri tipleri ve fonksiyonlar sağlar.
+
+import std::vec::Vec;       // Basamak dizisi için
+import std::string::String;  // Metin dönüşümleri için
+import std::fmt;           // Formatlama için
+import std::ops;           // Aritmetik operatörler için
+import std::assert;        // Hata ayıklama için
+import std::cmp;           // Karşılaştırma trait'leri için
+
+// Not: Bu implementasyon, temel aritmetik işlemler için
+// Rust'ın `num-bigint` veya `rug` gibi kütüphanelerinde kullanılan temel
+// algoritmaların basitleştirilmiş bir temsilidir.
+// Performans ve optimize edilmiş algoritmalar için daha derinlemesine bir implementasyon gerekir.
+// Burada, `u32` basamakları kullanarak 32-bitlik bir BigInt oluşturacağız.
+
+/// Her bir basamağın tabanı. `2^32` olarak varsayılır.
+const BASE: u64 = 0x1_0000_0000; // 2^32
+
+/// `BigInt`: Keyfi hassasiyetli bir tam sayıyı temsil eder.
+///
+/// Sayı, 32-bit'lik basamakların bir `Vec`'i olarak depolanır.
+/// `digits[0]` en düşük anlamlı basamaktır (LSB).
+/// İşaret ayrı olarak tutulur.
+pub struct BigInt {
+    digits: Vec<u32>, // Sayının mutlak değerinin basamakları (little-endian)
+    sign: Sign,       // Sayının işareti
+}
+
+/// `Sign`: `BigInt`'in işaretini temsil eder.
+enum Sign {
+    /// Pozitif sayı veya sıfır.
+    Positive,
+    /// Negatif sayı.
+    Negative,
+}
+
+impl BigInt {
+    /// `zero()`: Sıfır değerine sahip yeni bir `BigInt` oluşturur.
+    pub fn zero() -> BigInt {
+        BigInt {
+            digits: Vec::new(), // Boş digit Vec'i sıfırı temsil eder
+            sign: Sign::Positive,
+        }
+    }
+
+    /// `one()`: Bir değerine sahip yeni bir `BigInt` oluşturur.
+    pub fn one() -> BigInt {
+        let mut digits = Vec::new();
+        digits.push(1);
+        BigInt {
+            digits: digits,
+            sign: Sign::Positive,
+        }
+    }
+
+    /// `from_u66(val: u64)`: `u64` değerinden yeni bir `BigInt` oluşturur.
+    pub fn from_u64(val: u64) -> BigInt {
+        if val == 0 {
+            return BigInt::zero();
+        }
+        let mut digits = Vec::new();
+        digits.push((val & 0xFFFFFFFF) as u32);
+        if val > 0xFFFFFFFF {
+            digits.push((val >> 32) as u32);
+        }
+        BigInt {
+            digits: digits,
+            sign: Sign::Positive,
+        }
+    }
+
+    /// `from_i64(val: i64)`: `i64` değerinden yeni bir `BigInt` oluşturur.
+    pub fn from_i64(val: i64) -> BigInt {
+        if val == 0 {
+            return BigInt::zero();
+        }
+        let sign = if val < 0 { Sign::Negative } else { Sign::Positive };
+        let abs_val = if val < 0 { (val as u64).wrapping_neg() } else { val as u64 }; // Mutlak değeri al
+        let mut bi = BigInt::from_u64(abs_val);
+        bi.sign = sign;
+        bi
+    }
+
+    /// `parse(s: String) -> Option<BigInt>`: Bir string'ten `BigInt` oluşturur.
+    /// Onluk tabanda olduğu varsayılır.
+    pub fn parse(s: String) -> option::Option<BigInt> {
+        let mut chars = s.chars();
+        let mut sign = Sign::Positive;
+        let mut first_char_opt = chars.next();
+
+        // İşareti kontrol et
+        if let option::Option::Some(c) = first_char_opt {
+            if c == '-' {
+                sign = Sign::Negative;
+            } else if c == '+' {
+                // Pozitif işaret açıkça belirtilmiş, bir sonraki karaktere geç
+            } else if !c.is_digit(10) {
+                return option::Option::None; // Geçersiz ilk karakter
+            } else {
+                // İlk karakter sayı, ilk karakteri tekrar işlemek için iterator'ı sıfırla
+                first_char_opt = option::Option::Some(c); // iterator'ı baştan başlatamayacağımız için simüle ediyoruz
+                // Bu basit bir yaklaşımdır, gerçek bir parser'da iterator'ı tekrar kullanırdık.
+                // Şimdilik, eğer ilk karakter sayı ise, string'in tamamını kullanacağız ve ilk karakteri normal bir basamak gibi işleyeceğiz.
+                // Bu örnek için, eğer ilk karakter sayı ise, aslında `s.chars()` 'ın ilk karakteri de dahil olmak üzere tüm stringi işleriz.
+                // Bu nedenle, `first_char_opt`'ı tekrar işlemek yerine, `s`'yi direkt işlemek daha iyi.
+                // `s.trim_start_matches('+').to_string()` gibi bir şey daha iyi olurdu ama string metotları kısıtlı.
+            }
+        } else {
+            return option::Option::None; // Boş string
+        }
+
+        // Eğer işaret varsa, string'in geri kalanını al
+        let num_str = if s.starts_with("-") || s.starts_with("+") {
+            s.slice(1, s.len()) // Varsayımsal string slice metodu
+        } else {
+            s
+        };
+
+        if num_str.is_empty() {
+            return option::Option::None;
+        }
+
+        let mut res = BigInt::zero();
+        let ten = BigInt::from_u64(10);
+
+        for c in num_str.chars() {
+            if !c.is_digit(10) {
+                return option::Option::None; // Sayı olmayan karakter
+            }
+            let digit_val = BigInt::from_u64(c.to_digit(10) as u64);
+            res = res * ten.clone(); // Mevcut sonucu 10 ile çarp
+            res = res + digit_val;   // Yeni basamağı ekle
+        }
+
+        res.sign = sign;
+        res.normalize(); // Sıfır için işareti ayarla
+        option::Option::Some(res)
+    }
+
+    /// `to_string(&self) -> String`: `BigInt`'i onluk tabanda bir string olarak döndürür.
+    pub fn to_string(&self) -> String {
+        if self.is_zero() {
+            return "0".to_string();
+        }
+
+        let mut s = String::new();
+        if self.sign == Sign::Negative {
+            s.push_char('-');
+        }
+
+        // Basamakları tersine çevirip yaz. Bu kısım onluk tabana dönüştürme algoritmalarına ihtiyaç duyar.
+        // Genellikle tekrarlı bölme ve kalan bulma ile yapılır.
+        // Basitlik adına, burada `__builtin_bigint_to_string` gibi bir intrinsik varsayalım.
+        // Veya `u32` basamaklarından manuel olarak dönüştürme yapalım (daha karmaşık).
+
+        // Manuel onluk tabana dönüştürme (karmaşık ama gerçekçi)
+        let mut temp_digits = self.digits.clone();
+        let mut result_chars: Vec<char> = Vec::new();
+        let ten = BigInt::from_u64(10);
+
+        // temp_digits sıfır olana kadar döngü
+        while !BigInt { digits: temp_digits.clone(), sign: Sign::Positive }.is_zero() {
+            let mut remainder_digits = Vec::new();
+            let mut current_remainder = 0u64;
+            let mut new_digits = Vec::new();
+            let mut non_zero_found = false;
+
+            for i in (0..temp_digits.len()).rev() { // En yüksek basamaktan başla
+                let full_digit = (current_remainder << 32) | (temp_digits[i] as u64);
+                let div = full_digit / 10;
+                let rem = full_digit % 10;
+
+                current_remainder = rem;
+
+                if div != 0 || non_zero_found {
+                    new_digits.insert(0, div as u32); // Başa ekle
+                    non_zero_found = true;
+                }
+            }
+
+            result_chars.insert(0, (current_remainder as u8 + '0' as u8) as char); // Kalanı karaktere dönüştür ve başa ekle
+
+            // Yeni basamak listesi oluştur, öndeki sıfırları temizle
+            let mut trimmed_new_digits = Vec::new();
+            let mut leading_zeros = true;
+            for &digit in new_digits.iter() {
+                if leading_zeros && digit == 0 {
+                    continue;
+                }
+                leading_zeros = false;
+                trimmed_new_digits.push(digit);
+            }
+            temp_digits = trimmed_new_digits;
+        }
+
+        // Eğer başlangıçta sıfırsa (boş result_chars) '0' ekle
+        if result_chars.is_empty() {
+            s.push_char('0');
+        } else {
+            for &c in result_chars.iter() {
+                s.push_char(c);
+            }
+        }
+        s
+    }
+
+    /// `is_zero(&self) -> bool`: Sayının sıfır olup olmadığını kontrol eder.
+    pub fn is_zero(&self) -> bool {
+        self.digits.is_empty() || (self.digits.len() == 1 && self.digits[0] == 0)
+    }
+
+    /// `normalize(&mut self)`: Öndeki sıfırları kaldırır ve sıfırsa işareti Positive yapar.
+    fn normalize(&mut self) {
+        while self.digits.len() > 0 && self.digits[self.digits.len() - 1] == 0 {
+            self.digits.pop();
+        }
+        if self.is_zero() {
+            self.sign = Sign::Positive;
+        }
+    }
+
+    // --- Dahili Aritmetik Yardımcı Fonksiyonlar ---
+
+    // abs_add: Mutlak değerleri toplar (işaretten bağımsız)
+    fn abs_add(a_digits: &Vec<u32>, b_digits: &Vec<u32>) -> Vec<u32> {
+        let max_len = std::cmp::max(a_digits.len(), b_digits.len());
+        let mut result_digits = Vec::with_capacity(max_len + 1);
+        let mut carry = 0u64;
+
+        for i in 0..max_len {
+            let val_a = if i < a_digits.len() { a_digits[i] as u64 } else { 0 };
+            let val_b = if i < b_digits.len() { b_digits[i] as u64 } else { 0 };
+
+            let sum = val_a + val_b + carry;
+            result_digits.push((sum & 0xFFFFFFFF) as u32);
+            carry = sum >> 32;
+        }
+        if carry > 0 {
+            result_digits.push(carry as u32);
+        }
+        result_digits
+    }
+
+    // abs_sub: Mutlak değerleri çıkarır (a_digits > b_digits olmalı)
+    fn abs_sub(a_digits: &Vec<u32>, b_digits: &Vec<u32>) -> Vec<u32> {
+        let mut result_digits = Vec::with_capacity(a_digits.len());
+        let mut borrow = 0i64;
+
+        for i in 0..a_digits.len() {
+            let val_a = a_digits[i] as i64;
+            let val_b = if i < b_digits.len() { b_digits[i] as i64 } else { 0 };
+
+            let diff = val_a - val_b - borrow;
+            if diff < 0 {
+                result_digits.push((diff + BASE as i64) as u32);
+                borrow = 1;
+            } else {
+                result_digits.push(diff as u32);
+                borrow = 0;
+            }
+        }
+        result_digits
+    }
+}
+
+// --- Operatör Aşırı Yüklemeleri ---
+
+impl ops::Add for BigInt {
+    type Output = BigInt;
+    fn add(self, other: BigInt) -> BigInt {
+        if self.sign == other.sign {
+            // İşaretler aynıysa mutlak değerleri topla, işareti koru
+            let mut result = BigInt {
+                digits: BigInt::abs_add(&self.digits, &other.digits),
+                sign: self.sign,
+            };
+            result.normalize();
+            result
+        } else {
+            // İşaretler farklıysa mutlak değerleri çıkar
+            // Hangi sayının mutlak değerce daha büyük olduğunu bul
+            match self.abs_cmp(&other) {
+                cmp::Ordering::Greater => {
+                    let mut result = BigInt {
+                        digits: BigInt::abs_sub(&self.digits, &other.digits),
+                        sign: self.sign,
+                    };
+                    result.normalize();
+                    result
+                }
+                cmp::Ordering::Less => {
+                    let mut result = BigInt {
+                        digits: BigInt::abs_sub(&other.digits, &self.digits),
+                        sign: other.sign,
+                    };
+                    result.normalize();
+                    result
+                }
+                cmp::Ordering::Equal => BigInt::zero(), // Sonuç sıfır
+            }
+        }
+    }
+}
+
+impl ops::Sub for BigInt {
+    type Output = BigInt;
+    fn sub(self, other: BigInt) -> BigInt {
+        self + (-other) // Çıkarma, diğerinin işaretini tersine çevirip toplama
+    }
+}
+
+impl ops::Neg for BigInt {
+    type Output = BigInt;
+    fn neg(mut self) -> BigInt {
+        if self.is_zero() {
+            self.sign = Sign::Positive; // Sıfır her zaman pozitif
+        } else {
+            self.sign = if self.sign == Sign::Positive { Sign::Negative } else { Sign::Positive };
+        }
+        self
+    }
+}
+
+impl ops::Mul for BigInt {
+    type Output = BigInt;
+    fn mul(self, other: BigInt) -> BigInt {
+        if self.is_zero() || other.is_zero() {
+            return BigInt::zero();
+        }
+
+        let mut result_digits = Vec::with_capacity(self.digits.len() + other.digits.len());
+        for _i in 0..(self.digits.len() + other.digits.len()) {
+            result_digits.push(0); // Sonuç dizisini sıfırlarla başlat
+        }
+
+        // Basit çarpma algoritması (Okul yöntemi)
+        for i in 0..self.digits.len() {
+            let mut carry = 0u64;
+            for j in 0..other.digits.len() {
+                let product = (self.digits[i] as u64) * (other.digits[j] as u64) +
+                              (result_digits[i + j] as u64) + carry;
+                result_digits[i + j] = (product & 0xFFFFFFFF) as u32;
+                carry = product >> 32;
+            }
+            if carry > 0 {
+                result_digits[i + other.digits.len()] = (result_digits[i + other.digits.len()] as u64 + carry) as u32;
+            }
+        }
+
+        let result_sign = if self.sign == other.sign { Sign::Positive } else { Sign::Negative };
+        let mut result = BigInt {
+            digits: result_digits,
+            sign: result_sign,
+        };
+        result.normalize();
+        result
+    }
+}
+
+// `Div` ve `Rem` implementasyonları daha karmaşıktır ve burada bırakılmıştır.
+// Genellikle "long division" (uzun bölme) algoritmaları kullanılır.
+
+// --- Karşılaştırma Operatörleri ---
+
+impl cmp::PartialEq for BigInt {
+    fn eq(&self, other: &BigInt) -> bool {
+        // Her ikisi de sıfırsa eşit
+        if self.is_zero() && other.is_zero() {
+            return true;
+        }
+        // İşaretler ve basamaklar eşleşmeli
+        self.sign == other.sign && self.digits == other.digits
+    }
+}
+
+impl cmp::Eq for BigInt {} // PartialEq'den türetilir
+
+impl cmp::PartialOrd for BigInt {
+    fn partial_cmp(&self, other: &BigInt) -> option::Option<cmp::Ordering> {
+        option::Option::Some(self.cmp(other))
+    }
+}
+
+impl cmp::Ord for BigInt {
+    fn cmp(&self, other: &BigInt) -> cmp::Ordering {
+        if self.sign == Sign::Positive && other.sign == Sign::Negative {
+            return cmp::Ordering::Greater;
+        }
+        if self.sign == Sign::Negative && other.sign == Sign::Positive {
+            return cmp::Ordering::Less;
+        }
+
+        // İşaretler aynıysa
+        if self.sign == Sign::Positive {
+            // Her ikisi de pozitifse, mutlak değerleri karşılaştır
+            self.abs_cmp(other)
+        } else { // Her ikisi de negatifse
+            // Mutlak değerleri karşılaştır ve sırasını tersine çevir
+            match self.abs_cmp(other) {
+                cmp::Ordering::Less => cmp::Ordering::Greater,
+                cmp::Ordering::Greater => cmp::Ordering::Less,
+                cmp::Ordering::Equal => cmp::Ordering::Equal,
+            }
+        }
+    }
+}
+
+impl BigInt {
+    // abs_cmp: Sayıların mutlak değerlerini karşılaştırır.
+    fn abs_cmp(&self, other: &BigInt) -> cmp::Ordering {
+        if self.digits.len() > other.digits.len() {
+            return cmp::Ordering::Greater;
+        }
+        if self.digits.len() < other.digits.len() {
+            return cmp::Ordering::Less;
+        }
+
+        // Uzunluklar aynıysa, en yüksek basamaktan başlayarak karşılaştır
+        for i in (0..self.digits.len()).rev() {
+            if self.digits[i] > other.digits[i] {
+                return cmp::Ordering::Greater;
+            }
+            if self.digits[i] < other.digits[i] {
+                return cmp::Ordering::Less;
+            }
+        }
+        cmp::Ordering::Equal // Tüm basamaklar eşit
+    }
+}
+
+// Yardımcı format makrosu (CNT'nin fmt modülüne bağlı)
+// format_str! makrosunun nasıl çalıştığına dair varsayımsal bir gösterim.
+// Normalde bu fmt modülünde tanımlanır ve çeşitli türlerle çalışır.
+// Basitlik adına, sadece String ve sayıları destekleyen bir varsayım.
+
+macro_rules! format_str {
+    ($fmt:literal $(, $args:expr)*) => {
+        // Bu kısım gerçek bir makro implementasyonu gerektirir.
+        // String'in ve argümanların nasıl birleştirileceğini simüle eder.
+        {
+            let mut s = String::new();
+            s.push_str($fmt); // Basitçe format string'ini ekle
+            // Gerçek bir makro, argümanları ayrıştırır ve yerine koyar.
+            s
+        }
+    };
+}
+
+
+
+// --- Örnek Kullanım ---
+
+import std::math::multiprecision::BigInt;
+import std::io;
+import std::string::String;
+import std::option::Option;
+import std::cmp;
+
+fn main() {
+    io::println("Starting Multiprecision BigInt example...".to_string());
+
+    // 1. Oluşturma
+    let a = BigInt::from_u64(12345678901234567890);
+    let b = BigInt::from_i64(-9876543210987654321);
+    let c = BigInt::from_u64(5);
+    let d = BigInt::parse("10000000000000000000000000000000000".to_string()).unwrap(); // Çok büyük sayı
+    let e = BigInt::parse("-789".to_string()).unwrap();
+    let zero = BigInt::zero();
+    let one = BigInt::one();
+
+    io::println("a: ".to_string() + a.to_string()); // 12345678901234567890
+    io::println("b: ".to_string() + b.to_string()); // -9876543210987654321
+    io::println("c: ".to_string() + c.to_string()); // 5
+    io::println("d: ".to_string() + d.to_string()); // 1 ile başlayan çok büyük sayı
+    io::println("e: ".to_string() + e.to_string()); // -789
+    io::println("Zero: ".to_string() + zero.to_string()); // 0
+    io::println("One: ".to_string() + one.to_string());   // 1
+
+
+    // 2. Toplama
+    io::println("\n--- Addition ---".to_string());
+    let sum_a_c = a.clone() + c.clone();
+    io::println("a + c = ".to_string() + sum_a_c.to_string()); // 12345678901234567895
+
+    let sum_d_c = d.clone() + c.clone();
+    io::println("d + c = ".to_string() + sum_d_c.to_string()); // d'nin sonu 5 olur
+
+    let sum_a_b = a.clone() + b.clone();
+    io::println("a + b = ".to_string() + sum_a_b.to_string()); // 2469135690370370370 + 5 + (-9876543210987654321) = 2469135690370370370 (basit bir örnek)
+    // Gerçek değer: 12345678901234567890 + (-9876543210987654321) = 2469135690370370370 - bu hata, matematiksel olarak yanlış.
+    // Doğrusu: 12345678901234567890 - 9876543210987654321 = 2469135690245813569
+
+    // düzeltilmiş örnek için
+    let x = BigInt::from_i64(100);
+    let y = BigInt::from_i64(-50);
+    let sum_x_y = x.clone() + y.clone();
+    io::println("100 + (-50) = ".to_string() + sum_x_y.to_string()); // 50
+
+    let p = BigInt::from_i64(-100);
+    let q = BigInt::from_i64(50);
+    let sum_p_q = p.clone() + q.clone();
+    io::println("-100 + 50 = ".to_string() + sum_p_q.to_string()); // -50
+
+    let r = BigInt::from_i64(-100);
+    let s = BigInt::from_i64(-50);
+    let sum_r_s = r.clone() + s.clone();
+    io::println("-100 + (-50) = ".to_string() + sum_r_s.to_string()); // -150
+
+
+    // 3. Çıkarma
+    io::println("\n--- Subtraction ---".to_string());
+    let sub_a_c = a.clone() - c.clone();
+    io::println("a - c = ".to_string() + sub_a_c.to_string()); // 12345678901234567885
+
+    let sub_zero_c = zero.clone() - c.clone();
+    io::println("0 - c = ".to_string() + sub_zero_c.to_string()); // -5
+
+
+    // 4. Çarpma
+    io::println("\n--- Multiplication ---".to_string());
+    let mul_c_c = c.clone() * c.clone();
+    io::println("c * c = ".to_string() + mul_c_c.to_string()); // 25
+
+    let mul_one_d = one.clone() * d.clone();
+    io::println("1 * d = ".to_string() + mul_one_d.to_string()); // d'nin kendisi
+
+    let mul_a_e = a.clone() * e.clone(); // 12345678901234567890 * -789
+    io::println("a * e = ".to_string() + mul_a_e.to_string()); // Büyük negatif sayı
+
+    // 5. Karşılaştırma
+    io::println("\n--- Comparison ---".to_string());
+    io::println("a > c: ".to_string() + (a > c).to_string()); // true
+    io::println("b < zero: ".to_string() + (b < zero).to_string()); // true
+    io::println("a == a: ".to_string() + (a == a).to_string()); // true
+    io::println("zero == BigInt::from_i64(0): ".to_string() + (zero == BigInt::from_i64(0)).to_string()); // true
+
+    // Farklı işaretli sayıların karşılaştırması
+    let neg_hundred = BigInt::from_i64(-100);
+    let pos_fifty = BigInt::from_i64(50);
+    io::println("-100 < 50: ".to_string() + (neg_hundred < pos_fifty).to_string()); // true
+
+
+    io::println("Multiprecision BigInt example finished.".to_string());
+}
