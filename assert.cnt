@@ -1,0 +1,145 @@
+// assert.cnt
+// Standart İddia (Assertion) Modülü
+// Hata ayıklama sırasında programlama varsayımlarını doğrulamak için kullanılır.
+
+import std::string; // Hata mesajları için
+import std::io;     // Hata mesajlarını yazdırmak için (stderr'e)
+import std::os;     // Programı sonlandırmak için (varsa)
+
+// İddia mekanizmasının davranışını kontrol eden derleyici bayrağı.
+// `CNT_DEBUG` veya benzeri bir bayrak varsa, iddialar etkinleştirilir.
+// Aksi takdirde (örneğin, release build'de), iddialar kaldırılır.
+// Bu, derleyici düzeyinde bir yönerge veya makro ile kontrol edilir.
+// Örnek bir derleyici direktifi:
+ #if defined(CNT_DEBUG)
+ #define CNT_ASSERT_ENABLED true
+ #else
+ #define CNT_ASSERT_ENABLED false
+ #endif
+
+// Extern fonksiyonlar: Eğer assert'ler, CNT'nin çekirdeği tarafından yönetilen
+// özel bir hata işleme veya programı sonlandırma mekanizması gerektiriyorsa.
+extern fn _cnt_assert_fail(message: &string, file: &string, line: int, column: int);
+
+
+/// `assert` makrosu/fonksiyonu: Verilen koşul `false` ise programı durdurur.
+///
+/// Bu iddia genellikle geliştirme aşamasında kullanılır ve bir varsayımın
+/// doğru olduğunu doğrular. Koşul `false` ise, bir hata mesajı yazdırılır
+/// ve program sonlandırılır. Üretim (release) derlemelerinde genellikle
+/// derleyici tarafından tamamen kaldırılır.
+///
+/// # Kullanım
+/// `assert!(koşul, "Koşulun doğru olması bekleniyordu.");`
+///
+/// # Parametreler
+/// - `condition`: Kontrol edilecek boolean ifade.
+/// - `message`: Koşul `false` olduğunda yazdırılacak hata mesajı.
+// CNT'de doğrudan makro desteği yoksa, bu bir fonksiyon olarak tasarlanır,
+// ancak gerçek bir `assert` genellikle compile-time makro gibidir.
+// Basitlik adına, burada fonksiyon gibi davranan bir implementasyon sunulmuştur.
+pub fn assert(condition: bool, message: &string) -> void {
+    // CNT_ASSERT_ENABLED derleme zamanı sabiti varsayılır.
+    if CNT_ASSERT_ENABLED {
+        if !condition {
+            let file_name = "unknown_file.cnt".to_string(); // Gerçek dosya adını almanın bir yolu olmalı
+            let line_num = 0; // Gerçek satır numarasını almanın bir yolu olmalı
+            let col_num = 0; // Gerçek sütun numarasını almanın bir yolu olmalı
+
+            // Hata mesajını stderr'e yazdır
+            io::stderr_println("Assertion Failed: ".to_string() + message);
+            io::stderr_println("    File: ".to_string() + file_name);
+            io::stderr_println("    Line: ".to_string() + string::from_int(line_num));
+            io::stderr_println("    Column: ".to_string() + string::from_int(col_num));
+
+            // Programı sonlandır
+            // _cnt_assert_fail çağrılabilir veya doğrudan os::exit(1) kullanılabilir.
+            os::exit(1);
+        }
+    }
+}
+
+/// `assert_eq` makrosu/fonksiyonu: İki değerin eşit olduğunu iddia eder.
+///
+/// Eşit değilse bir hata mesajı yazdırılır ve program sonlandırılır.
+///
+/// # Kullanım
+/// `assert_eq!(deger1, deger2, "Değerler eşit olmalıydı.");`
+///
+/// # Parametreler
+/// - `left`: Karşılaştırılacak ilk değer.
+/// - `right`: Karşılaştırılacak ikinci değer.
+/// - `message`: Eşit olmadıklarında yazdırılacak hata mesajı.
+// Bu fonksiyonlar için de generic (T) kullanımı idealdir, ancak CNT'de yoksa
+// her tip için ayrı ayrı tanımlanabilir veya string dönüşümüyle çalışılabilir.
+pub fn assert_eq_int(left: int, right: int, message: &string) -> void {
+    if CNT_ASSERT_ENABLED {
+        if left != right {
+            let error_msg = "Expected: ".to_string() + string::from_int(left) +
+                            ", Got: ".to_string() + string::from_int(right) +
+                            " - ".to_string() + message;
+            assert(false, &error_msg); // assert fonksiyonunu kullanarak hata işleme
+        }
+    }
+}
+
+pub fn assert_eq_string(left: &string, right: &string, message: &string) -> void {
+    if CNT_ASSERT_ENABLED {
+        if left != right {
+            let error_msg = "Expected: \"".to_string() + left +
+                            "\", Got: \"".to_string() + right +
+                            "\" - ".to_string() + message;
+            assert(false, &error_msg);
+        }
+    }
+}
+
+// Diğer temel tipler için assert_eq_u8, assert_eq_f, vb. eklenebilir.
+// Kayan nokta karşılaştırmaları için `std::float::almost_equal` kullanılmalıdır.
+pub fn assert_eq_float(left: float, right: float, epsilon: float, message: &string) -> void {
+    if CNT_ASSERT_ENABLED {
+        if !float::almost_equal_f(left, right, epsilon) {
+            let error_msg = "Expected: ".to_string() + string::from_float(left) +
+                            ", Got: ".to_string() + string::from_float(right) +
+                            " (within epsilon ".to_string() + string::from_float(epsilon) +
+                            ") - ".to_string() + message;
+            assert(false, &error_msg);
+        }
+    }
+}
+
+/// `assert_ne` makrosu/fonksiyonu: İki değerin eşit olmadığını iddia eder.
+///
+/// Eşitse bir hata mesajı yazdırılır ve program sonlandırılır.
+///
+/// # Kullanım
+/// `assert_ne!(deger1, deger2, "Değerler eşit olmamalıydı.");`
+///
+/// # Parametreler
+/// - `left`: Karşılaştırılacak ilk değer.
+/// - `right`: Karşılaştırılacak ikinci değer.
+/// - `message`: Eşit olduklarında yazdırılacak hata mesajı.
+pub fn assert_ne_int(left: int, right: int, message: &string) -> void {
+    if CNT_ASSERT_ENABLED {
+        if left == right {
+            let error_msg = "Unexpected equality: ".to_string() + string::from_int(left) +
+                            " was equal to ".to_string() + string::from_int(right) +
+                            " - ".to_string() + message;
+            assert(false, &error_msg);
+        }
+    }
+}
+
+// Diğer temel tipler için assert_ne_u8, assert_ne_f, vb. eklenebilir.
+
+// --- 2. Yardımcı Fonksiyonlar / Makro Desteği (İdeal Durumda) ---
+
+// Gerçek bir `assert` makrosu genellikle dosya adı, satır numarası ve sütun numarasını
+// otomatik olarak yakalar. CNT'nin makro veya derleyici yansıma (reflection) yetenekleri varsa,
+// `assert` fonksiyonu bu bilgileri otomatik olarak alabilir.
+// Eğer yoksa, bu bilgiler manuel olarak sağlanmalı veya daha basit bir `assert` fonksiyonu sunulmalıdır.
+// Yukarıdaki `assert` fonksiyonu bu kısıtlamayı yansıtır ("unknown_file", 0. satır).
+
+// `_cnt_assert_fail` fonksiyonu, CNT runtime'ının hata işleme mekanizmasına bağlanabilir.
+// Bu, hata ayıklayıcıya bağlanma, bir kilitlenme dökümü oluşturma veya
+// özel bir hata raporlama sistemi başlatma gibi işlemleri yapabilir.
