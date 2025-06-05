@@ -1,0 +1,206 @@
+// mutex.cnt
+// Standart Mutex (Karşılıklı Dışlama) Modülü
+// Paylaşılan verilere eşzamanlı erişimi kontrol etmek için temel senkronizasyon araçları sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::thread;     // ThreadId için
+import std::alloc;      // Eğer mutex nesnesi dinamik tahsis gerektiriyorsa
+
+// Not: Bu modülün implementasyonu, CNT'nin işletim sistemi senkronizasyon API'lerine
+// (pthreads mutexes, Windows Critical Sections/Mutexes) FFI veya runtime desteğine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'os::mutex_init', 'os::mutex_lock' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+/// `Error` Enum'u: Mutex işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Mutex başlatma başarısız oldu.
+    MutexInitError(string);
+    /// Mutex kilitleme başarısız oldu.
+    MutexLockError(string);
+    /// Mutex kilidini açma başarısız oldu.
+    MutexUnlockError(string);
+    /// Geçersiz mutex durumu (örn. kilitli olmayan bir mutex'i açmaya çalışmak).
+    InvalidMutexState(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- Dahili OS API Wrapparları (CNT Runtime/Compiler Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, altta yatan OS API'lerini çağıran CNT'nin runtime'ına veya FFI'sına aittir.
+
+// İşletim sistemi seviyesi mutex handle'ı (örneğin, pthread_mutex_t* veya CRITICAL_SECTION*)
+pub type OsMutexHandle = raw_ptr<void>; // Veya platforma özel bir struct
+
+ pub fn os_mutex_init() -> Result<OsMutexHandle, string>;
+ pub fn os_mutex_destroy(handle: OsMutexHandle) -> Result<void, string>;
+ pub fn os_mutex_lock(handle: OsMutexHandle) -> Result<void, string>;
+ pub fn os_mutex_try_lock(handle: OsMutexHandle) -> Result<bool, string>; // true: locked, false: not locked
+ pub fn os_mutex_unlock(handle: OsMutexHandle) -> Result<void, string>;
+
+
+// --- 1. Mutex Yapısı ---
+
+/// `Mutex` Struct'ı: Bir karşılıklı dışlama (mutual exclusion) nesnesini temsil eder.
+/// Bu mutex, yeniden giriş yapmayan (non-recursive) bir mutex'tir.
+pub struct Mutex {
+    // İşletim sistemi seviyesi mutex'i için dahili handle.
+    os_handle: OsMutexHandle;
+    // Mutex'in zaten başlatılıp başlatılmadığını kontrol etmek için bayrak.
+    is_initialized: bool;
+    // Mutex'in şu anda kilitli olup olmadığını takip eden bayrak (hata ayıklama ve doğrulama için).
+     is_locked: bool; // Basit mutex'lerde OS zaten bunu yönetir, ancak gerekirse eklenebilir.
+    // Mutex'e sahip olan iş parçacığının kimliği (yalnızca hata ayıklama/doğrulama ve recursive mutex'ler için).
+     owner_thread_id: thread::ThreadId;
+}
+
+/// Yeni bir `Mutex` nesnesi oluşturur ve başlatır.
+///
+/// # Dönüş Değeri
+/// `Result<Mutex, Error>`: Başlatılan `Mutex` nesnesi veya hata.
+pub fn new_mutex() -> Result<Mutex, Error> {
+    match os_mutex_init() {
+        Result::Ok(handle) => Result::Ok(Mutex {
+            os_handle: handle,
+            is_initialized: true,
+        }),
+        Result::Err(msg) => Result::Err(Error::MutexInitError("Failed to initialize mutex: ".to_string() + msg)),
+    }
+}
+
+/// `destroy_mutex`: Bir `Mutex` nesnesinin kaynaklarını serbest bırakır.
+/// Bu fonksiyon, `Mutex` nesnesi kapsam dışına çıktığında veya artık kullanılmadığında
+/// otomatik olarak çağrılmalıdır (eğer CNT'de yıkıcılar varsa).
+///
+/// # Parametreler
+/// - `m`: Yok edilecek mutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn destroy_mutex(mut m: Mutex) -> Result<void, Error> {
+    if !m.is_initialized {
+        return Result::Err(Error::InvalidMutexState("Attempted to destroy uninitialized mutex.".to_string()));
+    }
+    match os_mutex_destroy(m.os_handle) {
+        Result::Ok(_) => {
+            m.is_initialized = false;
+            m.os_handle = null_ptr::<void>();
+            Result::Ok(())
+        },
+        Result::Err(msg) => Result::Err(Error::Other("Failed to destroy mutex: ".to_string() + msg)),
+    }
+}
+
+// --- 2. Kilitleme ve Kilidi Açma ---
+
+/// `lock()`: Mutex'i kilitler. Eğer mutex zaten kilitliyse, çağıran iş parçacığı bloke edilir
+/// ve mutex serbest bırakılana kadar bekler.
+///
+/// # Parametreler
+/// - `m`: Kilitleyecek mutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn lock(m: &mut Mutex) -> Result<void, Error> {
+    if !m.is_initialized {
+        return Result::Err(Error::InvalidMutexState("Attempted to lock uninitialized mutex.".to_string()));
+    }
+    match os_mutex_lock(m.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::MutexLockError("Failed to lock mutex: ".to_string() + msg)),
+    }
+}
+
+/// `try_lock()`: Mutex'i kilitlemeye çalışır. Eğer mutex hemen kilitlenebilirse, `true` döndürür
+/// ve kilidi alır. Eğer mutex zaten kilitliyse, bloke olmaz ve `false` döndürür.
+///
+/// # Parametreler
+/// - `m`: Kilitleyecek mutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<bool, Error>`: Başarılı olursa `Ok(true)` (kilit alındı) veya `Ok(false)` (kilit alınamadı),
+/// hata olursa `Err`.
+pub fn try_lock(m: &mut Mutex) -> Result<bool, Error> {
+    if !m.is_initialized {
+        return Result::Err(Error::InvalidMutexState("Attempted to try_lock uninitialized mutex.".to_string()));
+    }
+    match os_mutex_try_lock(m.os_handle) {
+        Result::Ok(locked) => Result::Ok(locked),
+        Result::Err(msg) => Result::Err(Error::MutexLockError("Failed to try_lock mutex: ".to_string() + msg)),
+    }
+}
+
+/// `unlock()`: Mutex'in kilidini açar. Çağıran iş parçacığının mutex'i kilitlemiş olması gerekir.
+///
+/// # Parametreler
+/// - `m`: Kilidi açacak mutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn unlock(m: &mut Mutex) -> Result<void, Error> {
+    if !m.is_initialized {
+        return Result::Err(Error::InvalidMutexState("Attempted to unlock uninitialized mutex.".to_string()));
+    }
+    match os_mutex_unlock(m.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::MutexUnlockError("Failed to unlock mutex: ".to_string() + msg)),
+    }
+}
+
+// --- 3. LockGuard (Kilit Koruyucusu) ---
+// LockGuard, RAII (Resource Acquisition Is Initialization) ilkesini kullanarak
+// bir mutex'in otomatik olarak kilitlenip açılmasını sağlar.
+// Bu, istisnalar veya erken dönüşler durumunda bile mutex'in her zaman serbest bırakılmasını garanti eder.
+
+/// `LockGuard` Struct'ı: Bir mutex'in ömrünü yöneten bir RAII nesnesi.
+/// `LockGuard` oluşturulduğunda mutex'i kilitler ve kapsam dışına çıktığında kilidi açar.
+pub struct LockGuard<'a> { // `'a` ömür parametresi, Mutex'e referans tuttuğunu gösterir.
+    // Yönetilen mutex'e mutable referans.
+    // 'a: lifetime (ömür) parametresi: LockGuard, Mutex'in yaşadığı sürece yaşayabilir.
+    mutex: &'a mut Mutex;
+    // LockGuard'ın mutex'i başarıyla kilitleyip kilitleyemediğini gösterir.
+    locked_successfully: bool;
+}
+
+/// Yeni bir `LockGuard` nesnesi oluşturur ve verilen mutex'i kilitler.
+///
+/// # Parametreler
+/// - `m`: Yönetilecek mutex (mutable referans).
+///
+/// # Dönüş Değeri
+/// `Result<LockGuard, Error>`: Başarılı olursa `LockGuard` nesnesi, hata olursa `Err`.
+pub fn make_lock_guard<'a>(m: &'a mut Mutex) -> Result<LockGuard<'a>, Error> {
+    match lock(m) {
+        Result::Ok(_) => Result::Ok(LockGuard { mutex: m, locked_successfully: true }),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `LockGuard`'ın yıkıcısı. Kapsam dışına çıktığında mutex'in kilidini açar.
+/// CNT'nin yıkıcı (destructor) mekanizması bu fonksiyonu otomatik olarak çağırmalıdır.
+pub fn drop_lock_guard(mut lg: LockGuard) -> void {
+    if lg.locked_successfully {
+        // Hata durumunda bile kilidi açmaya çalış.
+        // `unlock` başarısız olursa, burada sadece bir uyarı mesajı yazabiliriz.
+        // Genellikle yıkıcılardan istisna fırlatılmaz.
+        match unlock(lg.mutex) {
+            Result::Ok(_) => { /* Kilit başarıyla açıldı */ },
+            Result::Err(e) => {
+                // Hata ayıklama veya günlüğe kaydetme: Kilit açılamadı.
+                // Bu genellikle ciddi bir programlama hatası veya sistem sorunudur.
+                std::println("Warning: Failed to unlock mutex in LockGuard destructor: ".to_string() + e.to_string());
+            }
+        }
+    }
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// `os_mutex_init`, `os_mutex_destroy`, `os_mutex_lock`, `os_mutex_try_lock`, `os_mutex_unlock`:
+// Bu fonksiyonlar, işletim sisteminin alt seviye mutex API'leriyle etkileşimi simgeler.
+// CNT runtime veya FFI aracılığıyla sağlanmalıdır.
