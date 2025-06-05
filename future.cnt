@@ -1,0 +1,397 @@
+// future.cnt
+// Standart Future Modülü
+// Asenkron hesaplamaların sonuçlarına erişmek için bir mekanizma sağlar.
+
+import std::string;         // Hata mesajları için
+import std::assert;         // Geliştirme/hata ayıklama için
+import std::thread;         // İş parçacığı kimlikleri için (opsiyonel)
+import std::mutex;          // Senkronizasyon için
+import std::condition_variable; // Durum değişikliklerini beklemek için
+import std::exception;      // İstisna işleme için
+import std::optional;       // Değerin varlığını göstermek için
+import std::chrono;         // Süreli bekleme için
+
+/// `Error` Enum'u: Future işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Future'dan değer zaten alınmışken tekrar erişme.
+    FutureAlreadyRetrieved(string);
+    /// Promise nesnesi yok edilmişken Future'dan değer almaya çalışma.
+    BrokenPromise(string);
+    /// Geçersiz durum hatası (örn. boş bir Future nesnesi).
+    InvalidFutureState(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- Dahili Paylaşılan Durum (Shared State) ---
+// Future ve Promise arasındaki iletişimi yöneten dahili nesne.
+// Bu nesne, gerçek değeri veya istisnayı, durum bayraklarını ve senkronizasyon primitiflerini içerir.
+
+// Bu tip, generic T'ye ve hata E'ye bağlı olmalıdır.
+// Hata burada `exception::Exception` tipi veya onun türevleri olacaktır.
+pub enum FutureState<T, E> {
+    /// Başlangıç durumu, henüz bir değer veya istisna ayarlanmamış.
+    Ready;
+    /// Değer başarıyla ayarlandı.
+    ValueReady(T);
+    /// Bir istisna ayarlandı.
+    ExceptionReady(E);
+    /// Future'ın değeri zaten alınmış.
+    Retrieved;
+    /// Promise yok edildi ancak bir değer ayarlanmadı.
+    Broken;
+}
+
+/// `SharedState<T, E>` Struct'ı: Bir Future ve Promise çifti arasındaki paylaşılan durum.
+/// Bu struct, tüm asenkron iletişim mantığını içerir.
+pub struct SharedState<T, E> {
+    // Paylaşılan durumun mevcut durumu.
+    state: FutureState<T, E>;
+    // Durum değişikliklerini korumak için mutex.
+    mutex: mutex::Mutex;
+    // Durum değiştiğinde bekleyen iş parçacıklarını uyandırmak için koşul değişkeni.
+    condition_variable: condition_variable::ConditionVariable;
+    // Değer zaten alınmış mı? (Future'ın `get()` metodu bir kez çağrılabilir).
+    value_retrieved: bool;
+}
+
+/// Yeni bir `SharedState` nesnesi oluşturur ve başlatır.
+pub fn new_shared_state<T, E>() -> Result<raw_ptr<SharedState<T, E>>, Error> {
+    let state_ptr = alloc::allocate_one::<SharedState<T, E>>();
+    if state_ptr == null_ptr() {
+        return Result::Err(Error::Other("Failed to allocate SharedState.".to_string()));
+    }
+
+    match mutex::new_mutex() {
+        Result::Ok(m) => {
+            match condition_variable::new_condition_variable() {
+                Result::Ok(cv) => {
+                    unsafe {
+                        *state_ptr = SharedState {
+                            state: FutureState::Ready,
+                            mutex: m,
+                            condition_variable: cv,
+                            value_retrieved: false,
+                        };
+                    }
+                    Result::Ok(state_ptr)
+                },
+                Result::Err(e) => {
+                    // Hata durumunda mutex'i ve tahsis edilen belleği temizle
+                    mutex::destroy_mutex(m).expect("Failed to destroy mutex during SharedState creation error.");
+                    alloc::deallocate_one(state_ptr);
+                    Result::Err(Error::Other("Failed to initialize condition variable for SharedState: ".to_string() + e.to_string()))
+                }
+            }
+        },
+        Result::Err(e) => {
+            alloc::deallocate_one(state_ptr);
+            Result::Err(Error::Other("Failed to initialize mutex for SharedState: ".to_string() + e.to_string()))
+        }
+    }
+}
+
+/// `destroy_shared_state`: SharedState kaynaklarını serbest bırakır.
+pub fn destroy_shared_state<T, E>(mut s: SharedState<T, E>) -> Result<void, Error> {
+    mutex::destroy_mutex(s.mutex).expect("Failed to destroy mutex in SharedState destructor.");
+    condition_variable::destroy_condition_variable(s.condition_variable).expect("Failed to destroy condition variable in SharedState destructor.");
+
+    // İçindeki değer veya istisna varsa onu da yok et.
+    match s.state {
+        FutureState::ValueReady(val) => { /* val'in yıkıcısı çağrılmalı */ },
+        FutureState::ExceptionReady(ex) => { /* ex'in yıkıcısı çağrılmalı */ },
+        _ => { /* Nothing to destroy */ }
+    }
+    Result::Ok(())
+}
+
+
+// --- 1. Future Yapısı ---
+
+/// `Future<T>` Struct'ı: Asenkron bir işlemin sonucuna erişim sağlayan bir nesne.
+/// Bu, Promise tarafından doldurulan paylaşılan bir durumu işaret eder.
+pub struct Future<T> {
+    // Paylaşılan durumu işaret eden akıllı pointer benzeri yapı.
+    // Reference counting (RC) veya özel bir yönetim mekanizması gerekebilir.
+    // Şimdilik ham pointer ve manuel yönetim varsayıyoruz.
+    shared_state: raw_ptr<SharedState<T, exception::Exception>>;
+    // Değerin zaten Future'dan alınıp alınmadığını gösteren bayrak.
+    // `get()` sadece bir kez çağrılabilir.
+    // shared_state'deki `value_retrieved` ile aynı işlevi görebilir.
+    // has_retrieved_value: bool;
+}
+
+/// Boş (geçersiz) bir `Future` nesnesi oluşturur.
+pub fn new_empty_future<T>() -> Future<T> {
+    Future { shared_state: null_ptr::<SharedState<T, exception::Exception>>() }
+}
+
+/// `valid()`: Future nesnesinin geçerli bir paylaşılan durumu olup olmadığını kontrol eder.
+pub fn valid<T>(f: &Future<T>) -> bool {
+    f.shared_state != null_ptr()
+}
+
+/// `get()`: Asenkron işlemin sonucunu döndürür. Sonuç hazır değilse bloke olur.
+/// Eğer işlem bir istisna fırlattıysa, bu istisnayı tekrar fırlatır.
+/// Bu fonksiyon sadece bir kez çağrılabilir.
+///
+/// # Parametreler
+/// - `f`: Değeri alınacak Future nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<T, exception::Exception>`: İşlemin sonucu veya fırlatılan istisna.
+pub fn get<T>(mut f: Future<T>) -> Result<T, exception::Exception> {
+    if !valid(&f) {
+        return Result::Err(exception::new_runtime_error("Future is not valid.".to_string()));
+    }
+
+    let state_ptr = f.shared_state;
+    // `f` artık geçersiz hale gelir (move semantics).
+    f.shared_state = null_ptr::<SharedState<T, exception::Exception>>(); // C++'daki gibi move edilmiş gibi davran
+
+    let mut state = unsafe { &mut *state_ptr };
+
+    // Mutex'i kilitle
+    let mut lk = mutex::make_lock_guard(&mut state.mutex)
+        .map_err(|e| exception::new_runtime_error("Failed to acquire lock for Future::get: ".to_string() + e.to_string()))?;
+
+    // Değer zaten alınmış mı?
+    if state.value_retrieved {
+        return Result::Err(exception::new_logic_error("Future value already retrieved.".to_string()));
+    }
+
+    // Değer hazır olana kadar bekle
+    while match state.state {
+        FutureState::Ready => true,
+        _ => false,
+    } {
+        condition_variable::wait(&mut state.condition_variable, &mut lk)
+            .map_err(|e| exception::new_runtime_error("Failed to wait on condition variable for Future::get: ".to_string() + e.to_string()))?;
+    }
+
+    state.value_retrieved = true; // Değerin alındığını işaretle
+
+    // Değeri veya istisnayı döndür/fırlat
+    let result = match state.state {
+        FutureState::ValueReady(val) => {
+            // Değeri SharedState'ten Future'a taşı
+            Result::Ok(val) // Copy/Move semantics here
+        },
+        FutureState::ExceptionReady(ex) => {
+            // İstisnayı SharedState'ten Future'a taşı ve tekrar fırlat
+            Result::Err(ex)
+        },
+        FutureState::Broken => {
+            Result::Err(exception::new_broken_promise("Promise was destroyed before setting value.".to_string()))
+        },
+        _ => Result::Err(exception::new_runtime_error("Unexpected FutureState during get.".to_string())),
+    };
+
+    // SharedState'i yok et, çünkü Future artık ona sahip değil (son değeri aldı).
+    destroy_shared_state(unsafe { *state_ptr }).expect("Failed to destroy shared state after get.");
+    alloc::deallocate_one(state_ptr); // Belleği serbest bırak
+
+    result
+}
+
+/// `wait()`: Asenkron işlemin tamamlanmasını bekler. Sonucu almaz, sadece hazır olmasını bekler.
+///
+/// # Parametreler
+/// - `f`: Beklenecek Future nesnesi.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn wait<T>(f: &Future<T>) -> Result<void, Error> {
+    if !valid(f) {
+        return Result::Err(Error::InvalidFutureState("Future is not valid.".to_string()));
+    }
+
+    let state_ptr = f.shared_state;
+    let mut state = unsafe { &mut *state_ptr };
+
+    let mut lk = mutex::make_lock_guard(&mut state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for Future::wait: ".to_string() + e.to_string()))?;
+
+    while match state.state {
+        FutureState::Ready => true,
+        _ => false,
+    } {
+        condition_variable::wait(&mut state.condition_variable, &mut lk)
+            .map_err(|e| Error::Other("Failed to wait on condition variable for Future::wait: ".to_string() + e.to_string()))?;
+    }
+    Result::Ok(())
+}
+
+/// `wait_for()`: Asenkron işlemin tamamlanmasını belirli bir süre boyunca bekler.
+///
+/// # Parametreler
+/// - `f`: Beklenecek Future nesnesi.
+/// - `duration_ns`: Maksimum bekleme süresi (nanosaniye cinsinden).
+///
+/// # Dönüş Değeri
+/// `Result<FutureStatus, Error>`: İşlemin durumu (timeout, ready, deferred) veya hata.
+/// `FutureStatus` enum'u tanımlanması gerekecektir.
+pub enum FutureStatus {
+    Ready;
+    Timeout;
+    Deferred; // Not: std::async veya policy bazlı futures için geçerlidir.
+}
+
+pub fn wait_for_nanos<T>(f: &Future<T>, duration_ns: u64) -> Result<FutureStatus, Error> {
+    if !valid(f) {
+        return Result::Err(Error::InvalidFutureState("Future is not valid.".to_string()));
+    }
+
+    let state_ptr = f.shared_state;
+    let mut state = unsafe { &mut *state_ptr };
+
+    let mut lk = mutex::make_lock_guard(&mut state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for Future::wait_for: ".to_string() + e.to_string()))?;
+
+    let result = condition_variable::wait_for_nanos(&mut state.condition_variable, &mut lk, duration_ns)
+        .map_err(|e| Error::Other("Failed to wait_for on condition variable for Future::wait_for: ".to_string() + e.to_string()))?;
+
+    if result {
+        return Result::Ok(FutureStatus::Ready);
+    } else {
+        // Zaman aşımı sonrası tekrar kontrol et, belki tam da o anda hazırlandı.
+        match state.state {
+            FutureState::Ready => Result::Ok(FutureStatus::Timeout),
+            _ => Result::Ok(FutureStatus::Ready), // Zaten hazır
+        }
+    }
+}
+
+// --- 2. Promise Yapısı ---
+
+/// `Promise<T>` Struct'ı: Bir `Future` nesnesinin sonucunu (değer veya istisna) ayarlamak için kullanılır.
+pub struct Promise<T> {
+    // Future ile paylaşılan durumu işaret eden akıllı pointer benzeri yapı.
+    shared_state: raw_ptr<SharedState<T, exception::Exception>>;
+    // Değerin zaten ayarlanıp ayarlanmadığını gösteren bayrak.
+    value_set: bool;
+}
+
+/// Yeni bir `Promise` nesnesi oluşturur ve ilişkili bir `Future` döndürür.
+///
+/// # Dönüş Değeri
+/// `Result<(Promise<T>, Future<T>), Error>`: Promise ve Future çifti veya hata.
+pub fn new_promise_and_future<T>() -> Result<(Promise<T>, Future<T>), Error> {
+    match new_shared_state::<T, exception::Exception>() {
+        Result::Ok(state_ptr) => {
+            let p = Promise { shared_state: state_ptr, value_set: false };
+            let f = Future { shared_state: state_ptr };
+            Result::Ok((p, f))
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `set_value()`: Promise'a bir değer ayarlar ve ilişkili Future'ı hazır hale getirir.
+/// Bu fonksiyon sadece bir kez çağrılabilir.
+///
+/// # Parametreler
+/// - `p`: Değeri ayarlanacak Promise nesnesi (mutable).
+/// - `value`: Ayarlanacak değer.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn set_value<T>(mut p: Promise<T>, value: T) -> Result<void, Error> {
+    if p.value_set {
+        return Result::Err(Error::Other("Promise value already set.".to_string()));
+    }
+    if p.shared_state == null_ptr() {
+        return Result::Err(Error::BrokenPromise("Promise has no associated state.".to_string()));
+    }
+
+    let state_ptr = p.shared_state;
+    p.shared_state = null_ptr(); // Promise artık shared_state'e sahip değil (move semantics)
+
+    let mut state = unsafe { &mut *state_ptr };
+
+    let mut lk = mutex::make_lock_guard(&mut state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for Promise::set_value: ".to_string() + e.to_string()))?;
+
+    // Durumu ayarla ve bekleyenleri uyandır
+    state.state = FutureState::ValueReady(value); // Değeri shared_state'e taşı/kopyala
+    p.value_set = true;
+    condition_variable::notify_all(&mut state.condition_variable)
+        .map_err(|e| Error::Other("Failed to notify_all for Promise::set_value: ".to_string() + e.to_string()))?;
+
+    Result::Ok(())
+}
+
+/// `set_exception()`: Promise'a bir istisna ayarlar ve ilişkili Future'ı hazır hale getirir.
+/// Bu fonksiyon sadece bir kez çağrılabilir.
+///
+/// # Parametreler
+/// - `p`: İstisna ayarlanacak Promise nesnesi (mutable).
+/// - `ex`: Ayarlanacak istisna.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn set_exception<T>(mut p: Promise<T>, ex: exception::Exception) -> Result<void, Error> {
+    if p.value_set {
+        return Result::Err(Error::Other("Promise value already set.".to_string()));
+    }
+    if p.shared_state == null_ptr() {
+        return Result::Err(Error::BrokenPromise("Promise has no associated state.".to_string()));
+    }
+
+    let state_ptr = p.shared_state;
+    p.shared_state = null_ptr(); // Promise artık shared_state'e sahip değil
+
+    let mut state = unsafe { &mut *state_ptr };
+
+    let mut lk = mutex::make_lock_guard(&mut state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for Promise::set_exception: ".to_string() + e.to_string()))?;
+
+    // Durumu ayarla ve bekleyenleri uyandır
+    state.state = FutureState::ExceptionReady(ex); // İstisnayı shared_state'e taşı/kopyala
+    p.value_set = true;
+    condition_variable::notify_all(&mut state.condition_variable)
+        .map_err(|e| Error::Other("Failed to notify_all for Promise::set_exception: ".to_string() + e.to_string()))?;
+
+    Result::Ok(())
+}
+
+/// `Promise`'ın yıkıcısı. Promise yok edildiğinde ancak bir değer ayarlanmadığında
+/// ilişkili Future'ı `BrokenPromise` durumuna getirir.
+pub fn drop_promise<T>(mut p: Promise<T>) -> void {
+    if p.shared_state != null_ptr() && !p.value_set {
+        // Promise yok edildi ancak bir değer ayarlanmadı.
+        // İlişkili Future'ı BrokenPromise durumuna getir.
+        let state_ptr = p.shared_state;
+        let mut state = unsafe { &mut *state_ptr };
+
+        let lock_result = mutex::make_lock_guard(&mut state.mutex);
+        if lock_result.is_ok() {
+            // Sadece kilit alabilirsek durumu güncelleyebiliriz.
+            state.state = FutureState::Broken;
+            condition_variable::notify_all(&mut state.condition_variable)
+                .expect("Failed to notify_all in Promise destructor.");
+        } else {
+            std::println("Warning: Failed to acquire lock in Promise destructor for BrokenPromise.".to_string());
+        }
+    }
+    // SharedState'in referans sayımı yönetiliyorsa, burada referans sayımı düşürülür.
+    // Biz manuel deallocation varsaydığımız için, SharedState'i Future tarafı deallocate eder.
+}
+
+
+// --- Yardımcı Fonksiyonlar (Önemli Notlar) ---
+// `SharedState`'in manuel olarak tahsis edilmesi ve serbest bırakılması (raw_ptr kullanımı).
+// Akıllı pointer'lar (örneğin, C++'daki `std::shared_ptr` veya Rust'taki `Arc`)
+// SharedState'in yaşam döngüsünü otomatik olarak yönetmek için tercih edilen yöntem olacaktır.
+// CNT'de `std::shared_ptr` veya `Arc` benzeri bir akıllı pointer modülü olsaydı,
+// `SharedState` raw_ptr yerine bu akıllı pointerlar ile yönetilebilirdi.
+
+// `LockGuard`'dan temel mutex handle'ına erişim:
+// `mutex.cnt` dosyasında `LockGuard`'a eklenmesi gereken varsayımsal bir fonksiyon:
+// `pub fn get_underlying_mutex_handle(&self) -> raw_ptr<void> { self.mutex.os_handle }`
