@@ -1,0 +1,191 @@
+// alloc.cnt
+// Standart Bellek Tahsis Modülü
+// Dinamik bellek tahsisi ve serbest bırakma fonksiyonları sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Bellek tahsisi sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsisi başarısız oldu (örn. yetersiz bellek).
+    OutOfMemory(string);
+    /// Geçersiz argüman (örn. sıfır boyutlu tahsis).
+    InvalidArgument(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: Bu modülün altında yatan bellek yönetim sistemi (heap manager)
+// CNT runtime'ı veya işletim sistemi tarafından sağlanmalıdır.
+// Bu fonksiyonlar, bu alt sistemin basit bir arayüzünü temsil eder.
+
+// --- 1. Temel Bellek Tahsis Fonksiyonları ---
+
+/// Belirtilen boyutta (byte cinsinden) ham bellek tahsis eder.
+///
+/// # Parametreler
+/// - `size_bytes`: Tahsis edilecek bellek boyutu (byte cinsinden).
+///
+/// # Dönüş Değeri
+/// `Result<raw_ptr<u8>, Error>`: Tahsis edilen belleğin başlangıcına bir işaretçi (`Ok(ptr)`)
+/// veya bellek tahsisi başarısız olursa bir hata (`Err(Error)`).
+pub fn allocate(size_bytes: u64) -> Result<raw_ptr<u8>, Error> {
+    if size_bytes == 0 {
+        return Result::Err(Error::InvalidArgument("Cannot allocate 0 bytes".to_string()));
+    }
+
+    // Bu kısım, CNT'nin gerçek bellek tahsis mekanizmasına bağlıdır.
+    // Örneğin, işletim sistemi çağrısı veya dahili bir heap manager fonksiyonu.
+    // C'deki `malloc` benzeri bir çağrı varsayılmıştır.
+
+    // Pseudo-kod:
+     let ptr = c_library_malloc(size_bytes);
+     if ptr == null_ptr() {
+        return Result::Err(Error::OutOfMemory("Failed to allocate memory of size ".to_string() + size_bytes.to_string() + " bytes".to_string()));
+     }
+     return Result::Ok(ptr as raw_ptr<u8>);
+
+    // Şimdilik, başarılı olduğunu varsayan bir placeholder.
+    // Geliştirme Notu: Gerçek implementasyon burada sistem çağrısını veya heap manager'ı kullanmalı.
+    Result::Ok(null_ptr::<u8>()) // GEÇİCİ: Bu gerçek bir tahsis yapmaz.
+}
+
+/// Daha önce tahsis edilmiş ham belleği serbest bırakır.
+///
+/// # Parametreler
+/// - `ptr`: Serbest bırakılacak belleğin başlangıç işaretçisi.
+/// - `size_bytes`: Serbest bırakılacak bellek bloğunun boyutu (bazı tahsisçiler için gereklidir).
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn deallocate(ptr: raw_ptr<u8>, size_bytes: u64) -> void {
+    if ptr == null_ptr() {
+        // null pointer'ı serbest bırakmak genellikle güvenlidir ancak bir hata olabilir.
+        // Assert ile geliştirme sırasında yakalayabiliriz.
+        assert!(false, "Attempted to deallocate a null pointer. This might indicate a bug.");
+        return;
+    }
+    // Bu kısım, CNT'nin gerçek bellek serbest bırakma mekanizmasına bağlıdır.
+    // Örneğin, C'deki `free` benzeri bir çağrı varsayılmıştır.
+
+    // Pseudo-kod:
+     c_library_free(ptr);
+
+    // Geliştirme Notu: Gerçek implementasyon burada sistem çağrısını veya heap manager'ı kullanmalı.
+}
+
+/// Bellek tahsisini yeniden boyutlandırır. Orijinal içeriği korur.
+/// Eğer yeni boyut sıfır ise, bellek serbest bırakılır ve null_ptr döndürülür.
+///
+/// # Parametreler
+/// - `ptr`: Yeniden boyutlandırılacak mevcut bellek bloğunun başlangıç işaretçisi.
+/// - `old_size_bytes`: Mevcut bellek bloğunun eski boyutu.
+/// - `new_size_bytes`: İstenen yeni bellek boyutu.
+///
+/// # Dönüş Değeri
+/// `Result<raw_ptr<u8>, Error>`: Yeniden boyutlandırılan belleğin yeni başlangıç işaretçisi (`Ok(ptr)`),
+/// veya işlem başarısız olursa bir hata (`Err(Error)`).
+pub fn reallocate(ptr: raw_ptr<u8>, old_size_bytes: u64, new_size_bytes: u64) -> Result<raw_ptr<u8>, Error> {
+    if new_size_bytes == 0 {
+        deallocate(ptr, old_size_bytes);
+        return Result::Ok(null_ptr::<u8>());
+    }
+
+    if ptr == null_ptr() {
+        // Eğer orijinal işaretçi null ise, bu aslında yeni bir tahsis işlemidir.
+        return allocate(new_size_bytes);
+    }
+
+    // Bu kısım, CNT'nin gerçek bellek yeniden tahsis mekanizmasına bağlıdır.
+    // Örneğin, C'deki `realloc` benzeri bir çağrı varsayılmıştır.
+
+    // Pseudo-kod:
+     let new_ptr = c_library_realloc(ptr, new_size_bytes);
+     if new_ptr == null_ptr() {
+        return Result::Err(Error::OutOfMemory("Failed to reallocate memory to size ".to_string() + new_size_bytes.to_string() + " bytes".to_string()));
+     }
+     return Result::Ok(new_ptr as raw_ptr<u8>);
+
+    // Şimdilik, başarılı olduğunu varsayan bir placeholder.
+    // Geliştirme Notu: Gerçek implementasyon burada sistem çağrısını veya heap manager'ı kullanmalı.
+    Result::Ok(null_ptr::<u8>()) // GEÇİCİ: Bu gerçek bir reallocate yapmaz.
+}
+
+// --- 2. Jenerik Tip Tabanlı Tahsis Fonksiyonları (Kolaylık İçin) ---
+
+/// Belirtilen tipte tek bir eleman için bellek tahsis eder.
+///
+/// # Parametreler
+/// - `T`: Tahsis edilecek elemanın tipi.
+///
+/// # Dönüş Değeri
+/// `Result<raw_ptr<T>, Error>`: Tahsis edilen belleğin başlangıcına bir işaretçi (`Ok(ptr)`)
+/// veya bellek tahsisi başarısız olursa bir hata (`Err(Error)`).
+pub fn allocate_one<T>() -> Result<raw_ptr<T>, Error> {
+    match allocate(size_of::<T>()) {
+        Result::Ok(ptr_u8) => Result::Ok(ptr_u8 as raw_ptr<T>),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Belirtilen tipte `count` adet eleman için bellek tahsis eder.
+///
+/// # Parametreler
+/// - `T`: Tahsis edilecek elemanların tipi.
+/// - `count`: Tahsis edilecek eleman sayısı.
+///
+/// # Dönüş Değeri
+/// `Result<raw_ptr<T>, Error>`: Tahsis edilen belleğin başlangıcına bir işaretçi (`Ok(ptr)`)
+/// veya bellek tahsisi başarısız olursa bir hata (`Err(Error)`).
+pub fn allocate_array<T>(count: u64) -> Result<raw_ptr<T>, Error> {
+    if count == 0 {
+        return Result::Ok(null_ptr::<T>()); // 0 eleman için null pointer döndürmek gelenekseldir.
+    }
+    let total_bytes = count * (size_of::<T>() as u64);
+    match allocate(total_bytes) {
+        Result::Ok(ptr_u8) => Result::Ok(ptr_u8 as raw_ptr<T>),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Belirtilen tipte tek bir eleman için tahsis edilmiş belleği serbest bırakır.
+pub fn deallocate_one<T>(ptr: raw_ptr<T>) -> void {
+    deallocate(ptr as raw_ptr<u8>, size_of::<T>() as u64);
+}
+
+/// Belirtilen tipte `count` adet eleman için tahsis edilmiş belleği serbest bırakır.
+pub fn deallocate_array<T>(ptr: raw_ptr<T>, count: u64) -> void {
+    if count == 0 { return; } // 0 eleman için serbest bırakılacak bir şey yok.
+    let total_bytes = count * (size_of::<T>() as u64);
+    deallocate(ptr as raw_ptr<u8>, total_bytes);
+}
+
+/// Belirtilen tipte `count` adet eleman için belleği yeniden boyutlandırır.
+pub fn reallocate_array<T>(ptr: raw_ptr<T>, old_count: u64, new_count: u64) -> Result<raw_ptr<T>, Error> {
+    let old_total_bytes = old_count * (size_of::<T>() as u64);
+    let new_total_bytes = new_count * (size_of::<T>() as u64);
+    match reallocate(ptr as raw_ptr<u8>, old_total_bytes, new_total_bytes) {
+        Result::Ok(new_ptr_u8) => Result::Ok(new_ptr_u8 as raw_ptr<T>),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// --- 3. Hizalama (Alignment) Destekli Tahsis (Gelişmiş) ---
+
+// Modern sistemlerde bellek hizalaması performans için önemlidir (örn. SIMD işlemleri).
+// Eğer CNT'nin temel tahsisçisi hizalamayı garanti etmiyorsa, burada ek fonksiyonlar gerekir.
+// Örneğin:
+ pub fn allocate_aligned(size_bytes: u64, alignment: u64) -> Result<raw_ptr<u8>, Error> { ... }
+ pub fn deallocate_aligned(ptr: raw_ptr<u8>, size_bytes: u64, alignment: u64) -> void { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
