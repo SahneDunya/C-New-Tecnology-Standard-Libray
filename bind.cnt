@@ -1,0 +1,78 @@
+// bind.cnt
+// Standart Fonksiyon Bağlama Modülü
+// Fonksiyonları ve metotları argümanlarla bağlamak için kullanılır.
+
+import std::marker;         // PhantomData gibi işaretleyici trait'ler için (eğer gerekirse)
+import std::tuple;          // Argümanları paketlemek için
+import std::ops;            // Fonksiyon çağrı operatörü için (Fn, FnMut, FnOnce)
+import std::string;         // Hata mesajları için
+import std::assert;         // Hata ayıklama için
+
+// Not: CNT'nin variadic jenerikler (`...T` veya `args: ...`),
+// closure'lar ve fonksiyon işaretçileri ile esnek bir şekilde çalışabildiği varsayılmıştır.
+// Ayrıca, `std::tuple` modülünün varlığı varsayılmıştır.
+
+// --- Yer Tutucular (Placeholders) ---
+// Bağlanan fonksiyonun gelecekteki argümanlarının yerini belirtmek için kullanılır.
+// C++'daki `std::placeholders::_1`, `_2` gibi.
+
+pub struct _1; // Birinci argüman yer tutucusu
+pub struct _2; // İkinci argüman yer tutucusu
+pub struct _3; // Üçüncü argüman yer tutucusu
+// ... ve daha fazlası ihtiyaca göre eklenebilir.
+
+// Varsayımsal olarak, bu yer tutucular, `bind` fonksiyonu içinde özel olarak işlenir.
+
+---
+
+## `BoundFunction` Struct'ı ve Implementasyonu
+
+`BoundFunction` struct'ı, `bind` çağrısının sonucudur ve asıl bağlama mantığını içerir.
+Bu struct, `Fn`, `FnMut`, `FnOnce` gibi çağrılabilir trait'lerini implemente ederek bir fonksiyon gibi davranır.
+
+```cnt
+/// `BoundFunction<F, ArgsTuple>`: `std::bind` çağrısının sonucudur.
+/// `F`: Bağlanacak orijinal fonksiyon veya çağrılabilir nesne.
+/// `ArgsTuple`: Bağlanacak argümanların tuple'ı.
+pub struct BoundFunction<F, ArgsTuple> {
+    func: F,
+    bound_args: ArgsTuple,
+}
+
+// Helper trait for resolving arguments, including placeholders
+// Bu, `_1`, `_2` gibi yer tutucuları gerçek argümanlara çevirmek için dahili bir mekanizmadır.
+// Gerçek bir implementasyonda oldukça karmaşık bir meta-programlama veya
+// özel derleyici desteği gerektirecektir.
+// Basitlik için burada pseudo-kod olarak gösterilmiştir.
+
+// resolve_arg<Index>(bound_arg: T, call_args_tuple: Tuple) -> ResolvedArgType
+// where Index corresponds to _1, _2, etc.
+
+impl<F, ArgsTuple> Fn<()> for BoundFunction<F, ArgsTuple>
+where F: Fn<ArgsTuple>, // Basitlik için varsayım: F, doğrudan bound_args ile çağrılabilir.
+      ArgsTuple: std::tuple::Tuple // Varsayımsal Tuple trait'i
+{
+    // Bu, `BoundFunction`'ın hiçbir argüman almadan çağrıldığında çalışır.
+    // Yani, tüm argümanlar `bound_args` içinde önceden bağlanmıştır.
+    pub fn call(&self) {
+        // Bu örnek için, `bound_args` doğrudan fonksiyonun argümanlarıdır.
+        // Gerçek `bind` implementasyonu, yer tutucuları ve ekstra argümanları işlemeyi içerir.
+        self.func.call(self.bound_args);
+    }
+}
+
+// Daha karmaşık senaryo: BoundFunction kendi argümanlarını alabilir
+// Bu durumda, `bound_args` ile birleştirilir ve yer tutucular çözülür.
+//
+// impl<F, ArgsTuple, CallArgsTuple> Fn<CallArgsTuple> for BoundFunction<F, ArgsTuple>
+// where F: Fn<ResolvedArgs>, // ResolvedArgs, bound_args ve CallArgsTuple'dan türetilir
+//       ArgsTuple: std::tuple::Tuple,
+//       CallArgsTuple: std::tuple::Tuple
+ {
+     pub fn call(&self, call_args: CallArgsTuple) -> F::Output {
+//         // Bu kısım, yer tutucuları ve mevcut argümanları işlemek için karmaşık mantık içerir.
+//         // Örneğin:
+          let resolved_args = self.resolve_args(self.bound_args, call_args);
+//         // self.func.call(resolved_args)
+     }
+ }
