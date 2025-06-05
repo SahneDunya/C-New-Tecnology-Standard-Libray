@@ -1,0 +1,140 @@
+// rand.cnt
+// Standart Rastgele Sayı Üretimi (Random Number Generation) modülü
+
+import std::string; // Hata mesajları için
+
+// Harici C veya sistem rastgele sayı API'lerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, çekirdek işletim sistemi veya donanım rastgelelik kaynaklarını kullanır.
+// Örneğin: /dev/urandom, getrandom(), CryptGenRandom()
+extern fn _cnt_rand_get_u64() -> u64; // Kriptografik olarak güvenli, 64-bit işaretsiz tam sayı
+extern fn _cnt_rand_thread_rng_new() -> _cnt_Result_ThreadRng_rand_Error; // İş parçacığına özgü RNG oluştur
+extern fn _cnt_rand_thread_rng_next_u32(rng: &mut ThreadRng) -> u32; // İş parçacığı RNG'sinden sonraki u32
+extern fn _cnt_rand_thread_rng_next_u64(rng: &mut ThreadRng) -> u64; // İş parçacığı RNG'sinden sonraki u64
+extern fn _cnt_rand_thread_rng_drop(rng: ThreadRng) -> void; // RNG kaynağını serbest bırakır
+
+// `u32` ve `u64` tipleri: İşaretsiz 32-bit ve 64-bit tam sayılar.
+// CNT'de yerleşik olduğu varsayılır.
+
+/// `Error` Enum'u: Rastgele sayı üretimi sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Sistem rastgelelik kaynağına erişilemiyor veya hata oluştu.
+    SystemError(string);
+    /// Geçersiz argüman.
+    InvalidInput(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Daha önceki modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `ThreadRng`: İş parçacığına özgü, hızlı ve genellikle kriptografik olarak güvenli olmayan
+/// rastgele sayı üreteci (RNG).
+/// Çoğu oyun ve simülasyon ihtiyacı için uygundur.
+pub struct ThreadRng {
+    // Dahili RNG durumu (örn. bir PRNG'nin seed'i veya bir dosya tanımlayıcısı)
+}
+
+/// Kriptografik olarak güvenli, sistemden gelen 64-bit rastgele bir sayı döndürür.
+/// Bu fonksiyon, işletim sisteminin yüksek kaliteli rastgelelik kaynağını kullanır.
+/// Performansı daha düşük olabilir ancak güvenlik kritik uygulamalar için idealdir.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa 64-bit rastgele sayıyı içeren `Result::Ok(u64)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn get_system_random_u64() -> Result<u64, Error> {
+    // Bu fonksiyon doğrudan sistemin kriptografik RNG'sinden veri çeker.
+    // Başarısızlık durumunda bir Error::SystemError döndürmelidir.
+    let val = _cnt_rand_get_u64();
+    Result::Ok(val) // _cnt_rand_get_u64'ün zaten Result döndürdüğü varsayılıyor
+}
+
+/// Mevcut iş parçacığı için yeni bir `ThreadRng` (Rastgele Sayı Üreteci) oluşturur.
+/// Bu RNG genellikle deterministik olarak (aynı seed ile aynı sonuçlar) oluşturulmaz,
+/// sistemin rastgelelik kaynağıyla beslenir.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `ThreadRng` nesnesi içeren `Result::Ok(ThreadRng)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn thread_rng() -> Result<ThreadRng, Error> {
+    _cnt_rand_thread_rng_new()
+}
+
+/// Bir `ThreadRng`'den bir sonraki 32-bit işaretsiz rastgele sayıyı döndürür.
+///
+/// # Parametreler
+/// - `rng`: Kullanılacak `ThreadRng`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// 32-bit rastgele sayı.
+pub fn next_u32(rng: &mut ThreadRng) -> u32 {
+    _cnt_rand_thread_rng_next_u32(rng)
+}
+
+/// Bir `ThreadRng`'den bir sonraki 64-bit işaretsiz rastgele sayıyı döndürür.
+///
+/// # Parametreler
+/// - `rng`: Kullanılacak `ThreadRng`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// 64-bit rastgele sayı.
+pub fn next_u64(rng: &mut ThreadRng) -> u64 {
+    _cnt_rand_thread_rng_next_u64(rng)
+}
+
+/// Belirli bir aralıkta (dahil-dahil) rastgele bir tam sayı döndürür.
+///
+/// # Parametreler
+/// - `rng`: Kullanılacak `ThreadRng`'nin mutable referansı.
+/// - `min`: Üretilecek sayının alt sınırı (dahil).
+/// - `max`: Üretilecek sayının üst sınırı (dahil).
+///
+/// # Dönüş Değeri
+/// Belirtilen aralıktaki rastgele bir `int`.
+pub fn gen_range_int(rng: &mut ThreadRng, min: int, max: int) -> int {
+    if min > max {
+        // Hata durumu, belki bir Result<int, Error> döndürülebilir
+        // Şimdilik varsayılan bir değer veya panik.
+        return min; // Veya hata mesajı ile Result::Err
+    }
+    // Basit bir aralık hesaplaması (daha sağlam bir modulo + bölme stratejisi gerekir)
+    // Bu, ThreadRng'den alınan ham u64'ü int aralığına sıkıştırır.
+    let range = (max - min) as u64 + 1;
+    let random_val = next_u64(rng);
+    // Modulo operatörünün negatif sayılarla davranışı dilinizde tanımlı olmalı.
+    // Güvenli bir range algoritması daha karmaşık olabilir (bias'ı önlemek için).
+    min + (random_val % range) as int
+}
+
+/// Belirli bir aralıkta (dahil-hariç) rastgele bir ondalık sayı döndürür (0.0 ile 1.0 arası).
+///
+/// # Parametreler
+/// - `rng`: Kullanılacak `ThreadRng`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// 0.0 (dahil) ile 1.0 (hariç) arasında rastgele bir `float`.
+pub fn gen_float(rng: &mut ThreadRng) -> float {
+    // u64'ü maksimum u64 değeri üzerinden normalize ederek 0.0-1.0 aralığına çevirir.
+    // float'a cast ederken hassasiyet kayıpları olabilir.
+    let random_u664 = next_u64(rng);
+    // Bu, float'a dönüştürme için tipik bir yaklaşımdır.
+    random_u664 as float / (u64::MAX as float + 1.0)
+}
+
+/// `ThreadRng` kaynağını serbest bırakır.
+/// Bu fonksiyon genellikle `ThreadRng` kapsam dışına çıktığında otomatik olarak çağrılır.
+///
+/// # Parametreler
+/// - `rng`: Serbest bırakılacak `ThreadRng` (sahiplik taşınır ve kaynak serbest bırakılır).
+pub fn drop_rng(rng: ThreadRng) -> void {
+    _cnt_rand_thread_rng_drop(rng)
+}
+
+// --- İstenirse Eklenebilecek Diğer Fonksiyonlar ---
+// - seed_rng(seed: u64): ThreadRng'yi belirli bir seed ile başlatma (deterministik testler için).
+// - shuffle<T>(list: &mut collections::List<T>, rng: &mut ThreadRng): Bir listenin elemanlarını karıştırma.
+// - choose<T>(list: &collections::List<T>, rng: &mut ThreadRng) -> Option<&T>: Bir listeden rastgele eleman seçme.
