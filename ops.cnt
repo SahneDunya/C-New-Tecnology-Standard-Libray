@@ -1,0 +1,385 @@
+// ops.cnt
+// Standart Operatör Trait'leri Modülü
+// Kullanıcı tanımlı tipler için operatör aşırı yüklemesini sağlar.
+
+// Not: Bu trait'lerin CNT derleyicisi tarafından özel olarak tanındığı ve işlendiği varsayılmıştır.
+// Rust'taki `std::ops` modülündeki gibi, her bir operatör için bir trait tanımlanır.
+// Bu trait'leri implemente etmek, ilgili operatörü aşırı yükler.
+
+// --- 1. Aritmetik Operatörler ---
+
+/// `Add<RHS = Self>`: Toplama operatörü `+` için trait.
+///
+/// `RHS`: Sağ el operandın tipi (varsayılan olarak `Self`).
+///
+/// `add(self, rhs: RHS) -> Self::Output` metodu tanımlar.
+pub trait Add<RHS = Self> {
+    /// Bu operatörün dönüş tipi. Genellikle `Self` veya `RHS` ile uyumlu bir tiptir.
+    type Output;
+
+    /// İki değeri toplar.
+    fn add(self, rhs: RHS) -> Self::Output;
+}
+
+/// `Sub<RHS = Self>`: Çıkarma operatörü `-` için trait.
+///
+/// `sub(self, rhs: RHS) -> Self::Output` metodu tanımlar.
+pub trait Sub<RHS = Self> {
+    type Output;
+    fn sub(self, rhs: RHS) -> Self::Output;
+}
+
+/// `Mul<RHS = Self>`: Çarpma operatörü `*` için trait.
+///
+/// `mul(self, rhs: RHS) -> Self::Output` metodu tanımlar.
+pub trait Mul<RHS = Self> {
+    type Output;
+    fn mul(self, rhs: RHS) -> Self::Output;
+}
+
+/// `Div<RHS = Self>`: Bölme operatörü `/` için trait.
+///
+/// `div(self, rhs: RHS) -> Self::Output` metodu tanımlar.
+pub trait Div<RHS = Self> {
+    type Output;
+    fn div(self, rhs: RHS) -> Self::Output;
+}
+
+/// `Rem<RHS = Self>`: Modulo (kalan) operatörü `%` için trait.
+///
+/// `rem(self, rhs: RHS) -> Self::Output` metodu tanımlar.
+pub trait Rem<RHS = Self> {
+    type Output;
+    fn rem(self, rhs: RHS) -> Self::Output;
+}
+
+/// `Neg`: Tekli eksi operatörü `-` için trait (negasyon).
+///
+/// `neg(self) -> Self::Output` metodu tanımlar.
+pub trait Neg {
+    type Output;
+    fn neg(self) -> Self::Output;
+}
+
+/// `Not`: Mantıksal DEĞİL veya bitsel DEĞİL operatörü `!` için trait.
+///
+/// `not(self) -> Self::Output` metodu tanımlar.
+pub trait Not {
+    type Output;
+    fn not(self) -> Self::Output;
+}
+
+// --- 2. Atama Operatörleri (Compound Assignment Operators) ---
+
+/// `AddAssign<RHS = Self>`: Yerinde toplama atama operatörü `+=` için trait.
+///
+/// `add_assign(&mut self, rhs: RHS)` metodu tanımlar.
+pub trait AddAssign<RHS = Self> {
+    fn add_assign(&mut self, rhs: RHS);
+}
+
+/// `SubAssign<RHS = Self>`: Yerinde çıkarma atama operatörü `-=` için trait.
+pub trait SubAssign<RHS = Self> {
+    fn sub_assign(&mut self, rhs: RHS);
+}
+
+/// `MulAssign<RHS = Self>`: Yerinde çarpma atama operatörü `*=` için trait.
+pub trait MulAssign<RHS = Self> {
+    fn mul_assign(&mut self, rhs: RHS);
+}
+
+/// `DivAssign<RHS = Self>`: Yerinde bölme atama operatörü `/=` için trait.
+pub trait DivAssign<RHS = Self> {
+    fn div_assign(&mut self, rhs: RHS);
+}
+
+/// `RemAssign<RHS = Self>`: Yerinde modulo atama operatörü `%=` için trait.
+pub trait RemAssign<RHS = Self> {
+    fn rem_assign(&mut self, rhs: RHS);
+}
+
+// Bitwise Atama Operatörleri (Eğer dil destekliyorsa)
+ pub trait BitAndAssign<RHS = Self> { fn bitand_assign(&mut self, rhs: RHS); } // &=
+ pub trait BitOrAssign<RHS = Self> { fn bitor_assign(&mut self, rhs: RHS); }  // |=
+ pub trait BitXorAssign<RHS = Self> { fn bitxor_assign(&mut self, rhs: RHS); } // ^=
+ pub trait ShlAssign<RHS = Self> { fn shl_assign(&mut self, rhs: RHS); }  // <<=
+ pub trait ShrAssign<RHS = Self> { fn shr_assign(&mut self, rhs: RHS); }  // >>=
+
+// --- 3. Karşılaştırma Operatörleri ---
+
+/// `PartialEq<RHS = Self>`: Kısmi eşitlik operatörü `==` ve `!=` için trait.
+///
+/// `eq(&self, other: &RHS) -> bool` metodu tanımlar.
+/// `ne(&self, other: &RHS) -> bool` varsayılan bir implementasyona sahip olabilir.
+pub trait PartialEq<RHS = Self> {
+    fn eq(&self, other: &RHS) -> bool;
+
+    // Varsayılan implementasyon
+    fn ne(&self, other: &RHS) -> bool {
+        !self.eq(other)
+    }
+}
+
+/// `Eq`: Tam eşitlik için trait. `PartialEq`'i implemente eden ve her zaman yansıtıcı, simetrik ve geçişli olan tipler için bir işaretleyici.
+///
+/// Her zaman `a == a` doğruysa ve diğer matematiksel eşitlik özellikleri sağlanıyorsa bu trait implemente edilir.
+/// `Eq` trait'i genellikle metot tanımlamaz, sadece bir işaretleyicidir.
+pub trait Eq: PartialEq<Self> {}
+
+/// `PartialOrd<RHS = Self>`: Kısmi sıralama operatörleri `<`, `<=`, `>`, `>=` için trait.
+///
+/// `partial_cmp(&self, other: &RHS) -> Option<Ordering>` metodu tanımlar.
+/// `lt`, `le`, `gt`, `ge` metotları varsayılan implementasyonlara sahip olabilir.
+pub trait PartialOrd<RHS = Self>: PartialEq<RHS> {
+    // CNT'nin bir `Option` ve `Ordering` enum'u olduğu varsayılmıştır.
+    // enum Ordering { Less, Equal, Greater }
+    type Ordering; // Varsayımsal olarak std::cmp::Ordering gibi bir enum
+
+    fn partial_cmp(&self, other: &RHS) -> std::option::Option<Self::Ordering>;
+
+    // Varsayılan implementasyonlar
+    fn lt(&self, other: &RHS) -> bool {
+        match self.partial_cmp(other) {
+            std::option::Option::Some(o) => o == Self::Ordering::Less,
+            std::option::Option::None => false,
+        }
+    }
+    fn le(&self, other: &RHS) -> bool {
+        match self.partial_cmp(other) {
+            std::option::Option::Some(o) => o == Self::Ordering::Less || o == Self::Ordering::Equal,
+            std::option::Option::None => false,
+        }
+    }
+    fn gt(&self, other: &RHS) -> bool {
+        match self.partial_cmp(other) {
+            std::option::Option::Some(o) => o == Self::Ordering::Greater,
+            std::option::Option::None => false,
+        }
+    }
+    fn ge(&self, other: &RHS) -> bool {
+        match self.partial_cmp(other) {
+            std::option::Option::Some(o) => o == Self::Ordering::Greater || o == Self::Ordering::Equal,
+            std::option::Option::None => false,
+        }
+    }
+}
+
+/// `Ord`: Tam sıralama için trait. `PartialOrd` ve `Eq`'i implemente eden tipler için bir işaretleyici.
+///
+/// Her zaman total olarak sıralanabilir olan tipler için implemente edilir.
+/// `cmp(&self, other: &Self) -> Ordering` metodu tanımlar.
+pub trait Ord: Eq + PartialOrd<Self> {
+    fn cmp(&self, other: &Self) -> Self::Ordering;
+}
+
+// --- 4. Dizinleme Operatörleri ---
+
+/// `Index<Idx>`: Dizinleme operatörü `[]` (değişmez erişim) için trait.
+///
+/// `Idx`: Dizin tipidir (örneğin, `u64`, `usize`, `Range`).
+///
+/// `index(&self, index: Idx) -> &Self::Output` metodu tanımlar.
+pub trait Index<Idx> {
+    type Output: ?Sized; // Output tipi Sized olmak zorunda değil
+    fn index(&self, index: Idx) -> &Self::Output;
+}
+
+/// `IndexMut<Idx>`: Değişebilir dizinleme operatörü `[]` (değişebilir erişim) için trait.
+///
+/// `index_mut(&mut self, index: Idx) -> &mut Self::Output` metodu tanımlar.
+pub trait IndexMut<Idx>: Index<Idx> {
+    fn index_mut(&mut self, index: Idx) -> &mut Self::Output;
+}
+
+// --- 5. Fonksiyon Çağrı Operatörleri (Closures / Callables) ---
+
+/// `Fn<Args>`: Değişmez (immutable) referans ile bir fonksiyonu çağırabilen tipler için trait.
+///
+/// `Args`: Fonksiyonun argümanlarını temsil eden bir tuple tipidir.
+///
+/// `call(&self, args: Args) -> Self::Output` metodu tanımlar.
+pub trait Fn<Args> {
+    type Output;
+    fn call(&self, args: Args) -> Self::Output;
+}
+
+/// `FnMut<Args>`: Değişebilir (mutable) referans ile bir fonksiyonu çağırabilen tipler için trait.
+///
+/// `call_mut(&mut self, args: Args) -> Self::Output` metodu tanımlar.
+pub trait FnMut<Args>: Fn<Args> {
+    fn call_mut(&mut self, args: Args) -> Self::Output;
+}
+
+/// `FnOnce<Args>`: Değer olarak alınarak bir kez çağrılabilen tipler için trait.
+///
+/// `call_once(self, args: Args) -> Self::Output` metodu tanımlar.
+pub trait FnOnce<Args>: FnMut<Args> { // `FnOnce`'ın `FnMut`'tan daha kısıtlayıcı olduğunu varsayalım.
+    fn call_once(self, args: Args) -> Self::Output;
+}
+
+// --- Örnek Kullanım ---
+
+import std::string;
+import std::io; // println için
+import std::ops; // Operatör trait'leri için
+import std::cmp; // Ordering enum'u için (varsayımsal)
+
+// Basit bir 2D Vektör Struct'ı
+pub struct Vector2D {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Vector2D {
+    pub fn new(x: i32, y: i32) -> Vector2D {
+        Vector2D { x, y }
+    }
+
+    pub fn to_string(&self) -> string {
+        "(".to_string() + self.x.to_string() + ", ".to_string() + self.y.to_string() + ")".to_string()
+    }
+}
+
+// --- Vector2D için Operatör Aşırı Yüklemeleri ---
+
+// Toplama: Vector2D + Vector2D
+impl ops::Add for Vector2D {
+    type Output = Vector2D;
+
+    fn add(self, rhs: Vector2D) -> Vector2D {
+        Vector2D::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
+// Çıkarma: Vector2D - Vector2D
+impl ops::Sub for Vector2D {
+    type Output = Vector2D;
+
+    fn sub(self, rhs: Vector2D) -> Vector2D {
+        Vector2D::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+// Negasyon: -Vector2D
+impl ops::Neg for Vector2D {
+    type Output = Vector2D;
+
+    fn neg(self) -> Vector2D {
+        Vector2D::new(-self.x, -self.y)
+    }
+}
+
+// Yerinde Toplama: Vector2D += Vector2D
+impl ops::AddAssign for Vector2D {
+    fn add_assign(&mut self, rhs: Vector2D) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+    }
+}
+
+// Eşitlik: Vector2D == Vector2D
+impl ops::PartialEq for Vector2D {
+    fn eq(&self, other: &Vector2D) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+// Tam Eşitlik (Eğer PartialEq tüm durumlarda doğruysa, Eq da implemente edilebilir)
+impl ops::Eq for Vector2D {}
+
+
+// Kısmi Sıralama: Vector2D < Vector2D (veya diğerleri)
+// Vektörlerin kısmi sıralanması genellikle zordur, ancak basit bir lexikografik sıralama yapabiliriz.
+// Eğer x'ler eşitse y'ye bak.
+impl ops::PartialOrd for Vector2D {
+    type Ordering = std::cmp::Ordering; // Varsayımsal `std::cmp::Ordering` enum'u
+
+    fn partial_cmp(&self, other: &Vector2D) -> std::option::Option<Self::Ordering> {
+        if self.x < other.x {
+            std::option::Option::Some(Self::Ordering::Less)
+        } else if self.x > other.x {
+            std::option::Option::Some(Self::Ordering::Greater)
+        } else { // x'ler eşitse y'ye bak
+            if self.y < other.y {
+                std::option::Option::Some(Self::Ordering::Less)
+            } else if self.y > other.y {
+                std::option::Option::Some(Self::Ordering::Greater)
+            } else {
+                std::option::Option::Some(Self::Ordering::Equal)
+            }
+        }
+    }
+}
+
+// Dizinleme: Vector2D[0], Vector2D[1]
+impl ops::Index<u64> for Vector2D {
+    type Output = i32;
+
+    fn index(&self, index: u64) -> &Self::Output {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            _ => std::assert::panic("Vector2D index out of bounds.".to_string()),
+        }
+    }
+}
+
+impl ops::IndexMut<u64> for Vector2D {
+    fn index_mut(&mut self, index: u64) -> &mut Self::Output {
+        match index {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            _ => std::assert::panic("Vector2D index out of bounds.".to_string()),
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting Ops example...".to_string());
+
+    let vec1 = Vector2D::new(10, 20);
+    let vec2 = Vector2D::new(5, 7);
+
+    // Aritmetik Operatörler
+    let sum_vec = vec1 + vec2; // Add trait'i
+    io::println("Vec1 + Vec2: ".to_string() + sum_vec.to_string()); // (15, 27)
+
+    let sub_vec = vec1 - vec2; // Sub trait'i
+    io::println("Vec1 - Vec2: ".to_string() + sub_vec.to_string()); // (5, 13)
+
+    let neg_vec = -vec1; // Neg trait'i
+    io::println("-Vec1: ".to_string() + neg_vec.to_string()); // (-10, -20)
+
+    let mut vec3 = Vector2D::new(1, 1);
+    vec3 += Vector2D::new(2, 3); // AddAssign trait'i
+    io::println("Vec3 (after +=): ".to_string() + vec3.to_string()); // (3, 4)
+
+    // Karşılaştırma Operatörleri
+    io::println("vec1 == Vector2D(10, 20): ".to_string() + (vec1 == Vector2D::new(10, 20)).to_string()); // true
+    io::println("vec1 != vec2: ".to_string() + (vec1 != vec2).to_string()); // true
+    io::println("vec1 < vec2: ".to_string() + (vec1 < vec2).to_string()); // false (10 < 5 değil)
+    io::println("vec1 > vec2: ".to_string() + (vec1 > vec2).to_string()); // true (10 > 5)
+
+    // Dizinleme Operatörleri
+    io::println("vec1.x (via index): ".to_string() + vec1[0].to_string()); // 10
+    io::println("vec1.y (via index): ".to_string() + vec1[1].to_string()); // 20
+
+    let mut vec4 = Vector2D::new(50, 60);
+    vec4[0] = 70; // IndexMut trait'i
+    io::println("vec4 (after index mutation): ".to_string() + vec4.to_string()); // (70, 60)
+
+    // Fonksiyon Çağrı Operatörleri (Closures)
+    let my_closure = |a: i32, b: i32| -> i32 {
+        a * b
+    };
+    io::println("Closure call (5 * 7): ".to_string() + my_closure.call((5, 7)).to_string()); // 35
+    
+    let mut mutable_closure = |val: i32| {
+        vec4.x += val; // Dışarıdaki vec4'ü değiştir
+        io::println("vec4.x updated to: ".to_string() + vec4.x.to_string());
+    };
+    mutable_closure.call_mut((10,)); // vec4.x 80 olur
+
+    io::println("Ops example finished.".to_string());
+}
