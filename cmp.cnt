@@ -1,0 +1,360 @@
+// cmp.cnt
+// Standart Karşılaştırma Modülü
+// Değerler arasındaki eşitliği ve sıralamayı tanımlamak için trait'ler sağlar.
+
+import std::option::Option; // PartialOrd için Option<Ordering> dönüş tipi
+
+/// `Ordering`: İki değerin karşılaştırılması sonucunu temsil eder.
+/// Üç olası durum vardır: Less, Equal veya Greater.
+pub enum Ordering {
+    /// Birinci değer ikinciden küçüktür.
+    Less,
+    /// İki değer eşittir.
+    Equal,
+    /// Birinci değer ikinciden büyüktür.
+    Greater,
+}
+
+// `Ordering` enum'ı için bazı temel metotlar (Rust'tan esinlenerek)
+impl Ordering {
+    /// `reverse(&self) -> Ordering`: Sıralama sonucunu tersine çevirir.
+    /// Less -> Greater, Greater -> Less, Equal -> Equal
+    pub fn reverse(&self) -> Ordering {
+        match *self {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Greater => Ordering::Less,
+            Ordering::Equal => Ordering::Equal,
+        }
+    }
+}
+
+/// `PartialEq`: İki değerin kısmi eşitliğini tanımlayan bir trait.
+///
+/// Bu trait, `==` ve `!=` operatörlerinin kullanılmasına izin verir.
+/// Eğer bir tür `PartialEq` implemente ediyorsa, eşitlik karşılaştırmaları yapabilir.
+/// Kayan nokta sayıları gibi bazı türler için tam eşitlik her zaman tanımlanamaz,
+/// bu yüzden "kısmi" eşitliktir.
+pub trait PartialEq<Rhs = Self> {
+    /// `eq(&self, other: &Rhs) -> bool`: Bu değerin `other` değerine eşit olup olmadığını kontrol eder.
+    fn eq(&self, other: &Rhs) -> bool;
+
+    /// `ne(&self, other: &Rhs) -> bool`: Bu değerin `other` değerine eşit olup olmadığını kontrol eder.
+    /// Varsayılan implementasyon `!self.eq(other)` şeklindedir.
+    fn ne(&self, other: &Rhs) -> bool {
+        !self.eq(other)
+    }
+}
+
+/// `Eq`: Tam eşitliği tanımlayan bir trait.
+///
+/// Bir tür, eğer `PartialEq` implemente ediyorsa ve onun için eşitlik ilişkisi
+/// (refleksif, simetrik ve geçişli) her zaman tanımlanmışsa `Eq` implemente edebilir.
+/// `Eq` implemente etmek için özel bir metot gerekmez, sadece `PartialEq`'in
+/// tatmin etmesi gereken özellikleri sağlaması yeterlidir.
+pub trait Eq: PartialEq<Self> {} // Eq, PartialEq'den türetilmiştir
+
+/// `PartialOrd`: İki değerin kısmi sıralamasını tanımlayan bir trait.
+///
+/// Bu trait, `<`, `<=`, `>`, `>=` operatörlerinin kullanılmasına izin verir.
+/// `partial_cmp` metodu, karşılaştırma sonucunu `Option<Ordering>` olarak döndürür,
+/// çünkü bazı durumlarda (örn. NaN ile karşılaştırma) sıralama tanımlanamayabilir.
+pub trait PartialOrd<Rhs = Self>: PartialEq<Rhs> {
+    /// `partial_cmp(&self, other: &Rhs) -> Option<Ordering>`:
+    /// Bu değer ile `other` değeri arasındaki kısmi sıralamayı döndürür.
+    ///
+    /// Eğer karşılaştırma yapılamazsa `None` döndürür (örn. kayan nokta NaN değerleri).
+    fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;
+
+    /// `lt(&self, other: &Rhs) -> bool`: Bu değerin `other` değerinden kesinlikle küçük olup olmadığını kontrol eder.
+    /// Varsayılan implementasyon: `self.partial_cmp(other) == Some(Ordering::Less)`
+    fn lt(&self, other: &Rhs) -> bool {
+        self.partial_cmp(other) == Option::Some(Ordering::Less)
+    }
+
+    /// `le(&self, other: &Rhs) -> bool`: Bu değerin `other` değerinden küçük veya eşit olup olmadığını kontrol eder.
+    /// Varsayılan implementasyon: `self.partial_cmp(other) != Some(Ordering::Greater)`
+    fn le(&self, other: &Rhs) -> bool {
+        self.partial_cmp(other) != Option::Some(Ordering::Greater)
+    }
+
+    /// `gt(&self, other: &Rhs) -> bool`: Bu değerin `other` değerinden kesinlikle büyük olup olmadığını kontrol eder.
+    /// Varsayılan implementasyon: `self.partial_cmp(other) == Some(Ordering::Greater)`
+    fn gt(&self, other: &Rhs) -> bool {
+        self.partial_cmp(other) == Option::Some(Ordering::Greater)
+    }
+
+    /// `ge(&self, other: &Rhs) -> bool`: Bu değerin `other` değerinden büyük veya eşit olup olmadığını kontrol eder.
+    /// Varsayılan implementasyon: `self.partial_cmp(other) != Some(Ordering::Less)`
+    fn ge(&self, other: &Rhs) -> bool {
+        self.partial_cmp(other) != Option::Some(Ordering::Less)
+    }
+}
+
+/// `Ord`: Tam sıralamayı tanımlayan bir trait.
+///
+/// Bir tür, eğer `PartialOrd` implemente ediyorsa ve sıralama ilişkisi (toplam sıralama)
+/// her zaman tanımlanmışsa `Ord` implemente edebilir.
+/// `cmp` metodu her zaman bir `Ordering` değeri döndürür (`Option` değildir).
+pub trait Ord: Eq + PartialOrd<Self> {
+    /// `cmp(&self, other: &Self) -> Ordering`:
+    /// Bu değer ile `other` değeri arasındaki toplam sıralamayı döndürür.
+    /// Asla `None` döndürmez.
+    fn cmp(&self, other: &Self) -> Ordering;
+
+    /// `max(self, other: Self) -> Self`: İki değerden büyük olanı döndürür.
+    /// Varsayılan implementasyon: `if self.cmp(&other) == Ordering::Greater { self } else { other }`
+    fn max(self, other: Self) -> Self {
+        if self.cmp(&other) == Ordering::Greater { self } else { other }
+    }
+
+    /// `min(self, other: Self) -> Self`: İki değerden küçük olanı döndürür.
+    /// Varsayılan implementasyon: `if self.cmp(&other) == Ordering::Less { self } else { other }`
+    fn min(self, other: Self) -> Self {
+        if self.cmp(&other) == Ordering::Less { self } else { other }
+    }
+}
+
+// --- Temel Tipler İçin `cmp` Trait Implementasyonları ---
+
+// u64 için PartialEq, Eq, PartialOrd, Ord
+impl PartialEq for u64 {
+    fn eq(&self, other: &u64) -> bool {
+        *self == *other // Varsayımsal yerleşik operatör
+    }
+}
+impl Eq for u64 {}
+impl PartialOrd for u64 {
+    fn partial_cmp(&self, other: &u64) -> Option<Ordering> {
+        if *self < *other {
+            Option::Some(Ordering::Less)
+        } else if *self == *other {
+            Option::Some(Ordering::Equal)
+        } else {
+            Option::Some(Ordering::Greater)
+        }
+    }
+}
+impl Ord for u64 {
+    fn cmp(&self, other: &u64) -> Ordering {
+        if *self < *other {
+            Ordering::Less
+        } else if *self == *other {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+// i64 için PartialEq, Eq, PartialOrd, Ord (benzer şekilde)
+impl PartialEq for i64 {
+    fn eq(&self, other: &i64) -> bool {
+        *self == *other
+    }
+}
+impl Eq for i64 {}
+impl PartialOrd for i64 {
+    fn partial_cmp(&self, other: &i64) -> Option<Ordering> {
+        if *self < *other {
+            Option::Some(Ordering::Less)
+        } else if *self == *other {
+            Option::Some(Ordering::Equal)
+        } else {
+            Option::Some(Ordering::Greater)
+        }
+    }
+}
+impl Ord for i64 {
+    fn cmp(&self, other: &i64) -> Ordering {
+        if *self < *other {
+            Ordering::Less
+        } else if *self == *other {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+// bool için PartialEq, Eq, PartialOrd, Ord
+// false < true olarak kabul edilir.
+impl PartialEq for bool {
+    fn eq(&self, other: &bool) -> bool {
+        *self == *other
+    }
+}
+impl Eq for bool {}
+impl PartialOrd for bool {
+    fn partial_cmp(&self, other: &bool) -> Option<Ordering> {
+        if *self == *other {
+            Option::Some(Ordering::Equal)
+        } else if !*self && *other { // self false, other true
+            Option::Some(Ordering::Less)
+        } else { // self true, other false
+            Option::Some(Ordering::Greater)
+        }
+    }
+}
+impl Ord for bool {
+    fn cmp(&self, other: &bool) -> Ordering {
+        if *self == *other {
+            Ordering::Equal
+        } else if !*self && *other {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    }
+}
+
+// String için PartialEq, Eq, PartialOrd, Ord
+// Lexicographical (sözlükbilimsel) sıralama.
+impl PartialEq for String {
+    fn eq(&self, other: &String) -> bool {
+        // Varsayımsal string eşitlik kontrolü
+        self.len() == other.len() && self.as_bytes() == other.as_bytes() // Varsayımsal as_bytes()
+    }
+}
+impl Eq for String {}
+impl PartialOrd for String {
+    fn partial_cmp(&self, other: &String) -> Option<Ordering> {
+        let self_bytes = self.as_bytes(); // Varsayımsal as_bytes()
+        let other_bytes = other.as_bytes();
+        let min_len = std::cmp::min(self_bytes.len(), other_bytes.len());
+
+        for i in 0..min_len {
+            if self_bytes[i] < other_bytes[i] {
+                return Option::Some(Ordering::Less);
+            }
+            if self_bytes[i] > other_bytes[i] {
+                return Option::Some(Ordering::Greater);
+            }
+        }
+        // Uzunluklar farklıysa
+        if self_bytes.len() < other_bytes.len() {
+            Option::Some(Ordering::Less)
+        } else if self_bytes.len() > other_bytes.len() {
+            Option::Some(Ordering::Greater)
+        } else {
+            Option::Some(Ordering::Equal)
+        }
+    }
+}
+impl Ord for String {
+    fn cmp(&self, other: &String) -> Ordering {
+        self.partial_cmp(other).unwrap() // String'ler her zaman sıralanabilir.
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::cmp::{self, Ordering}; // self ile tüm modülü, Ordering ile sadece enum'u getiriyoruz
+import std::io;
+import std::string::String;
+
+fn main() {
+    io::println("Starting cmp example...".to_string());
+
+    // --- Tam Sayılar (u64) ---
+    io::println("\n--- Integers (u64) ---".to_string());
+    let a: u64 = 10;
+    let b: u64 = 20;
+    let c: u64 = 10;
+
+    io::println("a == c: ".to_string() + (a == c).to_string()); // true
+    io::println("a != b: ".to_string() + (a != b).to_string()); // true
+    io::println("a < b: ".to_string() + (a < b).to_string());   // true
+    io::println("b >= c: ".to_string() + (b >= c).to_string()); // true
+
+    let result = a.cmp(&b);
+    io::println("a.cmp(&b) -> ".to_string() + match result {
+        Ordering::Less => "Less".to_string(),
+        Ordering::Equal => "Equal".to_string(),
+        Ordering::Greater => "Greater".to_string(),
+    }); // Less
+
+    io::println("max(a, b): ".to_string() + a.max(b).to_string()); // 20
+    io::println("min(a, c): ".to_string() + a.min(c).to_string()); // 10
+
+
+    // --- Boolean ---
+    io::println("\n--- Booleans ---".to_string());
+    let t: bool = true;
+    let f: bool = false;
+
+    io::println("t == f: ".to_string() + (t == f).to_string()); // false
+    io::println("f < t: ".to_string() + (f < t).to_string());   // true (false is considered less than true)
+    io::println("max(t, f): ".to_string() + t.max(f).to_string()); // true
+
+
+    // --- String'ler ---
+    io::println("\n--- Strings ---".to_string());
+    let s1: String = "apple".to_string();
+    let s2: String = "banana".to_string();
+    let s3: String = "apple".to_string();
+
+    io::println("s1 == s3: ".to_string() + (s1 == s3).to_string()); // true
+    io::println("s1 < s2: ".to_string() + (s1 < s2).to_string());   // true (lexicographical)
+
+    let string_result = s1.cmp(&s2);
+    io::println("s1.cmp(&s2) -> ".to_string() + match string_result {
+        Ordering::Less => "Less".to_string(),
+        Ordering::Equal => "Equal".to_string(),
+        Ordering::Greater => "Greater".to_string(),
+    }); // Less
+
+    io::println("max(s1, s2): ".to_string() + s1.max(s2).clone()); // banana
+
+
+    // --- Özel Yapıların Karşılaştırılması ---
+    io::println("\n--- Custom Struct Comparison ---".to_string());
+
+    // Kendi karşılaştırılabilir struct'ımızı tanımlayalım
+    struct Person {
+        age: u64,
+        name: String,
+    }
+
+    // Person için PartialEq ve Eq implemente et
+    impl cmp::PartialEq for Person {
+        fn eq(&self, other: &Person) -> bool {
+            self.age == other.age && self.name == other.name
+        }
+    }
+    impl cmp::Eq for Person {}
+
+    // Person için PartialOrd ve Ord implemente et (yaşa göre sıralayalım)
+    impl cmp::PartialOrd for Person {
+        fn partial_cmp(&self, other: &Person) -> Option<Ordering> {
+            self.age.partial_cmp(&other.age) // Yaşa göre karşılaştır
+        }
+    }
+    impl cmp::Ord for Person {
+        fn cmp(&self, other: &Person) -> Ordering {
+            self.age.cmp(&other.age) // Yaşa göre sırala
+        }
+    }
+
+    let p1 = Person { age: 30, name: "Alice".to_string() };
+    let p2 = Person { age: 25, name: "Bob".to_string() };
+    let p3 = Person { age: 30, name: "Charlie".to_string() };
+
+    io::println("p1 == p3: ".to_string() + (p1 == p3).to_string()); // false (isimler farklı)
+    io::println("p1.age == p3.age: ".to_string() + (p1.age == p3.age).to_string()); // true
+
+    io::println("p1 > p2 (by age): ".to_string() + (p1 > p2).to_string()); // true
+    io::println("p2 < p1 (by age): ".to_string() + (p2 < p1).to_string()); // true
+
+    let person_result = p1.cmp(&p3);
+    io::println("p1.cmp(&p3) (by age) -> ".to_string() + match person_result {
+        Ordering::Less => "Less".to_string(),
+        Ordering::Equal => "Equal".to_string(),
+        Ordering::Greater => "Greater".to_string(),
+    }); // Equal (çünkü sadece yaşa bakıyoruz)
+
+    io::println("max(p1, p2).name: ".to_string() + p1.max(p2).name); // Alice (p1'in yaşı daha büyük)
+
+
+    io::println("cmp example finished.".to_string());
+}
