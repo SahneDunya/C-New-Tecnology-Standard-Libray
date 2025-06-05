@@ -1,0 +1,218 @@
+// latch.cnt
+// Standart Latch (Mandal) Modülü
+// Bir grup iş parçacığının belirli bir geri sayımın sıfıra ulaşmasını beklemesini sağlar.
+
+import std::string;         // Hata mesajları için
+import std::assert;         // Geliştirme/hata ayıklama için
+import std::atomic;         // Atomik geri sayım için
+import std::mutex;          // Koşul değişkeni ile kullanım için
+import std::condition_variable; // İş parçacıklarını uyandırmak için
+import std::chrono;         // Süreli bekleme fonksiyonları için
+
+/// `Error` Enum'u: Latch işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Başlatma değeri geçersiz (örn. sıfır).
+    InvalidCount(string);
+    /// Latch zaten sıfıra ulaşmışken azaltmaya çalışmak.
+    AlreadyZero(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Latch` Struct'ı: Tek kullanımlık, düşürülebilir bir geri sayım mandalı.
+pub struct Latch {
+    // Atomik geri sayım sayacı.
+    counter: atomic::Atomic<i64>;
+    // Bekleyen iş parçacıklarını korumak için mutex.
+    mutex: mutex::Mutex;
+    // Bekleyen iş parçacıklarını uyandırmak için koşul değişkeni.
+    condition_variable: condition_variable::ConditionVariable;
+    // Latch'in başlatılıp başlatılmadığını gösteren bayrak.
+    is_initialized: bool;
+}
+
+/// Yeni bir `Latch` nesnesi oluşturur ve başlatır.
+///
+/// # Parametreler
+/// - `count`: Mandalı açmak için beklenen azaltma sayısı. Sıfırdan büyük olmalıdır.
+///
+/// # Dönüş Değeri
+/// `Result<Latch, Error>`: Başlatılan `Latch` nesnesi veya hata.
+pub fn new_latch(count: i64) -> Result<Latch, Error> {
+    if count <= 0 {
+        return Result::Err(Error::InvalidCount("Latch count must be positive.".to_string()));
+    }
+
+    match mutex::new_mutex() {
+        Result::Ok(m) => {
+            match condition_variable::new_condition_variable() {
+                Result::Ok(cv) => {
+                    Result::Ok(Latch {
+                        counter: atomic::new_atomic(count),
+                        mutex: m,
+                        condition_variable: cv,
+                        is_initialized: true,
+                    })
+                },
+                Result::Err(e) => {
+                    mutex::destroy_mutex(m).expect("Failed to destroy mutex during latch creation error.");
+                    Result::Err(Error::Other("Failed to initialize condition variable for Latch: ".to_string() + e.to_string()))
+                }
+            }
+        },
+        Result::Err(e) => Result::Err(Error::Other("Failed to initialize mutex for Latch: ".to_string() + e.to_string()))
+    }
+}
+
+/// `destroy_latch`: Bir `Latch` nesnesinin kaynaklarını serbest bırakır.
+/// Bu fonksiyon, `Latch` nesnesi kapsam dışına çıktığında veya artık kullanılmadığında
+/// otomatik olarak çağrılmalıdır (eğer CNT'de yıkıcılar varsa).
+///
+/// # Parametreler
+/// - `l`: Yok edilecek latch nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn destroy_latch(mut l: Latch) -> Result<void, Error> {
+    if !l.is_initialized {
+        return Result::Err(Error::Other("Attempted to destroy uninitialized latch.".to_string()));
+    }
+    mutex::destroy_mutex(l.mutex).expect("Failed to destroy mutex in Latch destructor.");
+    condition_variable::destroy_condition_variable(l.condition_variable).expect("Failed to destroy condition variable in Latch destructor.");
+    l.is_initialized = false;
+    Result::Ok(())
+}
+
+/// `count_down()`: Mandalı `n` kadar azaltır.
+/// Eğer sayaç sıfıra ulaşırsa, bekleyen tüm iş parçacıklarını uyandırır.
+///
+/// # Parametreler
+/// - `l`: Azaltılacak Latch nesnesi (mutable).
+/// - `n`: Sayacın azaltılacağı miktar (varsayılan olarak 1).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn count_down(l: &mut Latch, n: i64) -> Result<void, Error> {
+    if !l.is_initialized {
+        return Result::Err(Error::Other("Attempted to count_down on uninitialized latch.".to_string()));
+    }
+    if n < 0 {
+        return Result::Err(Error::InvalidCount("Count down amount cannot be negative.".to_string()));
+    }
+
+    // Atomik olarak sayacı azalt
+    let old_count = atomic::fetch_sub(&mut l.counter, n, atomic::MemoryOrder::AcqRel);
+
+    if old_count == 0 {
+        return Result::Err(Error::AlreadyZero("Latch count is already zero. Cannot count down further.".to_string()));
+    }
+    
+    // Sayaç sıfıra ulaştığında veya altına düştüğünde (olmaması gerekir), bekleyenleri uyandır
+    if old_count - n <= 0 { // old_count - n, operasyon sonrası değeri temsil eder.
+        let mut lk = mutex::make_lock_guard(&mut l.mutex)
+            .map_err(|e| Error::Other("Failed to acquire lock for count_down: ".to_string() + e.to_string()))?;
+        condition_variable::notify_all(&mut l.condition_variable)
+            .map_err(|e| Error::Other("Failed to notify_all in count_down: ".to_string() + e.to_string()))?;
+    }
+    Result::Ok(())
+}
+
+/// `wait()`: Mandalı `count_down()` ile sıfıra ulaşana kadar bekler.
+/// Sayaç zaten sıfırsa hemen geri döner.
+///
+/// # Parametreler
+/// - `l`: Beklenecek Latch nesnesi.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn wait(l: &Latch) -> Result<void, Error> {
+    if !l.is_initialized {
+        return Result::Err(Error::Other("Attempted to wait on uninitialized latch.".to_string()));
+    }
+
+    // Atomik olarak mevcut sayacı kontrol et
+    if atomic::load(&l.counter, atomic::MemoryOrder::Acquire) <= 0 {
+        return Result::Ok(()); // Zaten sıfır
+    }
+
+    let mut lk = mutex::make_lock_guard(&mut l.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for wait: ".to_string() + e.to_string()))?;
+
+    // Sayaç sıfırdan büyük olduğu sürece bekle
+    while atomic::load(&l.counter, atomic::MemoryOrder::Relaxed) > 0 { // Relaxed okunabilir, çünkü kilit zaten alındı.
+        condition_variable::wait(&mut l.condition_variable, &mut lk)
+            .map_err(|e| Error::Other("Failed to wait on condition variable for wait: ".to_string() + e.to_string()))?;
+    }
+    Result::Ok(())
+}
+
+/// `try_wait()`: Mandalı sıfıra ulaşıp ulaşmadığını bloke etmeden kontrol eder.
+///
+/// # Parametreler
+/// - `l`: Kontrol edilecek Latch nesnesi.
+///
+/// # Dönüş Değeri
+/// `bool`: Sayaç sıfır veya sıfırın altındaysa `true`, aksi takdirde `false`.
+pub fn try_wait(l: &Latch) -> bool {
+    if !l.is_initialized {
+        // Hata ayıklama modunda assert veya bir uyarı fırlatılabilir.
+        // Canlı sistemlerde bu tür bir durum beklenmez veya güvenli bir varsayılan döndürülür.
+        return false;
+    }
+    atomic::load(&l.counter, atomic::MemoryOrder::Acquire) <= 0
+}
+
+/// `current_count()`: Mandalda kalan mevcut geri sayım değerini döndürür.
+///
+/// # Parametreler
+/// - `l`: Geri sayımı alınacak Latch nesnesi.
+///
+/// # Dönüş Değeri
+/// `i64`: Mevcut geri sayım değeri.
+pub fn current_count(l: &Latch) -> i64 {
+    if !l.is_initialized {
+        return 0; // Hata veya varsayılan değer
+    }
+    atomic::load(&l.counter, atomic::MemoryOrder::Relaxed)
+}
+
+// --- Örnek Kullanım ---
+/*
+fn main() {
+    println("Starting Latch example...".to_string());
+
+    let mut my_latch = new_latch(3).expect("Failed to create latch");
+    let mut results: std::vector::Vector<i64> = std::vector::new_vector();
+    let results_ptr = &mut results as raw_ptr<std::vector::Vector<i64>>; // Paylaşılan kaynak
+
+    // Bir grup iş parçacığı oluştur
+    for i in 0..3 {
+        thread::spawn(|| {
+            let thread_id = thread::current_thread_id();
+            println("Thread ".to_string() + thread::thread_id_to_string(&thread_id) + " is doing its work...".to_string());
+            thread::sleep_for_nanos(100_000_000); // 100ms
+            println("Thread ".to_string() + thread::thread_id_to_string(&thread_id) + " finished its work.".to_string());
+
+            // İşini bitirdiğinde latch'i azalt
+            count_down(&mut my_latch, 1).expect("Failed to count down latch");
+        }).expect("Failed to spawn thread");
+    }
+
+    println("Main thread waiting for all threads to finish...".to_string());
+    // Ana iş parçacığı tüm alt iş parçacıklarının tamamlanmasını bekler
+    wait(&my_latch).expect("Failed to wait on latch");
+
+    println("All threads have finished their work. Latch opened!".to_string());
+
+    // my_latch'in tekrar kullanılamadığını test edebiliriz
+     let res = count_down(&mut my_latch, 1);
+     if res.is_err() {
+        println("Error: ".to_string() + res.unwrap_err().to_string()); // Beklenen hata: AlreadyZero
+     }
+}
