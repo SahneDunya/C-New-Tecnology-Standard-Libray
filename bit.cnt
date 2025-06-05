@@ -1,0 +1,328 @@
+// bit.cnt
+// Standart Bit Manipülasyon Modülü
+
+import std::string; // Hata mesajları için (gerektiğinde)
+import std::math;   // Muhtemelen min/max gibi yardımcılar için
+
+/// `Error` Enum'u: Bit işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz bit konumu (örn. int32 için 32 veya daha büyük bir konum).
+    InvalidBitPosition(string);
+    /// Geçersiz argüman.
+    InvalidArgument(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 1. Bit Test Etme ---
+
+/// Bir tam sayının belirli bir konumdaki bitinin ayarlı olup olmadığını (1 olup olmadığını) kontrol eder.
+///
+/// # Parametreler
+/// - `value`: Kontrol edilecek tam sayı.
+/// - `position`: Bitin konumu (0-tabanlı, en sağdaki bit 0).
+/// - `type_bits`: `value` tipinin toplam bit sayısı (örn. `int` için 32, `u64` için 64).
+///
+/// # Dönüş Değeri
+/// Bit ayarlıysa `true`, değilse `false`.
+pub fn is_bit_set(value: int, position: int, type_bits: int) -> bool {
+    if position < 0 || position >= type_bits {
+        // Hata fırlatma yerine, bu fonksiyon genellikle geçerli bir konum bekler.
+        // Güvenli bir API için Result döndürülebilir veya hata loglanabilir.
+        // Şimdilik doğrudan false döndürüyoruz.
+        return false; // Geçersiz konum
+    }
+    (value & (1 << position)) != 0
+}
+
+/// Bir `u8` (byte) içindeki belirli bir bitin ayarlı olup olmadığını kontrol eder.
+pub fn is_bit_set_u8(value: u8, position: int) -> bool {
+    if position < 0 || position >= 8 { return false; }
+    (value & (1u8 << position)) != 0u8
+}
+
+/// Bir `u16` içindeki belirli bir bitin ayarlı olup olmadığını kontrol eder.
+pub fn is_bit_set_u16(value: u16, position: int) -> bool {
+    if position < 0 || position >= 16 { return false; }
+    (value & (1u16 << position)) != 0u16
+}
+
+/// Bir `u32` içindeki belirli bir bitin ayarlı olup olmadığını kontrol eder.
+pub fn is_bit_set_u32(value: u32, position: int) -> bool {
+    if position < 0 || position >= 32 { return false; }
+    (value & (1u32 << position)) != 0u32
+}
+
+/// Bir `u64` içindeki belirli bir bitin ayarlı olup olmadığını kontrol eder.
+pub fn is_bit_set_u64(value: u64, position: int) -> bool {
+    if position < 0 || position >= 64 { return false; }
+    (value & (1u64 << position)) != 0u64
+}
+
+
+// --- 2. Bit Ayarlama ---
+
+/// Bir tam sayının belirli bir konumdaki bitini ayarlar (1 yapar).
+///
+/// # Parametreler
+/// - `value`: Bitin ayarlanacağı tam sayı.
+/// - `position`: Bitin konumu (0-tabanlı).
+/// - `type_bits`: `value` tipinin toplam bit sayısı.
+///
+/// # Dönüş Değeri
+/// Ayarlanmış bit ile yeni tam sayı.
+pub fn set_bit(value: int, position: int, type_bits: int) -> int {
+    if position < 0 || position >= type_bits {
+        return value; // Geçersiz konum, orijinal değeri döndür
+    }
+    value | (1 << position)
+}
+
+/// Bir `u8` içindeki belirli bir biti ayarlar.
+pub fn set_bit_u8(value: u8, position: int) -> u8 {
+    if position < 0 || position >= 8 { return value; }
+    value | (1u8 << position)
+}
+
+/// Bir `u16` içindeki belirli bir biti ayarlar.
+pub fn set_bit_u16(value: u16, position: int) -> u16 {
+    if position < 0 || position >= 16 { return value; }
+    value | (1u16 << position)
+}
+
+/// Bir `u32` içindeki belirli bir biti ayarlar.
+pub fn set_bit_u32(value: u32, position: int) -> u32 {
+    if position < 0 || position >= 32 { return value; }
+    value | (1u32 << position)
+}
+
+/// Bir `u64` içindeki belirli bir biti ayarlar.
+pub fn set_bit_u64(value: u64, position: int) -> u64 {
+    if position < 0 || position >= 64 { return value; }
+    value | (1u64 << position)
+}
+
+
+// --- 3. Bit Temizleme ---
+
+/// Bir tam sayının belirli bir konumdaki bitini temizler (0 yapar).
+///
+/// # Parametreler
+/// - `value`: Bitin temizleneceği tam sayı.
+/// - `position`: Bitin konumu (0-tabanlı).
+/// - `type_bits`: `value` tipinin toplam bit sayısı.
+///
+/// # Dönüş Değeri
+/// Temizlenmiş bit ile yeni tam sayı.
+pub fn clear_bit(value: int, position: int, type_bits: int) -> int {
+    if position < 0 || position >= type_bits {
+        return value; // Geçersiz konum, orijinal değeri döndür
+    }
+    value & !(1 << position)
+}
+
+/// Bir `u8` içindeki belirli bir biti temizler.
+pub fn clear_bit_u8(value: u8, position: int) -> u8 {
+    if position < 0 || position >= 8 { return value; }
+    value & !(1u8 << position)
+}
+
+/// Bir `u16` içindeki belirli bir biti temizler.
+pub fn clear_bit_u16(value: u16, position: int) -> u16 {
+    if position < 0 || position >= 16 { return value; }
+    value & !(1u16 << position)
+}
+
+/// Bir `u32` içindeki belirli bir biti temizler.
+pub fn clear_bit_u32(value: u32, position: int) -> u32 {
+    if position < 0 || position >= 32 { return value; }
+    value & !(1u32 << position)
+}
+
+/// Bir `u64` içindeki belirli bir biti temizler.
+pub fn clear_bit_u64(value: u64, position: int) -> u64 {
+    if position < 0 || position >= 64 { return value; }
+    value & !(1u64 << position)
+}
+
+
+// --- 4. Bit Değiştirme (Toggle) ---
+
+/// Bir tam sayının belirli bir konumdaki bitini tersine çevirir (0 ise 1, 1 ise 0 yapar).
+///
+/// # Parametreler
+/// - `value`: Bitin değiştirileceği tam sayı.
+/// - `position`: Bitin konumu (0-tabanlı).
+/// - `type_bits`: `value` tipinin toplam bit sayısı.
+///
+/// # Dönüş Değeri
+/// Değiştirilmiş bit ile yeni tam sayı.
+pub fn toggle_bit(value: int, position: int, type_bits: int) -> int {
+    if position < 0 || position >= type_bits {
+        return value; // Geçersiz konum, orijinal değeri döndür
+    }
+    value ^ (1 << position)
+}
+
+/// Bir `u8` içindeki belirli bir biti değiştirir.
+pub fn toggle_bit_u8(value: u8, position: int) -> u8 {
+    if position < 0 || position >= 8 { return value; }
+    value ^ (1u8 << position)
+}
+
+/// Bir `u16` içindeki belirli bir biti değiştirir.
+pub fn toggle_bit_u16(value: u16, position: int) -> u16 {
+    if position < 0 || position >= 16 { return value; }
+    value ^ (1u16 << position)
+}
+
+/// Bir `u32` içindeki belirli bir biti değiştirir.
+pub fn toggle_bit_u32(value: u32, position: int) -> u32 {
+    if position < 0 || position >= 32 { return value; }
+    value ^ (1u32 << position)
+}
+
+/// Bir `u64` içindeki belirli bir biti değiştirir.
+pub fn toggle_bit_u64(value: u64, position: int) -> u64 {
+    if position < 0 || position >= 64 { return value; }
+    value ^ (1u64 << position)
+}
+
+
+// --- 5. Bit Kaydırma ve Döndürme ---
+
+// Not: CNT'nin yerleşik `<<`, `>>` operatörleri zaten kaydırma yapar.
+// Döndürme (rotate) işlemleri bazı dillerde doğrudan operatör olarak bulunmayabilir,
+// bu yüzden burada faydalıdırlar.
+
+/// Bir tam sayının bitlerini belirli bir miktar sola döndürür (circular shift).
+/// Sağdan kayan bitler sola geri gelir.
+///
+/// # Parametreler
+/// - `value`: Döndürülecek tam sayı.
+/// - `shift`: Sola döndürülecek bit sayısı.
+/// - `type_bits`: `value` tipinin toplam bit sayısı.
+///
+/// # Dönüş Değeri
+/// Döndürülmüş tam sayı.
+pub fn rotate_left(value: int, shift: int, type_bits: int) -> int {
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; } // Pozitif moda çevir
+
+    (value << effective_shift) | (value >> (type_bits - effective_shift))
+}
+
+/// Bir `u8`'in bitlerini belirli bir miktar sola döndürür.
+pub fn rotate_left_u8(value: u8, shift: int) -> u8 {
+    let type_bits = 8;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value << effective_shift) | (value >> (type_bits - effective_shift))
+}
+
+/// Bir `u16`'nın bitlerini belirli bir miktar sola döndürür.
+pub fn rotate_left_u16(value: u16, shift: int) -> u16 {
+    let type_bits = 16;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value << effective_shift) | (value >> (type_bits - effective_shift))
+}
+
+/// Bir `u32`'nin bitlerini belirli bir miktar sola döndürür.
+pub fn rotate_left_u32(value: u32, shift: int) -> u32 {
+    let type_bits = 32;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value << effective_shift) | (value >> (type_bits - effective_shift))
+}
+
+/// Bir `u64`'ün bitlerini belirli bir miktar sola döndürür.
+pub fn rotate_left_u64(value: u64, shift: int) -> u64 {
+    let type_bits = 64;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value << effective_shift) | (value >> (type_bits - effective_shift))
+}
+
+
+/// Bir tam sayının bitlerini belirli bir miktar sağa döndürür (circular shift).
+/// Soldan kayan bitler sağa geri gelir.
+///
+/// # Parametreler
+/// - `value`: Döndürülecek tam sayı.
+/// - `shift`: Sağa döndürülecek bit sayısı.
+/// - `type_bits`: `value` tipinin toplam bit sayısı.
+///
+/// # Dönüş Değeri
+/// Döndürülmüş tam sayı.
+pub fn rotate_right(value: int, shift: int, type_bits: int) -> int {
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; } // Pozitif moda çevir
+
+    (value >> effective_shift) | (value << (type_bits - effective_shift))
+}
+
+/// Bir `u8`'in bitlerini belirli bir miktar sağa döndürür.
+pub fn rotate_right_u8(value: u8, shift: int) -> u8 {
+    let type_bits = 8;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value >> effective_shift) | (value << (type_bits - effective_shift))
+}
+
+/// Bir `u16`'nın bitlerini belirli bir miktar sağa döndürür.
+pub fn rotate_right_u16(value: u16, shift: int) -> u16 {
+    let type_bits = 16;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value >> effective_shift) | (value << (type_bits - effective_shift))
+}
+
+/// Bir `u32`'nin bitlerini belirli bir miktar sağa döndürür.
+pub fn rotate_right_u32(value: u32, shift: int) -> u32 {
+    let type_bits = 32;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value >> effective_shift) | (value << (type_bits - effective_shift))
+}
+
+/// Bir `u64`'ün bitlerini belirli bir miktar sağa döndürür.
+pub fn rotate_right_u64(value: u64, shift: int) -> u64 {
+    let type_bits = 64;
+    let effective_shift = shift % type_bits;
+    if effective_shift < 0 { effective_shift = effective_shift + type_bits; }
+
+    (value >> effective_shift) | (value << (type_bits - effective_shift))
+}
+
+
+// --- 6. Diğer Bit Yardımcıları (Gelecekte Eklenebilecekler) ---
+
+/// Bir tam sayıdaki set (1) bitlerin sayısını döndürür (popcount).
+ pub fn popcount(value: u64) -> int;
+
+/// Bir tam sayının en soldaki (en önemli) set bitinin konumunu döndürür (MSB).
+ pub fn leading_zeros(value: u64) -> int;
+
+/// Bir tam sayının en sağdaki (en az önemli) set bitinin konumunu döndürür (LSB).
+ pub fn trailing_zeros(value: u64) -> int;
+
+/// Belirli bir bayt dizisinden belirli bir bit aralığını (segmenti) okur.
+ pub fn read_bit_segment(bytes: &collections::List<u8>, start_bit: int, length_bits: int) -> u64;
+
+/// Belirli bir bayt dizisine belirli bir bit aralığını (segmenti) yazar.
+ pub fn write_bit_segment(bytes: &mut collections::List<u8>, start_bit: int, length_bits: int, value: u64);
