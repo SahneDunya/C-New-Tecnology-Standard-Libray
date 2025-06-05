@@ -1,0 +1,203 @@
+// allocator.cnt
+// Standart Bellek Tahsis Modülü
+// Çalışma zamanı bellek yönetimi için temel arayüzler ve varsayılan implementasyon.
+
+import std::ptr;        // Ham işaretçi manipülasyonları için
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// Not: Bu modül, CNT'nin işletim sistemiyle veya sanal makineyle doğrudan bellek yönetimi
+// arayüzüne (örneğin, `malloc`/`free` benzeri sistem çağrıları) erişebildiği varsayımına dayanır.
+// Bu fonksiyonlar derleyici intrinsikleri (`__builtin_alloc`, `__builtin_free`) olarak temsil edilmiştir.
+
+/// `Allocator` Trait'i: Bellek tahsis ediciler için temel arayüzü tanımlar.
+/// Bu trait, farklı bellek tahsis stratejilerinin (varsayılan yığın, havuzlar, yığınlar vb.)
+/// ortak bir arayüz üzerinden kullanılmasını sağlar.
+pub trait Allocator {
+    /// `allocate(size: u64, align: u64)`: Belirli bir boyutta (`size` bayt) ve hizalamada (`align` bayt) bellek tahsis eder.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü tahsis başarısız olabilir (null işaretçi döndürebilir)
+    /// veya yanlış `size`/`align` değerleri tanımsız davranışa yol açabilir.
+    ///
+    /// # Dönüş Değeri
+    /// `std::ptr::ptr_mut<u8>`: Tahsis edilen belleğin başlangıcına işaret eden ham, değişebilir bir işaretçi.
+    /// Tahsis başarısız olursa null işaretçi döndürülebilir.
+    unsafe fn allocate(size: u64, align: u64) -> std::ptr::ptr_mut<u8>;
+
+    /// `deallocate(ptr: std::ptr::ptr_mut<u8>, size: u64, align: u64)`: Daha önce `allocate` ile tahsis edilmiş belleği serbest bırakır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü `ptr` geçerli bir tahsis edilmiş bellek parçası olmayabilir,
+    /// `size` ve `align` değerleri orijinal tahsisle eşleşmeyebilir,
+    /// veya bellek iki kez serbest bırakılabilir (double-free).
+    unsafe fn deallocate(ptr: std::ptr::ptr_mut<u8>, size: u64, align: u64);
+
+    /// `reallocate(ptr: std::ptr::ptr_mut<u8>, old_size: u64, old_align: u64, new_size: u64)`:
+    /// Daha önce tahsis edilmiş bir bellek bloğunun boyutunu değiştirir.
+    /// Verinin eski ve yeni boyutun minimumu kadar korunması beklenir.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    unsafe fn reallocate(ptr: std::ptr::ptr_mut<u8>, old_size: u64, old_align: u64, new_size: u64) -> std::ptr::ptr_mut<u8>;
+}
+
+// --- 1. Varsayılan Sistem Yığın Tahsis Edicisi ---
+
+/// `SystemAllocator`: İşletim sisteminin varsayılan yığınını kullanan bir bellek tahsis edicidir.
+/// Bu, `malloc` ve `free` gibi fonksiyonlara karşılık gelir.
+pub struct SystemAllocator {}
+
+impl Allocator for SystemAllocator {
+    unsafe fn allocate(size: u64, align: u64) -> std::ptr::ptr_mut<u8> {
+        // Genellikle hizalama, malloc/free tarafından yönetilir veya özel bir intrinsik gerektirir.
+        // Basitlik için, şimdilik `__builtin_alloc`'un uygun hizalama sağladığını varsayalım.
+        let raw_ptr_address = __builtin_alloc(size); // Varsayımsal sistem tahsis intrinsiki
+        std::ptr::ptr_mut::from_address(raw_ptr_address)
+    }
+
+    unsafe fn deallocate(ptr: std::ptr::ptr_mut<u8>, size: u64, align: u64) {
+        // `size` ve `align` değerlerinin temel sistem `free` çağrısı için her zaman gerekli olmayabilir.
+        // Ancak bazı sistemlerde veya özel tahsis edicilerde bu bilgiler zorunlu olabilir.
+        __builtin_free(ptr.__address(), size); // Varsayımsal sistem serbest bırakma intrinsiki
+    }
+
+    unsafe fn reallocate(ptr: std::ptr::ptr_mut<u8>, old_size: u64, old_align: u64, new_size: u64) -> std::ptr::ptr_mut<u8> {
+        // `realloc` benzeri bir intrinsik varsayalım.
+        let raw_ptr_address = __builtin_realloc(ptr.__address(), old_size, new_size);
+        std::ptr::ptr_mut::from_address(raw_ptr_address)
+    }
+}
+
+// Global varsayılan tahsis edici örneği.
+// Bu, programın herhangi bir yerinden erişilebilen tek bir `SystemAllocator` örneği olacaktır.
+pub static DEFAULT_ALLOCATOR: SystemAllocator = SystemAllocator {};
+
+
+// --- 2. Yardımcı Fonksiyonlar (Genel Tahsis İçin) ---
+// Bu fonksiyonlar, varsayılan tahsis ediciyi kullanarak genel bellek tahsisi sağlar.
+
+/// `allocate<T>(count: u64)`: `T` tipinde `count` adet eleman için bellek tahsis eder.
+/// Tipin boyutu ve hizalaması otomatik olarak belirlenir.
+///
+/// # Güvenli Olmayan
+/// Tahsis başarısız olabilir veya döndürülen bellek yanlış kullanılabilir.
+///
+/// # Dönüş Değeri
+/// `std::ptr::ptr_mut<T>`: Tahsis edilen belleğin başlangıcına işaret eden ham işaretçi.
+/// Tahsis başarısız olursa null işaretçi döndürülür.
+pub unsafe fn allocate<T>(count: u64) -> std::ptr::ptr_mut<T> {
+    let size_of_t = __builtin_sizeof::<T>();
+    let align_of_t = __builtin_alignof::<T>(); // Varsayımsal hizalama intrinsiki
+    let total_size = size_of_t * count;
+
+    let raw_u8_ptr = DEFAULT_ALLOCATOR.allocate(total_size, align_of_t);
+    std::ptr::ptr_mut::from_address(raw_u8_ptr.__address()) // T tipine dönüştür
+}
+
+/// `deallocate<T>(ptr: std::ptr::ptr_mut<T>, count: u64)`: Daha önce `allocate` ile tahsis edilmiş belleği serbest bırakır.
+///
+/// # Güvenli Olmayan
+/// `ptr` geçerli olmayabilir veya `count` orijinal tahsisle eşleşmeyebilir.
+pub unsafe fn deallocate<T>(ptr: std::ptr::ptr_mut<T>, count: u64) {
+    let size_of_t = __builtin_sizeof::<T>();
+    let align_of_t = __builtin_alignof::<T>();
+    let total_size = size_of_t * count;
+
+    DEFAULT_ALLOCATOR.deallocate(ptr.as_ptr().byte_offset(0) as std::ptr::ptr_mut<u8>, total_size, align_of_t);
+}
+
+/// `reallocate<T>(ptr: std::ptr::ptr_mut<T>, old_count: u64, new_count: u64)`:
+/// Daha önce tahsis edilmiş `T` tipindeki bellek bloğunun boyutunu değiştirir.
+///
+/// # Güvenli Olmayan
+/// Bu fonksiyon güvenli değildir.
+pub unsafe fn reallocate<T>(ptr: std::ptr::ptr_mut<T>, old_count: u64, new_count: u64) -> std::ptr::ptr_mut<T> {
+    let size_of_t = __builtin_sizeof::<T>();
+    let align_of_t = __builtin_alignof::<T>();
+    let old_total_size = size_of_t * old_count;
+    let new_total_size = size_of_t * new_count;
+
+    let raw_u8_ptr = DEFAULT_ALLOCATOR.reallocate(
+        ptr.as_ptr().byte_offset(0) as std::ptr::ptr_mut<u8>,
+        old_total_size,
+        align_of_t,
+        new_total_size
+    );
+    std::ptr::ptr_mut::from_address(raw_u8_ptr.__address())
+}
+
+// --- Örnek Kullanım ---
+
+import std::string;
+
+fn main() {
+    println("Starting Allocator example...".to_string());
+
+    // 1. Tek bir tamsayı için bellek tahsis et ve kullan.
+    let mut int_ptr: std::ptr::ptr_mut<i64>;
+    unsafe {
+        int_ptr = std::allocator::allocate::<i64>(1); // Tek bir i64 için tahsis
+
+        if int_ptr.is_null() {
+            println("Failed to allocate memory for i64.".to_string());
+            return;
+        }
+
+        int_ptr.write(12345); // Değeri yaz
+        println("Allocated i64 value: ".to_string() + int_ptr.read().to_string()); // Değeri oku
+
+        std::allocator::deallocate::<i64>(int_ptr, 1); // Belleği serbest bırak
+        println("Deallocated i64 memory.".to_string());
+    }
+
+    println("---".to_string());
+
+    // 2. Bir dizi tamsayı için bellek tahsis et ve kullan.
+    let array_size = 5u64;
+    let mut int_array_ptr: std::ptr::ptr_mut<i32>;
+    unsafe {
+        int_array_ptr = std::allocator::allocate::<i32>(array_size); // 5 adet i32 için tahsis
+
+        if int_array_ptr.is_null() {
+            println("Failed to allocate memory for i32 array.".to_string());
+            return;
+        }
+
+        // Diziyi başlat
+        for i in 0..array_size {
+            int_array_ptr.offset(i as i64).write((i * 10) as i32);
+        }
+
+        println("Allocated i32 array elements:".to_string());
+        for i in 0..array_size {
+            println("- ".to_string() + int_array_ptr.offset(i as i64).read().to_string());
+        }
+
+        // 3. Reallocate ile boyutu değiştir
+        let new_array_size = 7u64;
+        let reallocated_array_ptr = std::allocator::reallocate::<i32>(int_array_ptr, array_size, new_array_size);
+
+        if reallocated_array_ptr.is_null() {
+            println("Failed to reallocate memory for i32 array.".to_string());
+            std::allocator::deallocate::<i32>(int_array_ptr, array_size); // Eski belleği serbest bırak
+            return;
+        }
+        int_array_ptr = reallocated_array_ptr; // İşaretçiyi güncelle
+
+        println("Reallocated i32 array elements (new size: ".to_string() + new_array_size.to_string() + "):".to_string());
+        // Yeni elemanları başlat (eskileri korunur)
+        for i in array_size..new_array_size {
+            int_array_ptr.offset(i as i64).write((i * 100) as i32);
+        }
+
+        for i in 0..new_array_size {
+            println("- ".to_string() + int_array_ptr.offset(i as i64).read().to_string());
+        }
+
+        std::allocator::deallocate::<i32>(int_array_ptr, new_array_size); // Belleği serbest bırak
+        println("Deallocated i32 array memory.".to_string());
+    }
+
+    println("Allocator example finished.".to_string());
+}
