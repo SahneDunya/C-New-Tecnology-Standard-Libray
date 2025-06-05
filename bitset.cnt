@@ -1,0 +1,452 @@
+// bitset.cnt
+// Standart Bitset Modülü
+// Sabit boyutlu bir bit dizisini temsil eder ve üzerinde bit manipülasyonları yapar.
+
+import std::string;     // String dönüşümleri ve hata mesajları için
+import std::vector;     // Dahili veri depolama için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Bitset işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// İndeks sınırların dışında.
+    IndexOutOfBounds(string);
+    /// Bitset'ler uyumsuz boyutlara sahip.
+    MismatchedSizes(string);
+    /// Dönüşüm sırasında taşma meydana geldi.
+    Overflow(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Dahili olarak bitleri tutmak için kullanılan temel birim boyutu.
+// Genellikle u64 kullanılır, çünkü çoğu CPU için doğal bir kelime boyutudur.
+pub const BITS_PER_BLOCK: u64 = 64;
+
+// --- 1. Bitset Yapısı ---
+
+/// `Bitset<N>` Struct'ı: `N` bitlik sabit boyutlu bir bit dizisi.
+///
+/// # Şablon Parametreleri
+/// - `N`: Bitset'in boyutu (bit sayısı). `u64` tipinde bir derleme zamanı sabiti.
+///
+/// Dahili olarak, bitler `u64` blokları halinde depolanır.
+pub struct Bitset<N: u64> {
+    // Bitleri depolayan u64 blokları.
+    // Gerekli blok sayısı: (N + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK
+    // `data` bir `std::vector<u64>` olarak tanımlanabilir, ancak sabit boyut olması için
+    // CNT'nin "derleme zamanı dizileri" veya "statik diziler" desteği varsayılmıştır.
+    // Eğer böyle bir destek yoksa, `std::vector` ile dinamik olarak oluşturulup boyut sabitlenebilir.
+    data: [u64; (N + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK]; // Bu bir varsayımsal statik dizi tanımıdır.
+}
+
+/// `new_bitset()`: Tüm bitleri sıfır olarak ayarlanmış yeni bir `Bitset` oluşturur.
+///
+/// # Tip Parametreleri
+/// - `N`: Bitset'in boyutu.
+///
+/// # Dönüş Değeri
+/// `Bitset<N>`: Oluşturulan `Bitset` nesnesi.
+pub fn new_bitset<N: u64>() -> Bitset<N> {
+    // Statik dizi için varsayılan değerler 0'dır.
+    let mut bs = Bitset { data: [0u64; (N + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK] };
+
+    // Eğer N, son blokta tam bit sayısını doldurmuyorsa, gereksiz bitleri temizle.
+    if N % BITS_PER_BLOCK != 0 {
+        let last_block_index = (N / BITS_PER_BLOCK);
+        let mask = (1u64 << (N % BITS_PER_BLOCK)) - 1;
+        if last_block_index < bs.data.len() as u64 { // Sadece son blok varsa maskele
+            bs.data[last_block_index as usize] &= mask;
+        }
+    }
+    bs
+}
+
+/// `new_bitset_from_string()`: Bir ikili string'den (örn. "10101") `Bitset` oluşturur.
+/// String'in uzunluğu `N` ile eşleşmelidir.
+pub fn new_bitset_from_string<N: u64>(s: string) -> Result<Bitset<N>, Error> {
+    if s.len() as u64 != N {
+        return Result::Err(Error::MismatchedSizes("String length must match Bitset size N.".to_string()));
+    }
+
+    let mut bs = new_bitset::<N>();
+    for i in 0..N {
+        let char_at_i = s.char_at((N - 1 - i) as usize); // En sağdaki bit 0. indeks
+        if char_at_i == '1' {
+            bs.set_bit(i).expect("Internal set_bit failed during string parsing");
+        } else if char_at_i != '0' {
+            return Result::Err(Error::Other("Invalid character in bitset string. Only '0' or '1' allowed.".to_string()));
+        }
+    }
+    Result::Ok(bs)
+}
+
+
+/// `size()`: Bitset'in bit sayısını döndürür.
+pub fn size<N: u64>(bs: &Bitset<N>) -> u64 {
+    N
+}
+
+// --- 2. Tekil Bit Operasyonları ---
+
+/// `set_bit()`: Belirtilen indeksteki biti 1 (true) olarak ayarlar.
+pub fn set_bit<N: u64>(bs: &mut Bitset<N>, pos: u64) -> Result<void, Error> {
+    if pos >= N {
+        return Result::Err(Error::IndexOutOfBounds("Bit position out of bounds.".to_string()));
+    }
+    let block_index = pos / BITS_PER_BLOCK;
+    let bit_in_block = pos % BITS_PER_BLOCK;
+    bs.data[block_index as usize] |= (1u64 << bit_in_block);
+    Result::Ok(())
+}
+
+/// `reset_bit()`: Belirtilen indeksteki biti 0 (false) olarak ayarlar.
+pub fn reset_bit<N: u64>(bs: &mut Bitset<N>, pos: u64) -> Result<void, Error> {
+    if pos >= N {
+        return Result::Err(Error::IndexOutOfBounds("Bit position out of bounds.".to_string()));
+    }
+    let block_index = pos / BITS_PER_BLOCK;
+    let bit_in_block = pos % BITS_PER_BLOCK;
+    bs.data[block_index as usize] &= !(1u64 << bit_in_block);
+    Result::Ok(())
+}
+
+/// `flip_bit()`: Belirtilen indeksteki bitin değerini ters çevirir (0 ise 1, 1 ise 0).
+pub fn flip_bit<N: u64>(bs: &mut Bitset<N>, pos: u64) -> Result<void, Error> {
+    if pos >= N {
+        return Result::Err(Error::IndexOutOfBounds("Bit position out of bounds.".to_string()));
+    }
+    let block_index = pos / BITS_PER_BLOCK;
+    let bit_in_block = pos % BITS_PER_BLOCK;
+    bs.data[block_index as usize] ^= (1u64 << bit_in_block);
+    Result::Ok(())
+}
+
+/// `test_bit()`: Belirtilen indeksteki bitin değerini döndürür (true eğer 1 ise).
+pub fn test_bit<N: u64>(bs: &Bitset<N>, pos: u64) -> Result<bool, Error> {
+    if pos >= N {
+        return Result::Err(Error::IndexOutOfBounds("Bit position out of bounds.".to_string()));
+    }
+    let block_index = pos / BITS_PER_BLOCK;
+    let bit_in_block = pos % BITS_PER_BLOCK;
+    Result::Ok((bs.data[block_index as usize] & (1u64 << bit_in_block)) != 0)
+}
+
+// --- 3. Tüm Bit Operasyonları ---
+
+/// `set_all()`: Tüm bitleri 1 olarak ayarlar.
+pub fn set_all<N: u64>(bs: &mut Bitset<N>) -> Result<void, Error> {
+    for i in 0..(bs.data.len() as u64) {
+        bs.data[i as usize] = !0u64; // Tüm bitleri 1 yapar
+    }
+    // Son blokta N'in tam bit sayısını doldurmadığı durumları temizle
+    if N % BITS_PER_BLOCK != 0 {
+        let last_block_index = (N / BITS_PER_BLOCK);
+        let mask = (1u64 << (N % BITS_PER_BLOCK)) - 1;
+        if last_block_index < bs.data.len() as u64 {
+            bs.data[last_block_index as usize] &= mask;
+        }
+    }
+    Result::Ok(())
+}
+
+/// `reset_all()`: Tüm bitleri 0 olarak ayarlar.
+pub fn reset_all<N: u64>(bs: &mut Bitset<N>) -> Result<void, Error> {
+    for i in 0..(bs.data.len() as u64) {
+        bs.data[i as usize] = 0u64;
+    }
+    Result::Ok(())
+}
+
+/// `flip_all()`: Tüm bitlerin değerini ters çevirir.
+pub fn flip_all<N: u64>(bs: &mut Bitset<N>) -> Result<void, Error> {
+    for i in 0..(bs.data.len() as u64) {
+        bs.data[i as usize] = !bs.data[i as usize];
+    }
+    // Son blokta N'in tam bit sayısını doldurmadığı durumları temizle
+    if N % BITS_PER_BLOCK != 0 {
+        let last_block_index = (N / BITS_PER_BLOCK);
+        let mask = (1u64 << (N % BITS_PER_BLOCK)) - 1;
+        if last_block_index < bs.data.len() as u64 {
+            bs.data[last_block_index as usize] &= mask;
+        }
+    }
+    Result::Ok(())
+}
+
+// --- 4. Set İşlemleri (Bitwise Mantıksal Operasyonlar) ---
+
+/// `bit_and()`: İki bitset arasında bitwise AND işlemi yapar.
+pub fn bit_and<N: u64>(lhs: &Bitset<N>, rhs: &Bitset<N>) -> Result<Bitset<N>, Error> {
+    if N != size(rhs) { // `size(rhs)` yerine `N` kullanabiliriz
+        return Result::Err(Error::MismatchedSizes("Bitsets must have the same size for AND operation.".to_string()));
+    }
+    let mut result = new_bitset::<N>();
+    for i in 0..(result.data.len() as u64) {
+        result.data[i as usize] = lhs.data[i as usize] & rhs.data[i as usize];
+    }
+    Result::Ok(result)
+}
+
+/// `bit_or()`: İki bitset arasında bitwise OR işlemi yapar.
+pub fn bit_or<N: u64>(lhs: &Bitset<N>, rhs: &Bitset<N>) -> Result<Bitset<N>, Error> {
+    if N != size(rhs) {
+        return Result::Err(Error::MismatchedSizes("Bitsets must have the same size for OR operation.".to_string()));
+    }
+    let mut result = new_bitset::<N>();
+    for i in 0..(result.data.len() as u64) {
+        result.data[i as usize] = lhs.data[i as usize] | rhs.data[i as usize];
+    }
+    Result::Ok(result)
+}
+
+/// `bit_xor()`: İki bitset arasında bitwise XOR işlemi yapar.
+pub fn bit_xor<N: u64>(lhs: &Bitset<N>, rhs: &Bitset<N>) -> Result<Bitset<N>, Error> {
+    if N != size(rhs) {
+        return Result::Err(Error::MismatchedSizes("Bitsets must have the same size for XOR operation.".to_string()));
+    }
+    let mut result = new_bitset::<N>();
+    for i in 0..(result.data.len() as u64) {
+        result.data[i as usize] = lhs.data[i as usize] ^ rhs.data[i as usize];
+    }
+    Result::Ok(result)
+}
+
+/// `bit_not()`: Bir bitset'in bitwise NOT (complement) işlemini yapar.
+pub fn bit_not<N: u64>(bs: &Bitset<N>) -> Result<Bitset<N>, Error> {
+    let mut result = new_bitset::<N>();
+    for i in 0..(result.data.len() as u64) {
+        result.data[i as usize] = !bs.data[i as usize];
+    }
+    // Son blokta N'in tam bit sayısını doldurmadığı durumları temizle
+    if N % BITS_PER_BLOCK != 0 {
+        let last_block_index = (N / BITS_PER_BLOCK);
+        let mask = (1u64 << (N % BITS_PER_BLOCK)) - 1;
+        if last_block_index < result.data.len() as u64 {
+            result.data[last_block_index as usize] &= mask;
+        }
+    }
+    Result::Ok(result)
+}
+
+// --- 5. Kaydırma Operasyonları ---
+
+/// `shift_left()`: Bitset'i belirtilen kadar sola kaydırır.
+pub fn shift_left<N: u64>(bs: &Bitset<N>, shift_count: u64) -> Result<Bitset<N>, Error> {
+    let mut result = new_bitset::<N>();
+    if shift_count >= N {
+        return Result::Ok(result); // Tüm bitler kayar, sıfır bitset döndür.
+    }
+
+    let block_shift = shift_count / BITS_PER_BLOCK;
+    let bit_shift = shift_count % BITS_PER_BLOCK;
+
+    for i in 0..(bs.data.len() as u64) {
+        let src_block_idx = i as i64 - block_shift as i64;
+        if src_block_idx >= 0 {
+            let mut val = bs.data[src_block_idx as usize] << bit_shift;
+            if bit_shift > 0 && src_block_idx > 0 {
+                // Önceki bloktan taşan bitleri ekle
+                val |= bs.data[(src_block_idx - 1) as usize] >> (BITS_PER_BLOCK - bit_shift);
+            }
+            result.data[i as usize] = val;
+        }
+    }
+
+    // N'den büyük indekslerdeki bitleri temizle (shift_right_op_impl'deki gibi)
+    if N % BITS_PER_BLOCK != 0 {
+        let last_block_index = (N / BITS_PER_BLOCK);
+        let mask = (1u64 << (N % BITS_PER_BLOCK)) - 1;
+        if last_block_index < result.data.len() as u64 {
+            result.data[last_block_index as usize] &= mask;
+        }
+    }
+    Result::Ok(result)
+}
+
+/// `shift_right()`: Bitset'i belirtilen kadar sağa kaydırır.
+pub fn shift_right<N: u64>(bs: &Bitset<N>, shift_count: u64) -> Result<Bitset<N>, Error> {
+    let mut result = new_bitset::<N>();
+    if shift_count >= N {
+        return Result::Ok(result); // Tüm bitler kayar, sıfır bitset döndür.
+    }
+
+    let block_shift = shift_count / BITS_PER_BLOCK;
+    let bit_shift = shift_count % BITS_PER_BLOCK;
+
+    for i in (0..(bs.data.len() as u64)).rev() { // Sondan başa doğru
+        let src_block_idx = i + block_shift;
+        if src_block_idx < bs.data.len() as u64 {
+            let mut val = bs.data[src_block_idx as usize] >> bit_shift;
+            if bit_shift > 0 && src_block_idx + 1 < bs.data.len() as u64 {
+                // Sonraki bloktan taşan bitleri ekle
+                val |= bs.data[(src_block_idx + 1) as usize] << (BITS_PER_BLOCK - bit_shift);
+            }
+            result.data[i as usize] = val;
+        }
+    }
+
+    Result::Ok(result)
+}
+
+// --- 6. Sorgular ve Sayımlar ---
+
+/// `any()`: Bitset'te en az bir bitin 1 olup olmadığını kontrol eder.
+pub fn any<N: u64>(bs: &Bitset<N>) -> bool {
+    for i in 0..(bs.data.len() as u64) {
+        if bs.data[i as usize] != 0u64 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `none()`: Bitset'te hiçbir bitin 1 olup olmadığını kontrol eder (tüm bitler 0 ise true).
+pub fn none<N: u64>(bs: &Bitset<N>) -> bool {
+    !any(bs)
+}
+
+/// `all()`: Bitset'teki tüm bitlerin 1 olup olmadığını kontrol eder.
+pub fn all<N: u64>(bs: &Bitset<N>) -> bool {
+    let mut temp = new_bitset::<N>();
+    set_all(&mut temp).expect("Failed to set_all for comparison"); // N bitlik bir tam bitset oluştur
+    // Karşılaştırma fonksiyonu (operator== gibi) eksik olduğundan manuel kontrol:
+    for i in 0..(bs.data.len() as u64) {
+        if bs.data[i as usize] != temp.data[i as usize] {
+            return false;
+        }
+    }
+    true
+}
+
+/// `count()`: Bitset'te kaç tane bitin 1 olduğunu sayar.
+pub fn count<N: u64>(bs: &Bitset<N>) -> u64 {
+    let mut set_bits_count: u64 = 0;
+    for i in 0..(bs.data.len() as u64) {
+        let mut block = bs.data[i as usize];
+        while block > 0 {
+            block &= (block - 1); // En sağdaki 1 biti sıfırlar (Brian Kernighan's algorithm)
+            set_bits_count += 1;
+        }
+    }
+    set_bits_count
+}
+
+// --- 7. Dönüşümler ---
+
+/// `to_u64()`: Bitset'in (veya başlangıçtaki `min(N, 64)`) kısmını `u64`'e dönüştürür.
+/// Eğer `N` 64'ten büyükse, sadece ilk 64 bit döndürülür.
+pub fn to_u64<N: u64>(bs: &Bitset<N>) -> Result<u64, Error> {
+    if bs.data.len() == 0 {
+        return Result::Ok(0u64);
+    }
+    Result::Ok(bs.data[0])
+}
+
+/// `to_string()`: Bitset'i ikili string temsiline dönüştürür (örn. "10101").
+/// En yüksek indeksli bit en solda, en düşük indeksli bit en sağda olacak şekilde.
+pub fn to_string<N: u64>(bs: &Bitset<N>) -> string {
+    if N == 0 {
+        return "".to_string();
+    }
+    let mut s = std::string::new_string();
+    for i in (0..N).rev() { // Yüksek indeksten düşük indekse doğru
+        if test_bit(bs, i).expect("Internal test_bit error during to_string") {
+            s.push('1');
+        } else {
+            s.push('0');
+        }
+    }
+    s
+}
+
+// --- Örnek Kullanım ---
+
+fn main() {
+    println("Starting Bitset example...".to_string());
+
+    // 1. Bitset oluşturma
+    type MyBitset = Bitset<10>; // 10 bitlik bir bitset
+    let mut bs1 = new_bitset::<10>();
+    println("Initial bs1 (size 10): ".to_string() + to_string(&bs1)); // 0000000000
+
+    type MyBitsetLarge = Bitset<130>; // 130 bitlik bir bitset (birden fazla u64 bloğu)
+    let mut bs_large = new_bitset::<130>();
+    println("Initial bs_large (size 130): ".to_string() + to_string(&bs_large));
+
+    // 2. Tekil Bit Operasyonları
+    bs1.set_bit(0).expect("Failed to set bit 0");    // En sağdaki bit
+    bs1.set_bit(9).expect("Failed to set bit 9");    // En soldaki bit
+    println("bs1 after setting bits 0 and 9: ".to_string() + to_string(&bs1)); // 1000000001
+
+    bs1.flip_bit(0).expect("Failed to flip bit 0"); // 1 -> 0
+    println("bs1 after flipping bit 0: ".to_string() + to_string(&bs1));   // 1000000000
+
+    assert!(test_bit(&bs1, 9).expect("Failed to test bit 9") == true, "Bit 9 should be true");
+    assert!(test_bit(&bs1, 0).expect("Failed to test bit 0") == false, "Bit 0 should be false");
+
+    // 3. Tüm Bit Operasyonları
+    bs1.set_all().expect("Failed to set all bits");
+    println("bs1 after set_all(): ".to_string() + to_string(&bs1)); // 1111111111
+    assert!(all(&bs1) == true, "All bits should be set");
+
+    bs1.reset_all().expect("Failed to reset all bits");
+    println("bs1 after reset_all(): ".to_string() + to_string(&bs1)); // 0000000000
+    assert!(none(&bs1) == true, "No bits should be set");
+
+    bs1.flip_all().expect("Failed to flip all bits");
+    println("bs1 after flip_all(): ".to_string() + to_string(&bs1)); // 1111111111
+
+    // 4. Set İşlemleri
+    type SmallBitset = Bitset<4>;
+    let mut bs_a = new_bitset_from_string::<4>("1010".to_string()).expect("Failed to create bs_a");
+    let mut bs_b = new_bitset_from_string::<4>("0110".to_string()).expect("Failed to create bs_b");
+    println("bs_a: ".to_string() + to_string(&bs_a)); // 1010
+    println("bs_b: ".to_string() + to_string(&bs_b)); // 0110
+
+    let bs_and = bit_and(&bs_a, &bs_b).expect("Failed to AND");
+    println("bs_a AND bs_b: ".to_string() + to_string(&bs_and)); // 0010
+
+    let bs_or = bit_or(&bs_a, &bs_b).expect("Failed to OR");
+    println("bs_a OR bs_b: ".to_string() + to_string(&bs_or));   // 1110
+
+    let bs_xor = bit_xor(&bs_a, &bs_b).expect("Failed to XOR");
+    println("bs_a XOR bs_b: ".to_string() + to_string(&bs_xor)); // 1100
+
+    let bs_not_a = bit_not(&bs_a).expect("Failed to NOT");
+    println("NOT bs_a: ".to_string() + to_string(&bs_not_a));    // 0101
+
+    // 5. Kaydırma Operasyonları
+    type ShiftBitset = Bitset<8>;
+    let mut bs_shift = new_bitset_from_string::<8>("10110010".to_string()).expect("Failed to create bs_shift");
+    println("Original bs_shift: ".to_string() + to_string(&bs_shift)); // 10110010
+
+    let bs_shifted_left = shift_left(&bs_shift, 2).expect("Failed to shift left");
+    println("bs_shift << 2: ".to_string() + to_string(&bs_shifted_left)); // 11001000 (en soldaki 10 kaybolur, sağdan 0 eklenir)
+
+    let bs_shifted_right = shift_right(&bs_shift, 3).expect("Failed to shift right");
+    println("bs_shift >> 3: ".to_string() + to_string(&bs_shifted_right)); // 00010110 (en sağdaki 010 kaybolur, soldan 0 eklenir)
+
+    // 6. Sayımlar ve Sorgular
+    let mut bs_count = new_bitset_from_string::<5>("10110".to_string()).expect("Failed to create bs_count");
+    println("bs_count: ".to_string() + to_string(&bs_count)); // 10110
+    println("Number of set bits in bs_count: ".to_string() + count(&bs_count).to_string()); // 3
+    assert!(count(&bs_count) == 3, "Count is incorrect");
+    assert!(any(&bs_count) == true, "Should have any bits set");
+    assert!(none(&bs_count) == false, "Should not have no bits set");
+    assert!(all(&bs_count) == false, "Should not have all bits set");
+
+    // 7. Dönüşümler
+    let bs_to_int = new_bitset_from_string::<10>("0000001011".to_string()).expect("Failed to create bs_to_int");
+    println("bs_to_int: ".to_string() + to_string(&bs_to_int)); // 0000001011 (decimal 11)
+    println("bs_to_int to u64: ".to_string() + to_u64(&bs_to_int).expect("Failed to convert to u64").to_string()); // 11
+    assert!(to_u64(&bs_to_int).expect("Convert to u64") == 11, "Conversion to u64 is incorrect");
+
+
+    println("Bitset example finished.".to_string());
+}
