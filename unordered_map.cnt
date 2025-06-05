@@ -1,0 +1,378 @@
+// unordered_map.cnt
+// Standart Sırasız Harita (Unordered Map) Modülü
+// Anahtar-değer çiftlerini hash tablosu kullanarak saklar, ortalama O(1) erişim.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::hash;       // Hash fonksiyonları için (varsayılmıştır)
+
+// Anahtar eşitliği ve hash fonksiyonları için 'Equality' ve 'Hash' trait'leri/callback'leri gereklidir.
+// Varsayılan olarak, temel tipler için '==' operatörünün ve `std::hash::hash()` fonksiyonunun kullanıldığı varsayılmıştır.
+// Kullanıcı tanımlı tipler için bunlar sağlanmalıdır.
+
+/// `Error` Enum'u: Unordered Map işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Anahtar bulunamadı.
+    KeyNotFound(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Entry<K, V>` Struct'ı: Hash tablosundaki bir girişi (anahtar-değer çiftini) temsil eder.
+/// Çarpışmaları zincirleme (chaining) ile çözmek için kullanılır.
+pub struct Entry<K, V> {
+    key: K;
+    value: V;
+    /// Zincirdeki bir sonraki girişe işaretçi (null eğer sonuncusu ise).
+    next: raw_ptr<Entry<K, V>>;
+}
+
+/// `UnorderedMap<K, V>` Struct'ı: Anahtar-değer çiftlerini saklayan sırasız bir harita.
+/// Dahili olarak bir dizi (bucket'lar) ve zincirleme ile çarpışma çözümü kullanır.
+///
+/// # Tip Parametreleri
+/// - `K`: Anahtar tipi (hashlenebilir ve eşitlik kontrolü yapılabilir olmalı).
+/// - `V`: Değer tipi.
+pub struct UnorderedMap<K, V> {
+    /// Hash tablosunun kovalarını (bucket'larını) tutan dizisi.
+    /// Her kova, `Entry<K, V>` düğümlerinin bir zincirinin başına işaret eder.
+    buckets: raw_ptr<raw_ptr<Entry<K, V>>>;
+    /// Kovaların (bucket'ların) geçerli sayısı (tablo boyutu).
+    num_buckets: int;
+    /// Haritadaki eleman sayısı.
+    len: int;
+    /// Yük faktörü limiti. Bu limit aşılırsa tablo yeniden boyutlandırılır.
+    /// (len / num_buckets) > load_factor_limit olduğunda yeniden boyutlandırılır.
+    load_factor_limit: float;
+}
+
+// Varsayılan yük faktörü (örn. 0.75 gibi bir değer iyi bir denge sağlar).
+const DEFAULT_LOAD_FACTOR_LIMIT: float = 0.75;
+// Başlangıç kova sayısı (prime bir sayı genellikle iyi performans sağlar).
+const INITIAL_BUCKET_COUNT: int = 17; // Örneğin, 17 veya 31
+
+// --- 1. Unordered Map Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `UnorderedMap` oluşturur.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `UnorderedMap<K, V>` nesnesi.
+pub fn new<K, V>() -> Result<UnorderedMap<K, V>, Error> {
+    match alloc::allocate(INITIAL_BUCKET_COUNT * size_of<raw_ptr<Entry<K, V>>>()) {
+        Result::Ok(buckets_ptr_u8) => {
+            let buckets_ptr = buckets_ptr_u8 as raw_ptr<raw_ptr<Entry<K, V>>>;
+            // Kovaları null_ptr ile başlat
+            for i in 0..INITIAL_BUCKET_COUNT {
+                raw_ptr_write(buckets_ptr, i, null_ptr());
+            }
+
+            Result::Ok(UnorderedMap {
+                buckets: buckets_ptr,
+                num_buckets: INITIAL_BUCKET_COUNT,
+                len: 0,
+                load_factor_limit: DEFAULT_LOAD_FACTOR_LIMIT,
+            })
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate initial buckets for unordered map: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Entry<K, V>` düğümünü bellekte tahsis eder.
+fn allocate_entry<K, V>(key: K, value: V) -> Result<raw_ptr<Entry<K, V>>, Error> {
+    match alloc::allocate(size_of<Entry<K, V>>()) {
+        Result::Ok(ptr_u8) => {
+            let entry_ptr = ptr_u8 as raw_ptr<Entry<K, V>>;
+            raw_ptr_write(entry_ptr, 0, Entry {
+                key: key,
+                value: value,
+                next: null_ptr(),
+            });
+            Result::Ok(entry_ptr)
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate map entry: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Entry<K, V>` düğümünün belleğini serbest bırakır.
+fn deallocate_entry<K, V>(entry_ptr: raw_ptr<Entry<K, V>>) -> void {
+    if entry_ptr != null_ptr() {
+        // K ve V için destructors çağrılmalı mı?
+        alloc::deallocate(entry_ptr as raw_ptr<u8>, size_of<Entry<K, V>>());
+    }
+}
+
+/// Bir `UnorderedMap`'in tüm bellek kaynaklarını serbest bırakır.
+/// Tüm zincirlerdeki girişleri ve kova dizisini temizler.
+pub fn drop<K, V>(map: &mut UnorderedMap<K, V>) -> void {
+    if map.buckets == null_ptr() { return; }
+
+    for i in 0..map.num_buckets {
+        let mut current_entry_ptr = raw_ptr_read(map.buckets, i);
+        while current_entry_ptr != null_ptr() {
+            let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+            deallocate_entry(current_entry_ptr);
+            current_entry_ptr = next_entry_ptr;
+        }
+    }
+
+    alloc::deallocate(map.buckets as raw_ptr<u8>, map.num_buckets * size_of<raw_ptr<Entry<K, V>>>());
+    map.buckets = null_ptr();
+    map.num_buckets = 0;
+    map.len = 0;
+}
+
+/// Hash tablosunu yeniden boyutlandırır (rehash).
+/// Ortalama O($N$)
+fn rehash<K, V>(map: &mut UnorderedMap<K, V>) -> Result<void, Error> {
+    let old_buckets = map.buckets;
+    let old_num_buckets = map.num_buckets;
+
+    let new_num_buckets = old_num_buckets * 2; // Basitçe iki katına çıkar
+    // İdealde, bir sonraki asal sayıya yuvarlama yapılabilir.
+    // Örneğin, find_next_prime(old_num_buckets * 2)
+
+    match alloc::allocate(new_num_buckets * size_of<raw_ptr<Entry<K, V>>>()) {
+        Result::Ok(new_buckets_ptr_u8) => {
+            let new_buckets_ptr = new_buckets_ptr_u8 as raw_ptr<raw_ptr<Entry<K, V>>>;
+            // Yeni kovaları null_ptr ile başlat
+            for i in 0..new_num_buckets {
+                raw_ptr_write(new_buckets_ptr, i, null_ptr());
+            }
+
+            map.buckets = new_buckets_ptr;
+            map.num_buckets = new_num_buckets;
+            map.len = 0; // Yeniden doldurulacağı için sıfırla
+
+            // Eski kovadaki tüm elemanları yeni hash tablosuna taşı
+            for i in 0..old_num_buckets {
+                let mut current_entry_ptr = raw_ptr_read(old_buckets, i);
+                while current_entry_ptr != null_ptr() {
+                    let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+                    let current_entry = raw_ptr_read(current_entry_ptr, 0);
+
+                    // Mevcut düğümü yeniden ekle (değeri kopyala, düğümü tekrar tahsis etme)
+                    // NOT: Burada `current_entry_ptr`'nin doğrudan yeniden kullanılması beklenmez,
+                    // çünkü `Entry`'nin `next` pointer'ı değişecektir.
+                    // Bu yüzden mevcut elemanları yeniden `insert` etmeliyiz.
+                    match insert(map, current_entry.key, current_entry.value) {
+                        Result::Ok(_) => {}, // Başarılı
+                        Result::Err(e) => {
+                            // Hata durumunda ne yapılmalı? Tüm rehash'i geri alabilir miyiz?
+                            // Kompleks bir durum, şimdilik assert ile durdur.
+                            assert!(false, "Rehash failed during re-insertion: ".to_string() + e.to_string());
+                            return Result::Err(e);
+                        }
+                    }
+                    deallocate_entry(current_entry_ptr); // Eski düğümü serbest bırak
+                    current_entry_ptr = next_entry_ptr;
+                }
+            }
+            alloc::deallocate(old_buckets as raw_ptr<u8>, old_num_buckets * size_of<raw_ptr<Entry<K, V>>>());
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to reallocate buckets during rehash: ".to_string() + e.to_string())),
+    }
+}
+
+// --- 2. Yardımcı Hash ve Kova Bulma Fonksiyonları ---
+
+/// Bir anahtar için hash değerini hesaplar ve ilgili kova indeksini döndürür.
+fn get_bucket_index<K, V>(map: &UnorderedMap<K, V>, key: &K) -> int {
+    let hash_value = std::hash::hash(key); // std::hash modülünden hash fonksiyonu
+    (hash_value % map.num_buckets) as int
+}
+
+// --- 3. Unordered Map İşlemleri ---
+
+/// Bir anahtar-değer çiftini Unordered Map'e ekler veya günceller. O(1) (ortalama)
+/// Anahtar zaten varsa değeri günceller, yoksa yeni bir çift ekler.
+///
+/// # Parametreler
+/// - `map`: Elemanın ekleneceği/güncelleneceği `UnorderedMap<K, V>`'nin mutable referansı.
+/// - `key`: Eklenecek/güncellenecek anahtar.
+/// - `value`: Eklenecek/güncellenecek değer.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(bool)`: `true` yeni bir eleman eklendiyse, `false` mevcut eleman güncellendiyse.
+/// `Result::Err(Error)` bellek tahsisi başarısız olursa.
+pub fn insert<K, V>(map: &mut UnorderedMap<K, V>, key: K, value: V) -> Result<bool, Error> {
+    // Yük faktörünü kontrol et ve gerekirse yeniden boyutlandır
+    if (map.len + 1) as float / map.num_buckets as float > map.load_factor_limit {
+        match rehash(map) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+
+    let bucket_idx = get_bucket_index(map, &key);
+    let mut current_entry_ptr = raw_ptr_read(map.buckets, bucket_idx);
+
+    // Kovada anahtarı ara
+    while current_entry_ptr != null_ptr() {
+        let mut entry = raw_ptr_read(current_entry_ptr, 0);
+        if key == entry.key { // Anahtar bulundu, değeri güncelle
+            entry.value = value;
+            raw_ptr_write(current_entry_ptr, 0, entry);
+            return Result::Ok(false);
+        }
+        current_entry_ptr = entry.next;
+    }
+
+    // Anahtar bulunamadı, yeni bir giriş ekle
+    match allocate_entry(key, value) {
+        Result::Ok(new_entry_ptr) => {
+            // Yeni girişi kovanın başına ekle (en hızlısı)
+            let mut new_entry = raw_ptr_read(new_entry_ptr, 0);
+            new_entry.next = raw_ptr_read(map.buckets, bucket_idx); // Eski kova başını yeniye next yap
+            raw_ptr_write(new_entry_ptr, 0, new_entry);
+
+            raw_ptr_write(map.buckets, bucket_idx, new_entry_ptr); // Yeni girişi kova başı yap
+
+            map.len = map.len + 1;
+            Result::Ok(true)
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Bir anahtara karşılık gelen değeri Unordered Map'ten alır. O(1) (ortalama)
+///
+/// # Parametreler
+/// - `map`: Değerin alınacağı `UnorderedMap<K, V>`'nin referansı.
+/// - `key`: Aranacak anahtar.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&V)` değerin referansı, `Result::Err(Error::KeyNotFound)` anahtar bulunamazsa.
+pub fn get<K, V>(map: &UnorderedMap<K, V>, key: &K) -> Result<&V, Error> {
+    let bucket_idx = get_bucket_index(map, key);
+    let mut current_entry_ptr = raw_ptr_read(map.buckets, bucket_idx);
+
+    while current_entry_ptr != null_ptr() {
+        let entry = raw_ptr_read(current_entry_ptr, 0);
+        if *key == entry.key {
+            return Result::Ok(&entry.value);
+        }
+        current_entry_ptr = entry.next;
+    }
+    Result::Err(Error::KeyNotFound("Key not found in unordered map".to_string()))
+}
+
+/// Bir anahtara karşılık gelen değeri Unordered Map'ten alır (mutable). O(1) (ortalama)
+///
+/// # Parametreler
+/// - `map`: Değerin alınacağı `UnorderedMap<K, V>`'nin mutable referansı.
+/// - `key`: Aranacak anahtar.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&mut V)` değerin mutable referansı, `Result::Err(Error::KeyNotFound)` anahtar bulunamazsa.
+pub fn get_mut<K, V>(map: &mut UnorderedMap<K, V>, key: &K) -> Result<&mut V, Error> {
+    let bucket_idx = get_bucket_index(map, key);
+    let mut current_entry_ptr = raw_ptr_read(map.buckets, bucket_idx);
+
+    while current_entry_ptr != null_ptr() {
+        let mut entry = raw_ptr_read(current_entry_ptr, 0);
+        if *key == entry.key {
+            return Result::Ok(raw_ptr_offset_mut(current_entry_ptr, 0).value); // Value'ya doğrudan mutable erişim
+        }
+        current_entry_ptr = entry.next;
+    }
+    Result::Err(Error::KeyNotFound("Key not found in unordered map".to_string()))
+}
+
+/// Bir anahtarı ve karşılık gelen değeri Unordered Map'ten siler. O(1) (ortalama)
+///
+/// # Parametreler
+/// - `map`: Elemanın silineceği `UnorderedMap<K, V>`'nin mutable referansı.
+/// - `key`: Silinecek anahtar.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(V)` silinen değer, `Result::Err(Error::KeyNotFound)` anahtar bulunamazsa.
+pub fn remove<K, V>(map: &mut UnorderedMap<K, V>, key: &K) -> Result<V, Error> {
+    let bucket_idx = get_bucket_index(map, key);
+    let mut current_entry_ptr = raw_ptr_read(map.buckets, bucket_idx);
+    let mut prev_entry_ptr = null_ptr::<Entry<K, V>>(); // Bir önceki düğümü takip et
+
+    while current_entry_ptr != null_ptr() {
+        let current_entry = raw_ptr_read(current_entry_ptr, 0);
+        if *key == current_entry.key {
+            // Düğümü bulduk, zincirden çıkar
+            if prev_entry_ptr == null_ptr() { // Zincirin başındaki düğüm
+                raw_ptr_write(map.buckets, bucket_idx, current_entry.next);
+            } else { // Zincirin ortasında veya sonunda bir düğüm
+                let mut prev_entry = raw_ptr_read(prev_entry_ptr, 0);
+                prev_entry.next = current_entry.next;
+                raw_ptr_write(prev_entry_ptr, 0, prev_entry);
+            }
+            let value = current_entry.value; // Silinecek değeri al
+            deallocate_entry(current_entry_ptr); // Düğüm belleğini serbest bırak
+            map.len = map.len - 1;
+            return Result::Ok(value);
+        }
+        prev_entry_ptr = current_entry_ptr;
+        current_entry_ptr = current_entry.next;
+    }
+    Result::Err(Error::KeyNotFound("Key not found for removal".to_string()))
+}
+
+/// Unordered Map'teki tüm elemanları temizler.
+pub fn clear<K, V>(map: &mut UnorderedMap<K, V>) -> void {
+    // Drop fonksiyonunu kova belleğini serbest bırakmadan yeniden kullanma
+    for i in 0..map.num_buckets {
+        let mut current_entry_ptr = raw_ptr_read(map.buckets, i);
+        while current_entry_ptr != null_ptr() {
+            let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+            deallocate_entry(current_entry_ptr);
+            current_entry_ptr = next_entry_ptr;
+        }
+        raw_ptr_write(map.buckets, i, null_ptr()); // Kova başını null yap
+    }
+    map.len = 0;
+}
+
+/// Unordered Map'te belirli bir anahtarın olup olmadığını kontrol eder. O(1) (ortalama)
+pub fn contains_key<K, V>(map: &UnorderedMap<K, V>, key: &K) -> bool {
+    match get(map, key) {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Unordered Map'teki eleman sayısını döndürür.
+pub fn len<K, V>(map: &UnorderedMap<K, V>) -> int {
+    map.len
+}
+
+/// Unordered Map'in boş olup olmadığını kontrol eder.
+pub fn is_empty<K, V>(map: &UnorderedMap<K, V>) -> bool {
+    map.len == 0
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// UnorderedMap üzerinde iterasyon, tüm kovaları ve zincirleri dolaşmayı gerektirir.
+// Sıra garanti edilmez.
+
+ pub fn iter<K, V>(map: &UnorderedMap<K, V>) -> Iterator<(K, V)> { ... }
+ pub fn iter_mut<K, V>(map: &mut UnorderedMap<K, V>) -> MutableIterator<(K, V)> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
+// `std::hash::hash(value)`: Bir değeri hashleyen (size_t veya int döndüren) bir fonksiyon.
