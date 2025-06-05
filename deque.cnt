@@ -1,0 +1,428 @@
+// deque.cnt
+// Standart Çift Uçlu Kuyruk (Deque) Modülü
+// Hem başında hem de sonunda hızlı ekleme/çıkarma sağlayan dinamik bir koleksiyon.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::memory;     // Bellek kopyalama için (varsa)
+
+/// Deque'nin dahili olarak kullandığı blok boyutu.
+/// Bu, bir bellek tahsisinde kaç eleman saklandığını belirler.
+/// Genellikle bir power-of-2 değeri seçilir (örn. 256, 512, 1024).
+const BLOCK_SIZE: int = 512; // Örnek blok boyutu
+
+/// `Error` Enum'u: Deque işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz indeks erişimi.
+    IndexOutOfBounds(string);
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Deque boşken eleman çıkarmaya çalışma.
+    DequeEmpty(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Deque<T>` Struct'ı: T tipindeki elemanları saklayan çift uçlu bir kuyruk.
+/// Dahili olarak, `raw_ptr<raw_ptr<T>>` ile yönetilen bir blok dizisi kullanır.
+/// Bu, "map" veya "buffer of buffers" olarak adlandırılabilir.
+///
+/// # Tip Parametreleri
+/// - `T`: Deque'da saklanacak elemanların tipi.
+pub struct Deque<T> {
+    /// Eleman bloklarına işaretçilerin dizisi (map).
+    /// Her `raw_ptr<T>` bir BLOCK_SIZE'lık eleman bloğunu gösterir.
+    buffers: raw_ptr<raw_ptr<T>>;
+    /// `buffers` dizisindeki tahsis edilmiş toplam blok sayısı (map kapasitesi).
+    map_capacity: int;
+    /// Deque'daki geçerli eleman sayısı.
+    len: int;
+    /// İlk elemanın bulunduğu bloğun `buffers` dizisindeki indeksi.
+    start_block_idx: int;
+    /// İlk elemanın bulunduğu bloğun içindeki indeksi.
+    start_elem_idx: int;
+}
+
+// --- 1. Deque Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `Deque` oluşturur.
+/// Başlangıçta birkaç blok tahsis edebilir.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `Deque<T>` nesnesi.
+pub fn new<T>() -> Result<Deque<T>, Error> {
+    // Başlangıçta minimum 2 blok tahsis edelim ki hem başa hem sona ekleme için yer olsun.
+    let initial_map_capacity = 2; // Örneğin
+    match alloc::allocate(initial_map_capacity * size_of<raw_ptr<T>>()) {
+        Result::Ok(map_ptr_u8) => {
+            let map_ptr = map_ptr_u8 as raw_ptr<raw_ptr<T>>;
+            // Başlangıçta bloklar null olsun, push/pop sırasında tahsis edilsin.
+            // map_ptr'nin içeriğini null_ptr ile başlatmak iyi olur.
+            for i in 0..initial_map_capacity {
+                raw_ptr_write(map_ptr, i, null_ptr());
+            }
+
+            Result::Ok(Deque {
+                buffers: map_ptr,
+                map_capacity: initial_map_capacity,
+                len: 0,
+                start_block_idx: initial_map_capacity / 2, // Ortadan başla
+                start_elem_idx: 0,
+            })
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate initial deque map: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir Deque'nin tüm bellek kaynaklarını serbest bırakır.
+/// Tüm eleman bloklarını ve ana blok işaretçi dizisini serbest bırakır.
+pub fn drop<T>(deque: &mut Deque<T>) -> void {
+    if deque.buffers == null_ptr() { return; }
+
+    // Tüm eleman bloklarını serbest bırak
+    for i in 0..deque.map_capacity {
+        let block_ptr = raw_ptr_read(deque.buffers, i);
+        if block_ptr != null_ptr() {
+            // T tipi için destructors çağrılmalı mı?
+            // Bu, CNT'nin bellek yönetimi modeline bağlı.
+            // Şimdilik sadece blok belleğini serbest bırakıyoruz.
+            alloc::deallocate(block_ptr as raw_ptr<u8>, BLOCK_SIZE * size_of<T>());
+        }
+    }
+
+    // Ana blok işaretçi dizisini serbest bırak
+    alloc::deallocate(deque.buffers as raw_ptr<u8>, deque.map_capacity * size_of<raw_ptr<T>>());
+    deque.buffers = null_ptr();
+    deque.map_capacity = 0;
+    deque.len = 0;
+    deque.start_block_idx = 0;
+    deque.start_elem_idx = 0;
+}
+
+/// Deque'nin map kapasitesini artırır (daha fazla blok için yer açar).
+/// Dahili olarak kullanılır.
+fn grow_map<T>(deque: &mut Deque<T>, needed_capacity: int) -> Result<void, Error> {
+    let old_map_capacity = deque.map_capacity;
+    let new_map_capacity = if old_map_capacity == 0 {
+        2 // Minimum başlangıç kapasitesi
+    } else {
+        old_map_capacity * 2 // Genellikle iki katına çıkar
+    };
+    if new_map_capacity < needed_capacity {
+        new_map_capacity = needed_capacity; // Minimum ihtiyacı karşıladığından emin ol
+    }
+
+    match alloc::allocate(new_map_capacity * size_of<raw_ptr<T>>()) {
+        Result::Ok(new_map_ptr_u8) => {
+            let new_map_ptr = new_map_ptr_u8 as raw_ptr<raw_ptr<T>>;
+            // Yeni map'i null_ptr'lerle başlat
+            for i in 0..new_map_capacity {
+                raw_ptr_write(new_map_ptr, i, null_ptr());
+            }
+
+            // Eski blok işaretçilerini yeni map'in ortasına kopyala
+            let copy_start_idx = (new_map_capacity - deque.map_capacity) / 2;
+            // std::memory::memcpy(raw_ptr_offset(new_map_ptr, copy_start_idx), deque.buffers, deque.map_capacity * size_of<raw_ptr<T>>());
+            // Manuel kopyalama
+            for i in 0..deque.map_capacity {
+                let block_ptr = raw_ptr_read(deque.buffers, i);
+                raw_ptr_write(new_map_ptr, copy_start_idx + i, block_ptr);
+            }
+
+            alloc::deallocate(deque.buffers as raw_ptr<u8>, old_map_capacity * size_of<raw_ptr<T>>());
+            deque.buffers = new_map_ptr;
+            deque.map_capacity = new_map_capacity;
+            deque.start_block_idx = copy_start_idx + deque.start_block_idx; // start_block_idx'i de güncelle
+
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to grow deque map: ".to_string() + e.to_string())),
+    }
+}
+
+/// Gerekirse yeni bir eleman bloğu tahsis eder.
+fn ensure_block_exists<T>(deque: &mut Deque<T>, block_idx: int) -> Result<void, Error> {
+    // assert!(block_idx >= 0 && block_idx < deque.map_capacity, "Block index out of map bounds"); // Debug kontrolü
+    let block_ptr = raw_ptr_read(deque.buffers, block_idx);
+    if block_ptr == null_ptr() {
+        match alloc::allocate(BLOCK_SIZE * size_of<T>()) {
+            Result::Ok(new_block_ptr_u8) => {
+                raw_ptr_write(deque.buffers, block_idx, new_block_ptr_u8 as raw_ptr<T>);
+                Result::Ok(())
+            },
+            Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate data block for deque: ".to_string() + e.to_string())),
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
+
+// --- 2. Eleman Ekleme ve Çıkarma ---
+
+/// Deque'nin başına bir eleman ekler. O(1) (amortize edilmiş)
+pub fn push_front<T>(deque: &mut Deque<T>, item: T) -> Result<void, Error> {
+    if deque.len == 0 { // Deque boşsa
+        // İlk eleman için merkezi bir blokta yer ayır
+        // start_block_idx zaten merkeze ayarlanmış olmalı
+        if deque.buffers == null_ptr() || deque.map_capacity == 0 {
+             match new(0) { // Sadece map'i initialize et
+                Result::Ok(new_deque) => *deque = new_deque,
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+        match ensure_block_exists(deque, deque.start_block_idx) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+        deque.start_elem_idx = BLOCK_SIZE / 2; // Blok içinde ortadan başla
+    } else if deque.start_elem_idx == 0 { // Mevcut blok dolu, yeni bloğa ihtiyacımız var
+        if deque.start_block_idx == 0 { // Map'in başı dolu, map'i büyüt
+            match grow_map(deque, deque.map_capacity + 1) { // En az bir blok daha eklemek için
+                Result::Ok(_) => {},
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+        deque.start_block_idx = deque.start_block_idx - 1; // Bir önceki bloğa geç
+        match ensure_block_exists(deque, deque.start_block_idx) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+        deque.start_elem_idx = BLOCK_SIZE - 1; // Yeni bloğun en son elemanı
+    } else {
+        deque.start_elem_idx = deque.start_elem_idx - 1;
+    }
+
+    let current_block_ptr = raw_ptr_read(deque.buffers, deque.start_block_idx);
+    raw_ptr_write(current_block_ptr, deque.start_elem_idx, item);
+    deque.len = deque.len + 1;
+    Result::Ok(())
+}
+
+/// Deque'nin sonuna bir eleman ekler. O(1) (amortize edilmiş)
+pub fn push_back<T>(deque: &mut Deque<T>, item: T) -> Result<void, Error> {
+    if deque.len == 0 { // Deque boşsa
+        // İlk eleman için push_front ile aynı mantık
+        return push_front(deque, item);
+    }
+
+    let end_block_idx = deque.start_block_idx + (deque.start_elem_idx + deque.len - 1) / BLOCK_SIZE;
+    let end_elem_idx = (deque.start_elem_idx + deque.len - 1) % BLOCK_SIZE;
+
+    // Son elemandan sonraki yer:
+    let next_elem_idx = end_elem_idx + 1;
+    let mut target_block_idx = end_block_idx;
+    let mut target_elem_idx = next_elem_idx;
+
+    if next_elem_idx == BLOCK_SIZE { // Mevcut blok dolu, yeni bloğa ihtiyacımız var
+        target_block_idx = end_block_idx + 1;
+        target_elem_idx = 0;
+
+        if target_block_idx >= deque.map_capacity { // Map'in sonu dolu, map'i büyüt
+            match grow_map(deque, deque.map_capacity + 1) {
+                Result::Ok(_) => {},
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+        match ensure_block_exists(deque, target_block_idx) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+
+    let current_block_ptr = raw_ptr_read(deque.buffers, target_block_idx);
+    raw_ptr_write(current_block_ptr, target_elem_idx, item);
+    deque.len = deque.len + 1;
+    Result::Ok(())
+}
+
+/// Deque'nin başından bir elemanı çıkarır ve döndürür. O(1)
+pub fn pop_front<T>(deque: &mut Deque<T>) -> Result<T, Error> {
+    if deque.len == 0 {
+        return Result::Err(Error::DequeEmpty("Cannot pop from an empty deque".to_string()));
+    }
+
+    let current_block_ptr = raw_ptr_read(deque.buffers, deque.start_block_idx);
+    let item = raw_ptr_read(current_block_ptr, deque.start_elem_idx);
+
+    deque.start_elem_idx = deque.start_elem_idx + 1;
+    deque.len = deque.len - 1;
+
+    if deque.start_elem_idx == BLOCK_SIZE { // Mevcut bloktan çıktık
+        // Bu bloğu serbest bırak (isteğe bağlı, kapasiteyi korumak için bırakılabilir)
+        // Eğer deque.len == 0 ise, baş işaretçilerini sıfırla.
+        if deque.len == 0 {
+            deque.start_block_idx = deque.map_capacity / 2; // Konumu resetle
+            deque.start_elem_idx = 0;
+            // Tüm blokları serbest bırakmak yerine, drop kullanıldı.
+            // veya burada sadece o anki bloğu deallocate edebiliriz.
+            alloc::deallocate(current_block_ptr as raw_ptr<u8>, BLOCK_SIZE * size_of<T>());
+            raw_ptr_write(deque.buffers, deque.start_block_idx -1, null_ptr()); // Eski bloğu null yap.
+        } else {
+            // Bir sonraki bloğa geç
+            alloc::deallocate(current_block_ptr as raw_ptr<u8>, BLOCK_SIZE * size_of<T>()); // Eski bloğu serbest bırak
+            raw_ptr_write(deque.buffers, deque.start_block_idx, null_ptr()); // Map'ten kaldır
+            deque.start_block_idx = deque.start_block_idx + 1;
+            deque.start_elem_idx = 0;
+        }
+    }
+    Result::Ok(item)
+}
+
+/// Deque'nin sonundan bir elemanı çıkarır ve döndürür. O(1)
+pub fn pop_back<T>(deque: &mut Deque<T>) -> Result<T, Error> {
+    if deque.len == 0 {
+        return Result::Err(Error::DequeEmpty("Cannot pop from an empty deque".to_string()));
+    }
+
+    deque.len = deque.len - 1;
+    let end_block_idx = deque.start_block_idx + (deque.start_elem_idx + deque.len) / BLOCK_SIZE;
+    let end_elem_idx = (deque.start_elem_idx + deque.len) % BLOCK_SIZE;
+
+    let current_block_ptr = raw_ptr_read(deque.buffers, end_block_idx);
+    let item = raw_ptr_read(current_block_ptr, end_elem_idx);
+
+    if end_elem_idx == 0 { // Mevcut bloktan çıktık (blok boşaldı)
+        // Bu bloğu serbest bırak (isteğe bağlı)
+        // deque'nin son elemanını çıkardığımızda, bu blok boşalmış olabilir.
+        alloc::deallocate(current_block_ptr as raw_ptr<u8>, BLOCK_SIZE * size_of<T>());
+        raw_ptr_write(deque.buffers, end_block_idx, null_ptr()); // Map'ten kaldır
+        // start_elem_idx ve start_block_idx değişmez, sadece len azaldı.
+    }
+
+    if deque.len == 0 { // Deque tamamen boşaldı
+        deque.start_block_idx = deque.map_capacity / 2; // Konumu resetle
+        deque.start_elem_idx = 0;
+    }
+    Result::Ok(item)
+}
+
+/// Deque'deki tüm elemanları temizler.
+pub fn clear<T>(deque: &mut Deque<T>) -> void {
+    // drop fonksiyonu yerine, mevcut blokları serbest bırakıp sıfırlayalım.
+    // Tüm blokları serbest bırak
+    for i in 0..deque.map_capacity {
+        let block_ptr = raw_ptr_read(deque.buffers, i);
+        if block_ptr != null_ptr() {
+            // Destructor'lar çağrılmalı mı?
+            alloc::deallocate(block_ptr as raw_ptr<u8>, BLOCK_SIZE * size_of<T>());
+            raw_ptr_write(deque.buffers, i, null_ptr()); // Map'ten kaldır
+        }
+    }
+    deque.len = 0;
+    deque.start_block_idx = deque.map_capacity / 2; // Başlangıç indeksini merkeze al
+    deque.start_elem_idx = 0;
+}
+
+
+// --- 3. Eleman Erişimi ---
+
+/// Belirli bir indeksteki elemanın immutable referansını döndürür. O(1) (amortize edilmiş)
+///
+/// # Parametreler
+/// - `deque`: Elemanın okunacağı `Deque<T>`'nin referansı.
+/// - `index`: Elemanın indeksi (0-tabanlı).
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&T)` elemanın referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get<T>(deque: &Deque<T>, index: int) -> Result<&T, Error> {
+    if index < 0 || index >= deque.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get operation".to_string()));
+    }
+
+    let absolute_idx = deque.start_elem_idx + index;
+    let block_idx = deque.start_block_idx + absolute_idx / BLOCK_SIZE;
+    let elem_idx_in_block = absolute_idx % BLOCK_SIZE;
+
+     assert!(block_idx >= 0 && block_idx < deque.map_capacity, "Internal: Calculated block index out of map bounds");
+     assert!(elem_idx_in_block >= 0 && elem_idx_in_block < BLOCK_SIZE, "Internal: Calculated element index in block out of bounds");
+
+    let block_ptr = raw_ptr_read(deque.buffers, block_idx);
+    // assert!(block_ptr != null_ptr(), "Internal: Accessed a null data block pointer");
+
+    Result::Ok(raw_ptr_offset(block_ptr, elem_idx_in_block))
+}
+
+/// Belirli bir indeksteki elemanın mutable referansını döndürür. O(1) (amortize edilmiş)
+///
+/// # Parametreler
+/// - `deque`: Elemanın değiştirileceği `Deque<T>`'nin mutable referansı.
+/// - `index`: Elemanın indeksi (0-tabanlı).
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&mut T)` elemanın mutable referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get_mut<T>(deque: &mut Deque<T>, index: int) -> Result<&mut T, Error> {
+    if index < 0 || index >= deque.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get_mut operation".to_string()));
+    }
+
+    let absolute_idx = deque.start_elem_idx + index;
+    let block_idx = deque.start_block_idx + absolute_idx / BLOCK_SIZE;
+    let elem_idx_in_block = absolute_idx % BLOCK_SIZE;
+
+    let block_ptr = raw_ptr_read(deque.buffers, block_idx);
+    
+    Result::Ok(raw_ptr_offset_mut(block_ptr, elem_idx_in_block))
+}
+
+/// Deque'deki ilk elemanın immutable referansını döndürür. O(1)
+pub fn front<T>(deque: &Deque<T>) -> Result<&T, Error> {
+    get(deque, 0)
+}
+
+/// Deque'deki ilk elemanın mutable referansını döndürür. O(1)
+pub fn front_mut<T>(deque: &mut Deque<T>) -> Result<&mut T, Error> {
+    get_mut(deque, 0)
+}
+
+/// Deque'deki son elemanın immutable referansını döndürür. O(1)
+pub fn back<T>(deque: &Deque<T>) -> Result<&T, Error> {
+    if deque.len == 0 {
+        return Result::Err(Error::DequeEmpty("Cannot get back element of an empty deque".to_string()));
+    }
+    get(deque, deque.len - 1)
+}
+
+/// Deque'deki son elemanın mutable referansını döndürür. O(1)
+pub fn back_mut<T>(deque: &mut Deque<T>) -> Result<&mut T, Error> {
+    if deque.len == 0 {
+        return Result::Err(Error::DequeEmpty("Cannot get back element of an empty deque".to_string()));
+    }
+    get_mut(deque, deque.len - 1)
+}
+
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Deque'deki geçerli eleman sayısını döndürür.
+pub fn len<T>(deque: &Deque<T>) -> int {
+    deque.len
+}
+
+/// Deque'nin boş olup olmadığını kontrol eder.
+pub fn is_empty<T>(deque: &Deque<T>) -> bool {
+    deque.len == 0
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// İteratör, deque için oldukça verimli olabilir.
+ pub fn iter<T>(deque: &Deque<T>) -> Iterator<T> { ... }
+ pub fn iter_mut<T>(deque: &mut Deque<T>) -> MutableIterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, index)`: `ptr`'nin `index` offsetindeki (eleman boyutuna göre) T değerini okur.
+// `raw_ptr_write(ptr, index, value)`: `ptr`'nin `index` offsetindeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, index)`: `ptr`'den `index` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, index)`: `ptr`'den `index` kadar offsetlenmiş bir mutable T referansı döndürür.
