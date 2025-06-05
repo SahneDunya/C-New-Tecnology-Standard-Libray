@@ -1,0 +1,446 @@
+// iterators.cnt
+// Standart İteratör Modülü
+// Koleksiyonlardaki elemanlar üzerinde dolaşmak için temel trait'ler ve adaptörler.
+
+import std::option;     // Sonuçlar için Option
+import std::string;     // Hata mesajları veya to_string için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// --- 1. Temel İteratör Trait'i ---
+
+/// `Iterator` Trait'i: Bir koleksiyondaki elemanlar üzerinde dolaşmak için temel arayüzü tanımlar.
+pub trait Iterator {
+    /// `Item`: İteratörün döndürdüğü elemanların tipi.
+    type Item;
+
+    /// `next()`: İteratördeki bir sonraki elemanı döndürür.
+    /// Eğer başka eleman kalmadıysa `Option::None` döndürür.
+    fn next(&mut self) -> std::option::Option<Self::Item>;
+
+    /// `eq(other: &Self)`: İki iteratörün aynı konumu işaret edip etmediğini kontrol eder.
+    /// Genellikle `begin()` ve `end()` iteratörlerini karşılaştırmak için kullanılır.
+    fn eq(&self, other: &Self) -> bool;
+
+    /// `ne(other: &Self)`: İki iteratörün farklı konumları işaret edip etmediğini kontrol eder.
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
+    }
+
+    /// `increment()`: İteratörü bir sonraki elemana ilerletir.
+    /// Eğer iteratör `end` konumundaysa veya başka eleman kalmadıysa tanımsız davranıştır.
+    fn increment(&mut self);
+
+    /// `deref()`: İteratörün şu anda işaret ettiği değere değişmez bir referans döndürür.
+    /// Bu, `next()` çağrısı yapmadan geçerli elemana erişmek için kullanılır.
+    fn deref(&self) -> &Self::Item;
+
+    // `deref_mut()`: İteratörün şu anda işaret ettiği değere değişebilir bir referans döndürür.
+    // pub fn deref_mut(&mut self) -> &mut Self::Item;
+    // Eğer bir veri yapısı üzerinde mutasyon yapılacaksa bu da sağlanabilir.
+}
+
+// --- 2. Ortak İteratör Adaptörleri (Metotlar olarak) ---
+// Bu metotlar, `Iterator` trait'i için varsayılan implementasyonlar olarak sağlanır.
+// Bu, herhangi bir `Iterator` implementasyonunun bu adaptörleri "bedavaya" alması anlamına gelir.
+
+impl<T, I: Iterator<Item = T>> Iterator for I { // Kendi üzerinde iteratör adaptörlerini sağlar
+    // Varsayılan metotlar burada olmalı, ancak CNT'nin trait implementasyon sentaksına bağlı.
+    // Rust'ta bu, `impl<I: Iterator> Iterator for I` gibi yapılır ve sonra `fn map(...)` eklenir.
+
+    /// `map<U, F: Fn(Self::Item) -> U>(&mut self, f: F)`: Her elemana bir closure uygulayarak yeni bir iteratör döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Map<Self, F, U>`: Dönüştürülmüş elemanları üreten yeni bir iteratör.
+    pub fn map<U, F: Fn(Self::Item) -> U>(&mut self, f: F) -> Map<Self, F, U> {
+        Map::new(self, f)
+    }
+
+    /// `filter<Pred: Fn(&Self::Item) -> bool>(&mut self, predicate: Pred)`: Belirli bir predicate'i karşılayan elemanları filtreleyen yeni bir iteratör döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Filter<Self, Pred>`: Filtrelenmiş elemanları üreten yeni bir iteratör.
+    pub fn filter<Pred: Fn(&Self::Item) -> bool>(&mut self, predicate: Pred) -> Filter<Self, Pred> {
+        Filter::new(self, predicate)
+    }
+
+    /// `take(&mut self, n: u64)`: Sadece ilk `n` elemanı alan yeni bir iteratör döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Take<Self>`: Sınırlı sayıda eleman içeren yeni bir iteratör.
+    pub fn take(&mut self, n: u64) -> Take<Self> {
+        Take::new(self, n)
+    }
+
+    /// `skip(&mut self, n: u64)`: İlk `n` elemanı atlayan yeni bir iteratör döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Skip<Self>`: İlk `n` elemanı atlanmış yeni bir iteratör.
+    pub fn skip(&mut self, n: u64) -> Skip<Self> {
+        Skip::new(self, n)
+    }
+
+    /// `collect<C: FromIterator<Self::Item>>(&mut self)`: İteratördeki tüm elemanları bir koleksiyona toplar.
+    /// `FromIterator` trait'inin (`Vector::from_iter` gibi) implementasyonu beklenir.
+    ///
+    /// # Dönüş Değeri
+    /// `C`: Elemanlarla doldurulmuş yeni bir koleksiyon.
+    pub fn collect<C>(&mut self) -> C
+    where C: FromIterator<Self::Item> // FromIterator trait'i varsayılmıştır
+    {
+        C::from_iter(self)
+    }
+
+    /// `for_each<F: Fn(Self::Item)>(&mut self, f: F)`: İteratördeki her eleman için bir closure uygular.
+    ///
+    /// # Not
+    /// Bu metot, iteratörü tüketir.
+    pub fn for_each<F: Fn(Self::Item)>(&mut self, f: F) {
+        while let std::option::Option::Some(item) = self.next() {
+            f(item);
+        }
+    }
+
+    /// `fold<B, F: Fn(B, Self::Item) -> B>(&mut self, initial_value: B, f: F)`: İteratördeki elemanları biriktirir.
+    ///
+    /// # Dönüş Değeri
+    /// `B`: Birikmiş sonuç.
+    pub fn fold<B, F: Fn(B, Self::Item) -> B>(&mut self, mut initial_value: B, f: F) -> B {
+        while let std::option::Option::Some(item) = self.next() {
+            initial_value = f(initial_value, item);
+        }
+        initial_value
+    }
+
+    /// `count(&mut self)`: İteratördeki kalan eleman sayısını döndürür.
+    ///
+    /// # Not
+    /// Bu metot, iteratörü tüketir.
+    pub fn count(&mut self) -> u64 {
+        let mut count = 0u64;
+        while let std::option::Option::Some(_) = self.next() {
+            count += 1;
+        }
+        count
+    }
+
+    /// `last(&mut self)`: İteratördeki son elemanı döndürür.
+    ///
+    /// # Not
+    /// Bu metot, iteratörü tüketir.
+    pub fn last(&mut self) -> std::option::Option<Self::Item> {
+        let mut last_item = std::option::Option::None;
+        while let std::option::Option::Some(item) = self.next() {
+            last_item = std::option::Option::Some(item);
+        }
+        last_item
+    }
+}
+
+// --- 3. İteratör Adaptörü Yapıları ---
+// `map`, `filter` gibi adaptörlerin implementasyonları.
+// Her adaptör, kendi iç iteratörünü ve dönüşüm mantığını içerir.
+
+/// `Map` İteratör Adaptörü: Bir iteratördeki her elemana bir fonksiyon uygulayarak yeni bir iteratör döndürür.
+pub struct Map<I: Iterator, F: Fn(I::Item) -> U, U> {
+    base_iterator: I,
+    transform_fn: F,
+    _phantom_data: U, // U tipini derleme zamanında tutmak için
+}
+
+impl<I: Iterator, F: Fn(I::Item) -> U, U> Map<I, F, U> {
+    pub fn new(iterator: I, f: F) -> Map<I, F, U> {
+        Map {
+            base_iterator: iterator,
+            transform_fn: f,
+            _phantom_data: U, // Varsayılan değer
+        }
+    }
+}
+
+impl<I: Iterator, F: Fn(I::Item) -> U, U> Iterator for Map<I, F, U> {
+    type Item = U;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        match self.base_iterator.next() {
+            std::option::Option::Some(item) => std::option::Option::Some((self.transform_fn)(item)),
+            std::option::Option::None => std::option::Option::None,
+        }
+    }
+
+    // `eq`, `ne`, `increment`, `deref` genellikle `Map` iteratörlerinde doğrudan kullanılmaz
+    // çünkü `next()` ile değerler tüketilir ve dönüşüm uygulanır.
+    // Ancak, eğer temel iteratör bunları destekliyorsa ve map iteratörünün durumu onlara bağlıysa,
+    // basitçe temel iteratöre delege edilebilirler.
+    fn eq(&self, other: &Self) -> bool {
+        self.base_iterator.eq(&other.base_iterator)
+    }
+    fn ne(&self, other: &Self) -> bool {
+        self.base_iterator.ne(&other.base_iterator)
+    }
+    fn increment(&mut self) {
+        self.base_iterator.increment();
+    }
+    fn deref(&self) -> &Self::Item {
+        // Bu biraz karmaşık, çünkü deref'ten dönen değer dönüştürülmemiş olabilir.
+        // Rust'ta bu tür durumlarda `map` iteratörü için `deref` sağlanmaz.
+        // Burayı basitleştirmek için `deref`'i şimdilik atlayabiliriz veya `next` ile tüketmeye odaklanabiliriz.
+        // Eğer gerekiyorsa, geçici bir değer döndüren bir mekanizma tasarlanabilir.
+        // assert!(false, "Deref not directly supported for Map iterators in this context.");
+        // Geri dönüş tipi nedeniyle burada derleme hatası oluşabilir.
+        // Alternatif olarak, `deref` sadece `next()` çağrılmadan önce kullanılabilirse anlamlıdır.
+        // Şimdilik sadece `next`'e odaklanalım ve bu metodu zorlamayalım.
+    }
+}
+
+
+/// `Filter` İteratör Adaptörü: Belirli bir predicate'i karşılayan elemanları filtreleyen bir iteratör.
+pub struct Filter<I: Iterator, Pred: Fn(&I::Item) -> bool> {
+    base_iterator: I,
+    predicate: Pred,
+}
+
+impl<I: Iterator, Pred: Fn(&I::Item) -> bool> Filter<I, Pred> {
+    pub fn new(iterator: I, predicate: Pred) -> Filter<I, Pred> {
+        Filter {
+            base_iterator: iterator,
+            predicate: predicate,
+        }
+    }
+}
+
+impl<I: Iterator, Pred: Fn(&I::Item) -> bool> Iterator for Filter<I, Pred> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        loop {
+            match self.base_iterator.next() {
+                std::option::Option::Some(item) => {
+                    // Predicate'i uygulamak için item'ın referansına ihtiyacımız var.
+                    // Bu, item'ın klonlanması veya referansın geçerli kalması anlamına gelir.
+                    // Basitlik için, closure'ın &T alması durumunda item'ın bir kopyası veya referansı üzerinde çalışırız.
+                    if (self.predicate)(&item) { // item'ın kopyası/referansı üzerinde predicate uygula
+                        return std::option::Option::Some(item);
+                    }
+                },
+                std::option::Option::None => return std::option::Option::None,
+            }
+        }
+    }
+
+    fn eq(&self, other: &Self) -> bool {
+        self.base_iterator.eq(&other.base_iterator)
+    }
+    fn ne(&self, other: &Self) -> bool {
+        self.base_iterator.ne(&other.base_iterator)
+    }
+    fn increment(&mut self) {
+        // Bu iteratörde `increment` doğrudan kullanılmaz, `next` tarafından yönetilir.
+        // Yani `next` zaten bir sonraki geçerli elemana kadar ilerliyor.
+        self.next(); // Bir sonraki uygun elemana geç
+    }
+    fn deref(&self) -> &Self::Item {
+        // Filter'da `deref` de karmaşık olabilir, çünkü iteratörün o anki pozisyonundaki eleman
+        // predicate'i karşılamıyor olabilir. `next` kullanımı daha güvenlidir.
+        // Yine de, eğer bir gereklilikse, bir `peek()` veya `current_item` depolama mekanizması düşünülmeli.
+        // Şimdilik atlayalım.
+    }
+}
+
+/// `Take` İteratör Adaptörü: Belirli sayıda eleman alan bir iteratör.
+pub struct Take<I: Iterator> {
+    base_iterator: I,
+    remaining: u64,
+}
+
+impl<I: Iterator> Take<I> {
+    pub fn new(iterator: I, n: u64) -> Take<I> {
+        Take {
+            base_iterator: iterator,
+            remaining: n,
+        }
+    }
+}
+
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        if self.remaining == 0 {
+            return std::option::Option::None;
+        }
+        self.remaining -= 1;
+        self.base_iterator.next()
+    }
+
+    fn eq(&self, other: &Self) -> bool {
+        self.base_iterator.eq(&other.base_iterator) && self.remaining.eq(&other.remaining)
+    }
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
+    }
+    fn increment(&mut self) {
+        if self.remaining > 0 {
+            self.remaining -= 1;
+            self.base_iterator.increment();
+        }
+    }
+    fn deref(&self) -> &Self::Item {
+        if self.remaining > 0 {
+            self.base_iterator.deref()
+        } else {
+            // Tanımsız davranış veya panik, çünkü `remaining` 0 ise geçerli bir eleman yok.
+            std::assert::panic("Attempted to dereference Take iterator with no remaining elements.".to_string());
+        }
+    }
+}
+
+
+/// `Skip` İteratör Adaptörü: Belirli sayıda elemanı atlayan bir iteratör.
+pub struct Skip<I: Iterator> {
+    base_iterator: I,
+    remaining_to_skip: u64,
+}
+
+impl<I: Iterator> Skip<I> {
+    pub fn new(mut iterator: I, n: u64) -> Skip<I> {
+        // `skip` adaptörünü oluştururken ilk `n` elemanı tüket.
+        for _i in 0..n {
+            match iterator.next() {
+                std::option::Option::Some(_) => { /* Atla */ },
+                std::option::Option::None => {
+                    // Yetersiz eleman varsa, iteratör boş hale gelir.
+                    break;
+                },
+            }
+        }
+        Skip {
+            base_iterator: iterator,
+            remaining_to_skip: 0u64, // Zaten atlandı
+        }
+    }
+}
+
+impl<I: Iterator> Iterator for Skip<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        self.base_iterator.next()
+    }
+
+    fn eq(&self, other: &Self) -> bool {
+        self.base_iterator.eq(&other.base_iterator)
+    }
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
+    }
+    fn increment(&mut self) {
+        self.base_iterator.increment();
+    }
+    fn deref(&self) -> &Self::Item {
+        self.base_iterator.deref()
+    }
+}
+
+// --- 4. Koleksiyon Oluşturma İçin Yardımcı Trait ---
+
+/// `FromIterator<T>` Trait'i: Bir türün bir iteratörden eleman toplayarak oluşturulabileceğini belirtir.
+pub trait FromIterator<T> {
+    /// `from_iter(iter: &mut impl Iterator<Item = T>)`: Bir iteratördeki tüm elemanları kullanarak bir koleksiyon oluşturur.
+    fn from_iter(iter: &mut impl Iterator<Item = T>) -> Self;
+}
+
+// Örnek: `std::vector::Vector` için `FromIterator` implementasyonu (varsayımsal)
+// Bu, `std::vector` modülünde olmalıdır.
+
+import std::vector;
+impl<T> FromIterator<T> for std::vector::Vector<T> {
+    fn from_iter(iter: &mut impl Iterator<Item = T>) -> std::vector::Vector<T> {
+        let mut vec = std::vector::Vector::new();
+        while let std::option::Option::Some(item) = iter.next() {
+            vec.push(item);
+        }
+        vec
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::vector;
+
+fn main() {
+    println("Starting Iterators example...".to_string());
+
+    let mut numbers = std::vector::Vector::from_elements([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let mut iter = numbers.iter(); // Varsayımsal `Vector::iter()` metodu
+
+    // 1. `next()` ile temel iteratör kullanımı
+    println("First element: ".to_string() + iter.next().unwrap().to_string()); // 1
+    println("Second element: ".to_string() + iter.next().unwrap().to_string()); // 2
+
+    // 2. `map` adaptörü
+    let mut mapped_iter = iter.map(|n| n * 2);
+    println("Mapped (doubled) elements:".to_string());
+    while let std::option::Option::Some(val) = mapped_iter.next() {
+        println("- ".to_string() + val.to_string()); // 6, 8, 10, ... 20
+    }
+
+    // `iter` tekrar kullanılabilir hale getirilmelidir veya yeni bir iteratör oluşturulmalıdır.
+    // Rust'ta iteratör adaptörleri sahipliği alır (ownership). CNT için de benzer bir durum beklenir.
+    let mut numbers_2 = std::vector::Vector::from_elements([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let mut iter_2 = numbers_2.iter();
+
+    // 3. `filter` adaptörü
+    let mut filtered_iter = iter_2.filter(|&n| n % 2 == 0); // Sadece çift sayılar
+    println("Filtered (even) elements:".to_string());
+    while let std::option::Option::Some(val) = filtered_iter.next() {
+        println("- ".to_string() + val.to_string()); // 2, 4, 6, 8, 10
+    }
+
+    let mut numbers_3 = std::vector::Vector::from_elements([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let mut iter_3 = numbers_3.iter();
+
+    // 4. Zincirleme adaptörler
+    let mut processed_iter = iter_3
+        .filter(|&n| n > 3) // 4, 5, 6, 7, 8, 9, 10
+        .map(|n| n * 10)    // 40, 50, 60, 70, 80, 90, 100
+        .take(5);           // 40, 50, 60, 70, 80
+
+    println("Chained (filtered, mapped, taken) elements:".to_string());
+    while let std::option::Option::Some(val) = processed_iter.next() {
+        println("- ".to_string() + val.to_string());
+    }
+
+    let mut numbers_4 = std::vector::Vector::from_elements([10, 20, 30]);
+    let mut iter_4 = numbers_4.iter();
+
+    // 5. `fold` adaptörü
+    let sum = iter_4.fold(0i64, |acc, x| acc + x);
+    println("Sum of elements: ".to_string() + sum.to_string()); // 60
+
+    let mut numbers_5 = std::vector::Vector::from_elements([1, 2, 3, 4, 5]);
+    let mut iter_5 = numbers_5.iter();
+
+    // 6. `count` adaptörü
+    let count = iter_5.count();
+    println("Count of elements: ".to_string() + count.to_string()); // 5
+
+    let mut numbers_6 = std::vector::Vector::from_elements([100, 200, 300]);
+    let mut iter_6 = numbers_6.iter();
+
+    // 7. `last` adaptörü
+    let last_elem = iter_6.last();
+    match last_elem {
+        std::option::Option::Some(val) => println("Last element: ".to_string() + val.to_string()), // 300
+        std::option::Option::None => println("No elements found.".to_string()),
+    }
+
+    // 8. `collect` adaptörü (std::vector::Vector::from_iter implemente edilmişse)
+    let mut numbers_7 = std::vector::Vector::from_elements([1, 2, 3]);
+    let mut iter_7 = numbers_7.iter();
+    let new_vec = iter_7.map(|n| n * 100).collect::<std::vector::Vector<i64>>();
+    println("Collected new vector: ".to_string() + new_vec.to_string()); // [100, 200, 300]
+
+
+    println("Iterators example finished.".to_string());
+}
