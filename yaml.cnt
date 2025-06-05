@@ -1,0 +1,247 @@
+// yaml.cnt
+// Standart YAML Ayrıştırma ve Oluşturma modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<YamlValue>, Map<string, YamlValue> için
+import std::json;        // Belki bazı iç dönüşümler veya benzerlikler için gelecekte kullanılabilir
+
+// Harici C veya optimize edilmiş YAML ayrıştırma/oluşturma kütüphanelerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, ham YAML string'lerini dahili YamlValue temsilimize dönüştürür ve tersini yapar.
+extern fn _cnt_yaml_parse_single(yaml_string: &string) -> _cnt_Result_YamlValue_yaml_Error;
+extern fn _cnt_yaml_parse_multiple(yaml_string: &string) -> _cnt_Result_collections_List_YamlValue_yaml_Error;
+extern fn _cnt_yaml_serialize(yaml_value: &YamlValue) -> _cnt_Result_string_yaml_Error;
+
+
+/// `YamlValue` Enum'u: YAML veri tiplerini temsil eder.
+/// Bu enum, bir YAML belgesinin tüm olası yapılarını (nesne/eşleme, dizi/liste, string, sayı, boolean, null) kapsar.
+pub enum YamlValue {
+    /// YAML Eşlemesi (Mapping/Object): Anahtar-değer çiftlerinden oluşan bir Map<string, YamlValue>.
+    Mapping(collections::Map<string, YamlValue>);
+    /// YAML Dizisi (Sequence/Array): YamlValue'lerden oluşan bir List<YamlValue>.
+    Sequence(collections::List<YamlValue>);
+    /// YAML String: Bir string değeri.
+    String(string);
+    /// YAML Sayı: int veya float olarak temsil edilebilir.
+    Number(float); // Float kullanmak, hem tam sayıları hem ondalık sayıları kapsar.
+    /// YAML Boolean: true veya false.
+    Boolean(bool);
+    /// YAML Null: Boş değeri temsil eder.
+    Null;
+    // Gelecekte eklenebilecekler: Anchor, Alias (daha karmaşık ayrıştırma ve temsil gerektirir)
+}
+
+/// `Error` Enum'u: YAML ayrıştırma veya oluşturma sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz YAML formatı.
+    ParseError(string);
+    /// Geçersiz veri tipi veya dönüştürme hatası.
+    TypeError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+/// Bir YAML string'ini ayrıştırır ve tek bir `YamlValue` nesnesine dönüştürür.
+/// Eğer string birden fazla YAML belgesi içeriyorsa, sadece ilkini ayrıştırır.
+///
+/// # Parametreler
+/// - `yaml_string`: Ayrıştırılacak YAML verisini içeren string referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa ayrıştırılmış `YamlValue` içeren `Result::Ok(YamlValue)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn parse_single(yaml_string: &string) -> Result<YamlValue, Error> {
+    _cnt_yaml_parse_single(yaml_string)
+}
+
+/// Bir YAML string'ini ayrıştırır ve içindeki tüm YAML belgelerini bir `List<YamlValue>` olarak döndürür.
+/// Bir YAML dosyası birden fazla belge içerebilir (genellikle `---` ile ayrılırlar).
+///
+/// # Parametreler
+/// - `yaml_string`: Ayrıştırılacak YAML verisini içeren string referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa ayrıştırılmış `YamlValue` listesi içeren `Result::Ok(List<YamlValue>)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn parse_multiple(yaml_string: &string) -> Result<collections::List<YamlValue>, Error> {
+    _cnt_yaml_parse_multiple(yaml_string)
+}
+
+/// Bir `YamlValue` nesnesini YAML formatında bir string'e dönüştürür (serileştirir).
+///
+/// # Parametreler
+/// - `yaml_value`: Serileştirilecek `YamlValue` nesnesinin referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa YAML string'ini içeren `Result::Ok(string)`,
+/// serileştirme hatası oluşursa `Result::Err(Error)`.
+pub fn serialize(yaml_value: &YamlValue) -> Result<string, Error> {
+    _cnt_yaml_serialize(yaml_value)
+}
+
+// --- YamlValue için Yardımcı Fonksiyonlar ve Tip Kontrolleri ---
+
+// Bu fonksiyonlar, ayrıştırılmış YamlValue üzerinde çalışırken kullanışlı erişim ve tip kontrolü sağlar.
+// Bunlar, std::json::is_object ve as_object gibi fonksiyonlara benzerdir.
+
+/// Bir `YamlValue`'nin bir YAML Eşlemesi (Mapping) olup olmadığını kontrol eder.
+pub fn is_mapping(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::Mapping(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'nin bir YAML Dizisi (Sequence) olup olmadığını kontrol eder.
+pub fn is_sequence(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::Sequence(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'nin bir YAML String olup olmadığını kontrol eder.
+pub fn is_string(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::String(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'nin bir YAML Sayı olup olmadığını kontrol eder.
+pub fn is_number(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::Number(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'nin bir YAML Boolean olup olmadığını kontrol eder.
+pub fn is_boolean(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::Boolean(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'nin YAML Null olup olmadığını kontrol eder.
+pub fn is_null(value: &YamlValue) -> bool {
+    match value {
+        YamlValue::Null => true,
+        _ => false,
+    }
+}
+
+/// Bir `YamlValue`'yi bir Eşlemeye dönüştürmeye çalışır ve bir `Map<string, YamlValue>` referansı döndürür.
+/// Eğer değer bir eşleme değilse hata döndürür.
+pub fn as_mapping(value: &YamlValue) -> Result<&collections::Map<string, YamlValue>, Error> {
+    match value {
+        YamlValue::Mapping(map) => Result::Ok(map),
+        _ => Result::Err(Error::TypeError("Value is not a YAML mapping".to_string())),
+    }
+}
+
+/// Bir `YamlValue`'yi bir Diziye dönüştürmeye çalışır ve bir `List<YamlValue>` referansı döndürür.
+/// Eğer değer bir dizi değilse hata döndürür.
+pub fn as_sequence(value: &YamlValue) -> Result<&collections::List<YamlValue>, Error> {
+    match value {
+        YamlValue::Sequence(list) => Result::Ok(list),
+        _ => Result::Err(Error::TypeError("Value is not a YAML sequence".to_string())),
+    }
+}
+
+/// Bir `YamlValue`'yi bir String'e dönüştürmeye çalışır ve bir `string` referansı döndürür.
+/// Eğer değer bir string değilse hata döndürür.
+pub fn as_string(value: &YamlValue) -> Result<&string, Error> {
+    match value {
+        YamlValue::String(s) => Result::Ok(s),
+        _ => Result::Err(Error::TypeError("Value is not a YAML string".to_string())),
+    }
+}
+
+/// Bir `YamlValue`'yi bir Sayıya dönüştürmeye çalışır ve bir `float` döndürür.
+/// Eğer değer bir sayı değilse hata döndürür.
+pub fn as_number(value: &YamlValue) -> Result<float, Error> {
+    match value {
+        YamlValue::Number(f) => Result::Ok(*f),
+        _ => Result::Err(Error::TypeError("Value is not a YAML number".to_string())),
+    }
+}
+
+/// Bir `YamlValue`'yi bir Boolean'a dönüştürmeye çalışır ve bir `bool` döndürür.
+/// Eğer değer bir boolean değilse hata döndürür.
+pub fn as_boolean(value: &YamlValue) -> Result<bool, Error> {
+    match value {
+        YamlValue::Boolean(b) => Result::Ok(*b),
+        _ => Result::Err(Error::TypeError("Value is not a YAML boolean".to_string())),
+    }
+}
+
+// --- YamlValue Oluşturma Yardımcıları ---
+
+// std::json modülündekine benzer şekilde, temel tiplerden YamlValue oluşturma yardımcıları.
+
+/// Verilen string'den bir `YamlValue::String` oluşturur.
+pub fn from_string(s: string) -> YamlValue {
+    YamlValue::String(s)
+}
+
+/// Verilen int'den bir `YamlValue::Number` oluşturur.
+pub fn from_int(i: int) -> YamlValue {
+    YamlValue::Number(i as float)
+}
+
+/// Verilen float'dan bir `YamlValue::Number` oluşturur.
+pub fn from_float(f: float) -> YamlValue {
+    YamlValue::Number(f)
+}
+
+/// Verilen bool'dan bir `YamlValue::Boolean` oluşturur.
+pub fn from_boolean(b: bool) -> YamlValue {
+    YamlValue::Boolean(b)
+}
+
+/// Boş bir `YamlValue::Null` değeri döndürür.
+pub fn from_null() -> YamlValue {
+    YamlValue::Null
+}
+
+/// Boş bir `YamlValue::Mapping` oluşturur.
+pub fn new_mapping() -> YamlValue {
+    YamlValue::Mapping(collections::Map::new())
+}
+
+/// Boş bir `YamlValue::Sequence` oluşturur.
+pub fn new_sequence() -> YamlValue {
+    YamlValue::Sequence(collections::List::new())
+}
+
+// Map veya List'e eleman ekleme fonksiyonları, `json.cnt`'deki gibi
+// CNT'nin enum varyantlarına mutable erişim sağlama şekline bağlı olacaktır.
+
+ pub fn mapping_insert(map_value: &mut YamlValue, key: string, value: YamlValue) -> Result<void, Error> {
+     match map_value {
+         YamlValue::Mapping(map) => {
+             collections::insert(map, key, value);
+             Result::Ok(())
+         },
+         _ => Result::Err(Error::TypeError("Target is not a YAML mapping".to_string())),
+     }
+ }
+
+ pub fn sequence_push(seq_value: &mut YamlValue, item: YamlValue) -> Result<void, Error> {
+     match seq_value {
+         YamlValue::Sequence(list) => {
+             collections::push(list, item);
+             Result::Ok(())
+         },
+         _ => Result::Err(Error::TypeError("Target is not a YAML sequence".to_string())),
+     }
+ }
