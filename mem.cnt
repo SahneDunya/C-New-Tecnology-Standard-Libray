@@ -1,0 +1,293 @@
+// mem.cnt
+// Standart Bellek İşlemleri Modülü
+// Değerlerin bellek düzeni, ömür yönetimi ve düşük seviyeli bellek manipülasyonu.
+
+import std::ptr;       // Ham işaretçi tipleri için
+import std::string;    // Hata ve log mesajları için
+import std::io;        // println için
+import std::option;    // Option<T> için
+import std::result;    // Result<T, E> için
+import std::assert;    // Hata ayıklama için
+
+// Not: Bu implementasyon, CNT derleyicisinin tiplerin boyutunu/hizalamasını
+// derleme zamanında veya çalışma zamanında sağlayabilen ve bellek manipülasyonu için
+// intrinsik fonksiyonlara (`__builtin_size_of`, `__builtin_align_of`, `__builtin_transmute`,
+// `__builtin_drop_in_place`, `__builtin_mem_copy`) sahip olduğu varsayılmıştır.
+
+/// `size_of<T>() -> u64`: Belirli bir `T` tipindeki bir değerin bellekte kapladığı alanı bayt cinsinden döndürür.
+///
+/// Bu genellikle derleme zamanında belirlenen sabit bir değerdir.
+pub fn size_of<T>() -> u64 {
+    unsafe {
+        __builtin_size_of::<T>() // Varsayımsal derleyici intrinsik fonksiyonu
+    }
+}
+
+/// `align_of<T>() -> u64`: Belirli bir `T` tipindeki bir değerin bellekteki
+/// varsayılan hizalama gereksinimini bayt cinsinden döndürür.
+///
+/// Bu genellikle derleme zamanında belirlenen sabit bir değerdir.
+pub fn align_of<T>() -> u64 {
+    unsafe {
+        __builtin_align_of::<T>() // Varsayımsal derleyici intrinsik fonksiyonu
+    }
+}
+
+/// `drop<T>(value: T)`: Bir değeri doğrudan düşürür (destructor'ını çağırır).
+///
+/// Bu işlev, `value`'nun derleyici tarafından otomatik olarak düşürülmesini beklemeden
+/// manuel olarak düşürülmesini sağlar. `value` bu çağrıdan sonra artık kullanılamaz.
+pub fn drop<T>(value: T) {
+    // Derleyici bu işlevin dahili olarak bir değerin destructor'ını tetiklemesi gerektiğini anlar.
+    // Aslında, value parametresi bu noktada "taşınır" ve kapsam dışına çıkarak düşürülür.
+    // Bu, Rust'taki `std::mem::drop` ile aynıdır, değerin sahipliğini alır ve onu düşürür.
+    // Basit bir örnek için, buraya herhangi bir ekstra kod yazmamıza gerek yoktur,
+    // çünkü değer kapsam dışına çıktığında doğal olarak düşürülür.
+    // Ancak conceptual olarak, bu fonksiyonun varlığı, manuel düşürme niyetini vurgular.
+    // Eğer bir türün Drop implementasyonu varsa, bu çağrıldığında o implementasyon tetiklenir.
+    // Örneğin, `Vec` için bu, vektördeki tüm öğeleri düşürecek ve sonra belleği serbest bırakacaktır.
+}
+
+/// `forget<T>(value: T)`: Bir değeri unutur ve düşürücüsünün çalışmasını engeller.
+///
+/// Bu işlev, `value`'nun bellekten serbest bırakılmasını veya destructor'ının çağrılmasını
+/// engeller. Bu, tipik olarak bellek sızıntısına yol açar ve yalnızca çok özel durumlar
+/// için, manuel bellek yönetimiyle birlikte kullanılmalıdır.
+///
+/// # Güvenlik Notu:
+/// Bu işlevin yanlış kullanımı bellek sızıntılarına ve tanımsız davranışlara yol açabilir.
+/// Genellikle `unsafe` bağlamlarda düşük seviyeli kütüphaneler yazılırken kullanılır.
+pub fn forget<T>(value: T) {
+    // Bu, değeri bir "kara delik" gibi alan ve hiçbir zaman bırakmayan bir işlevdir.
+    // Derleyicinin bu değerin kaynaklarını serbest bırakmamasını sağlaması gerekir.
+    // Rust'taki `std::mem::forget` gibi, değeri alan ve yok eden bir boş döngü gibi düşünebiliriz.
+    let _ = value; // `_ = value` ifadesi, `value`'nun kullanılmadığını ve düşürülmemesi gerektiğini derleyiciye ima eder.
+                   // Aslında, derleyicinin bu çağrı için özel bir işlem yapması gerekir.
+                   // Varsayımsal olarak, `__builtin_forget` gibi bir intrinsik kullanılabilirdi.
+}
+
+
+/// `ManuallyDrop<T>`: İçindeki değerin otomatik olarak düşürülmesini engelleyen bir sarmalayıcı.
+///
+/// Bu, bir değeri oluşturup sonra otomatik olarak düşürülmesini istemediğinizde kullanışlıdır.
+/// Değeri manuel olarak düşürmek için `ManuallyDrop::drop()` veya `std::mem::drop()`
+/// fonksiyonunu kullanmanız gerekir.
+pub struct ManuallyDrop<T> {
+    value: T,
+}
+
+impl<T> ManuallyDrop<T> {
+    /// `new(value: T)`: Belirtilen değeri bir `ManuallyDrop` sarmalayıcısına yerleştirir.
+    pub fn new(value: T) -> ManuallyDrop<T> {
+        ManuallyDrop { value }
+    }
+
+    /// `into_inner(self) -> T`: Sarmalanmış değeri dışarı taşır ve `ManuallyDrop` sarmalayıcısını düşürmeyi engeller.
+    ///
+    /// Bu, değeri `ManuallyDrop`'tan çıkarmak ve sahipliğini geri almak için kullanılır.
+    /// Bu işlemden sonra `ManuallyDrop`'ın kendisi düşürülmez.
+    pub fn into_inner(self) -> T {
+        // `ManuallyDrop`'ın `Drop` implementasyonunu atlamak için `std::ptr::read` kullanırız.
+        // Bu, `self`'in içeriğini bellekten "kopyalar" (taşır) ve `self`'i boş bırakır.
+        // `self` boş olduğu için düşürücü bir şey yapmaz.
+        unsafe {
+            let inner = std::ptr::read(std::ptr::addr_of!(self.value));
+            // `self`'in Drop implementasyonunun çalışmasını önlemek için `self`'i manuel olarak unut.
+            // Bu, `ManuallyDrop`'ın destructor'ının tetiklenmemesini sağlar.
+            std::mem::forget(self);
+            inner
+        }
+    }
+
+    /// `drop(mut self)`: Sarmalanmış değeri manuel olarak düşürür.
+    ///
+    /// Bu, `ManuallyDrop` tarafından sarmalanmış değerin destructor'ını doğrudan çağırır.
+    /// Fonksiyon çağrıldıktan sonra `ManuallyDrop` sarmalayıcısı da düşürülebilir,
+    /// ancak iç değeri zaten düşürülmüştür.
+    pub fn drop(mut self) {
+        unsafe {
+            // İç değeri düşürür.
+            std::mem::drop(std::ptr::read(std::ptr::addr_of!(self.value)));
+            // `self`'i unutmaya gerek yok çünkü bu fonksiyonun kendisi `self`'in sahipliğini alır
+            // ve kendisi kapsam dışına çıktığında düşürülecektir, ancak iç değer zaten düşürülmüştür.
+        }
+    }
+}
+
+// `ManuallyDrop` için `Deref` implementasyonu, iç değere erişimi sağlar.
+impl<T> ops::Deref for ManuallyDrop<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+// `ManuallyDrop` için `DerefMut` implementasyonu, iç değere değişebilir erişimi sağlar.
+impl<T> ops::DerefMut for ManuallyDrop<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+// `ManuallyDrop`'ın kendisi düştüğünde, iç değerin düşürülmemesini sağlar.
+impl<T> Drop for ManuallyDrop<T> {
+    fn drop(&mut self) {
+        // Bu fonksiyon boş bırakılarak iç değerin otomatik olarak düşürülmesi engellenir.
+        // İç değeri düşürmek için `ManuallyDrop::drop()` veya `std::mem::drop()` kullanılmalıdır.
+    }
+}
+
+
+/// `swap<T>(x: &mut T, y: &mut T)`: İki değişebilir referansın işaret ettiği değerleri takas eder.
+///
+/// Bu, `x` ve `y`'nin işaret ettiği bellek konumlarındaki değerleri doğrudan değiştirir.
+pub fn swap<T>(x: &mut T, y: &mut T) {
+    // Temporarily take ownership of `x`'s value,
+    // then move `y`'s value into `x`,
+    // then move the temporarily held value into `y`.
+    unsafe {
+        // `std::ptr::read` değeri bellekten alır ve orayı boş bırakır.
+        // `std::ptr::write` değeri belleğe yerleştirir.
+        let temp = std::ptr::read(x); // x'in değerini oku ve x'i geçersiz duruma getir
+        std::ptr::write(x, std::ptr::read(y)); // y'nin değerini oku ve y'yi geçersiz duruma getir, sonra x'e yaz
+        std::ptr::write(y, temp); // temp'teki değeri y'ye yaz
+    }
+}
+
+/// `replace<T>(dest: &mut T, src: T) -> T`: `dest`'teki değeri `src` ile değiştirir ve eski değeri döndürür.
+///
+/// Bu işlev, `dest`'teki mevcut değeri güvenli bir şekilde alırken yeni bir değer yerleştirmek için kullanılır.
+/// Eski değer düşürülmez; çağırana geri döndürülür.
+pub fn replace<T>(dest: &mut T, src: T) -> T {
+    unsafe {
+        // `dest`'teki değeri okuyarak sahipliğini alır.
+        let old_value = std::ptr::read(dest);
+        // Yeni değeri `dest`'e yazar.
+        std::ptr::write(dest, src);
+        old_value // Eski değeri döndür
+    }
+}
+
+/// `transmute<T, U>(val: T) -> U`: `T` tipindeki bir değeri `U` tipine yeniden yorumlar.
+///
+/// Bu işlem, bellek seviyesinde bir tip dönüşümü yapar; değerin bit desenini değiştirmeden
+/// sadece derleyiciye farklı bir tip olarak davranmasını söyler.
+///
+/// # Güvenlik Notu:
+/// Bu, **son derece tehlikeli** bir işlemdir ve yalnızca dönüşümün güvenli olduğundan
+/// emin olduğunuzda kullanılmalıdır. `T` ve `U`'nun aynı boyutta olması ve aynı hizalama
+/// gereksinimlerine sahip olması gibi katı kısıtlamaları vardır. Yanlış kullanımı
+/// tanımsız davranışlara (bellek ihlalleri, veri bozulması vb.) yol açabilir.
+pub fn transmute<T, U>(val: T) -> U {
+    // Derleyicinin bu işlev için özel bir intrinsik sağlaması gerekir.
+    // Yalnızca T ve U aynı boyutta ve aynı hizalamaya sahipse güvenlidir.
+    // Örneğin, `__builtin_transmute::<T, U>(val)` gibi bir intrinsik.
+
+    // Runtime kontrolü mümkün değilse, derleyiciye bırakılır:
+    std::assert::assert_eq(size_of::<T>(), size_of::<U>(), "transmute: types must have the same size!".to_string());
+    std::assert::assert_eq(align_of::<T>(), align_of::<U>(), "transmute: types must have the same alignment!".to_string());
+
+    // Rust'taki `transmute` gibi, değeri alıp başka bir tip olarak döndüren bir trick.
+    unsafe {
+        let mut temp_val = std::mem::ManuallyDrop::new(val);
+        let ptr = std::ptr::addr_of_mut!(*temp_val) as std::ptr::ptr_mut<U>;
+        std::ptr::read(ptr)
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::mem;
+import std::io;
+import std::string;
+import std::ptr; // Sadece ptr::null_mut() için
+
+struct MyStruct {
+    x: i32,
+    y: bool,
+    s: string,
+}
+
+impl Drop for MyStruct {
+    fn drop(&mut self) {
+        io::println("MyStruct dropped! Values: x=".to_string() + self.x.to_string() + ", s=".to_string() + self.s.to_string());
+    }
+}
+
+fn main() {
+    io::println("Starting mem example...".to_string());
+
+    // 1. size_of ve align_of
+    io::println("Size of i32: ".to_string() + mem::size_of::<i32>().to_string() + " bytes");
+    io::println("Align of i32: ".to_string() + mem::align_of::<i32>().to_string() + " bytes");
+    io::println("Size of bool: ".to_string() + mem::size_of::<bool>().to_string() + " bytes");
+    io::println("Align of bool: ".to_string() + mem::align_of::<bool>().to_string() + " bytes");
+    io::println("Size of MyStruct: ".to_string() + mem::size_of::<MyStruct>().to_string() + " bytes");
+    io::println("Align of MyStruct: ".to_string() + mem::align_of::<MyStruct>().to_string() + " bytes");
+
+    // 2. drop kullanımı
+    let my_data = MyStruct { x: 10, y: true, s: "hello".to_string() };
+    io::println("my_data created.");
+    mem::drop(my_data); // my_data burada düşürülür. "MyStruct dropped!" çıktısı görürüz.
+    // io::println(my_data.s); // Hata: my_data zaten düşürüldü/taşındı!
+
+    // 3. ManuallyDrop kullanımı
+    io::println("\n--- ManuallyDrop Example ---".to_string());
+    let data_to_manage = mem::ManuallyDrop::new(MyStruct { x: 20, y: false, s: "manual".to_string() });
+    io::println("ManuallyDrop created. Value: ".to_string() + data_to_manage.x.to_string());
+    
+    // data_to_manage kapsam dışına çıktığında otomatik olarak düşürülmez.
+    // Manuel olarak düşürmeliyiz:
+    // mem::ManuallyDrop::drop(data_to_manage); // Bu çalışır.
+    // Veya içindeki değeri çıkarıp kendi düşürmesini sağlarız:
+    let inner_data = data_to_manage.into_inner();
+    io::println("Inner data moved out. Value: ".to_string() + inner_data.x.to_string());
+    // inner_data kapsam dışına çıktığında düşürülecek.
+    // Bu noktada `ManuallyDrop` sarmalayıcısı düşürülmez.
+    // Programın sonunda `inner_data` düşürüldüğünde "MyStruct dropped!" çıktısı görürüz.
+
+    // 4. swap kullanımı
+    io::println("\n--- Swap Example ---".to_string());
+    let mut a = 5i32;
+    let mut b = 10i32;
+    io::println("Before swap: a=".to_string() + a.to_string() + ", b=".to_string() + b.to_string());
+    mem::swap(&mut a, &mut b);
+    io::println("After swap: a=".to_string() + a.to_string() + ", b=".to_string() + b.to_string()); // a=10, b=5
+
+    let mut s1 = "Alpha".to_string();
+    let mut s2 = "Beta".to_string();
+    io::println("Before swap: s1=".to_string() + s1 + ", s2=".to_string() + s2);
+    mem::swap(&mut s1, &mut s2);
+    io::println("After swap: s1=".to_string() + s1 + ", s2=".to_string() + s2); // s1="Beta", s2="Alpha"
+
+    // 5. replace kullanımı
+    io::println("\n--- Replace Example ---".to_string());
+    let mut old_struct = MyStruct { x: 30, y: true, s: "old".to_string() };
+    io::println("Original struct: ".to_string() + old_struct.to_string());
+    let new_struct = MyStruct { x: 40, y: false, s: "new".to_string() };
+    io::println("New struct to replace with: ".to_string() + new_struct.to_string());
+
+    let replaced_old_struct = mem::replace(&mut old_struct, new_struct);
+    io::println("After replace: old_struct is now: ".to_string() + old_struct.to_string()); // x=40, s="new"
+    io::println("Replaced old struct (now owned): ".to_string() + replaced_old_struct.to_string()); // x=30, s="old"
+    // `replaced_old_struct` bu noktada düşürülecek (kapsam sonu).
+
+    // 6. transmute kullanımı (ÇOK TEHLİKELİ!)
+    io::println("\n--- Transmute Example (DANGER!) ---".to_string());
+    // i32 ve f32 aynı boyutta olduğundan transmute edilebilir.
+    let integer_val: i32 = -1;
+    io::println("Original integer_val: ".to_string() + integer_val.to_string());
+
+    // Integer'ın bit desenini bir float olarak yorumla
+    let float_val: f32 = unsafe { mem::transmute(integer_val) };
+    io::println("Transmuted float_val: ".to_string() + float_val.to_string()); // Sayısal bir değer, muhtemelen tanımsız.
+
+    // Bu tür kullanımlar genellikle güvenli değildir ve yalnızca çok özel durumlar için düşünülmelidir.
+    // Örneğin, C FFI (Foreign Function Interface) ile çalışırken.
+    // Aşağıdaki gibi boyutu farklı tipler transmute edildiğinde hata oluşacaktır (varsayımsal olarak derleme/çalışma zamanı)
+     let long_val: i64 = unsafe { mem::transmute(integer_val) }; // Hata: boyutlar uyuşmuyor
+     io::println("Transmuted long_val: ".to_string() + long_val.to_string());
+
+    io::println("mem example finished.".to_string());
+}
