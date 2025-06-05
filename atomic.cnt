@@ -1,0 +1,315 @@
+// atomic.cnt
+// Standart Atomik Modülü
+// Paylaşılan verilere veri yarışı olmadan atomik erişim sağlar.
+
+import std::string;     // Hata mesajları için (genellikle atomic operasyonlarda doğrudan hata fırlatılmaz, ancak helper'lar için)
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::alloc;      // Eğer Atomic nesneleri için özel tahsis gerekiyorsa
+
+// Not: Bu modülün implementasyonu, CNT'nin doğrudan işlemci mimarisi atomik talimatlarına
+// veya özel derleyici intrinsics'lerine erişimine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'compiler_atomic_load', 'compiler_atomic_store' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+// Bellek Sıralaması (Memory Ordering) Enum'u:
+// Atomik operasyonların diğer bellek operasyonlarıyla nasıl etkileşime girdiğini belirler.
+// Farklı bellek sıralamaları, performans ve doğruluk dengesini etkiler.
+pub enum MemoryOrder {
+    /// İşlem, diğer bellek operasyonları için herhangi bir sıralama garantisi vermez.
+    Relaxed;
+    /// Operasyondan sonraki okumalar, operasyondan önceki yazmaları göremez.
+    /// Genellikle "acquire" yüklemeler ve "release" depolamalar olarak kullanılır.
+    Release;
+    /// Operasyondan önceki yazmalar, operasyondan sonraki okumalar tarafından görülemez.
+    /// Genellikle "acquire" yüklemeler ve "release" depolamalar olarak kullanılır.
+    Acquire;
+    /// Hem Acquire hem de Release garantileri sağlar.
+    AcqRel;
+    /// En güçlü sıralama. Tüm bellek operasyonlarının operasyondan önce veya sonra tamamlanmasını sağlar.
+    SeqCst; // Sequentially Consistent
+}
+
+// Atomik olarak desteklenen tip listesi:
+// Genellikle tamsayılar, işaretçiler ve bazen bool.
+// CNT'nin derleyicisinin, bu tipler için atomik işlemleri desteklemesi beklenir.
+
+// --- Dahili Derleyici Intrinsics/OS API Wrapparları (CNT Derleyicisi/Runtime Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, doğrudan işlemci atomik talimatlarına karşılık gelir.
+
+// `T` tipindeki bir değerin atomik olarak desteklenip desteklenmediğini kontrol eder.
+ pub fn compiler_is_lock_free<T>() -> bool;
+
+// Atomik yükleme:
+ pub fn compiler_atomic_load<T>(ptr: raw_ptr<T>, order: MemoryOrder) -> T;
+
+// Atomik depolama:
+ pub fn compiler_atomic_store<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> void;
+
+// Atomik değişim:
+ pub fn compiler_atomic_exchange<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+
+// Atomik karşılaştırma ve değişim (weak):
+// `expected` pointer'ı, beklenen değeri işaret eder. İşlem başarılı olursa `expected` güncellenmez.
+ pub fn compiler_atomic_compare_exchange_weak<T>(ptr: raw_ptr<T>, expected: &mut T, desired: T, success_order: MemoryOrder, failure_order: MemoryOrder) -> bool;
+
+// Atomik karşılaştırma ve değişim (strong):
+// `expected` pointer'ı, beklenen değeri işaret eder. İşlem başarılı olursa `expected` güncellenmez.
+ pub fn compiler_atomic_compare_exchange_strong<T>(ptr: raw_ptr<T>, expected: &mut T, desired: T, success_order: MemoryOrder, failure_order: MemoryOrder) -> bool;
+
+// Atomik aritmetik operasyonlar:
+ pub fn compiler_atomic_add<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+ pub fn compiler_atomic_sub<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+ pub fn compiler_atomic_and<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+ pub fn compiler_atomic_or<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+ pub fn compiler_atomic_xor<T>(ptr: raw_ptr<T>, val: T, order: MemoryOrder) -> T; // Returns old value
+
+
+// --- 1. Atomic Yapısı ---
+
+/// `Atomic<T>` Struct'ı: Atomik operasyonları destekleyen tip `T` için bir sarıcı (wrapper).
+/// Bir `Atomic` nesnesini kopyalamak veya taşımak, içerdiği değeri değil, atomik operasyon yeteneğini taşır.
+/// Değer, doğrudan `Atomic` nesnesinin içinde depolanır.
+pub struct Atomic<T> {
+    // Atomik olarak yönetilen değer.
+    // Derleyicinin bu T'yi CPU'nun atomik talimatlarına uygun şekilde hizalaması ve işlemesi gerekir.
+    value: T;
+}
+
+/// Yeni bir `Atomic<T>` nesnesi oluşturur, başlangıç değeriyle.
+///
+/// # Parametreler
+/// - `initial_value`: Atomik değişkenin başlangıç değeri.
+///
+/// # Tip Parametreleri
+/// - `T`: Atomik olarak yönetilecek tip.
+///
+/// # Dönüş Değeri
+/// `Atomic<T>`: Yeni oluşturulan atomik nesne.
+pub fn new_atomic<T>(initial_value: T) -> Atomic<T> {
+    Atomic { value: initial_value }
+}
+
+/// `is_lock_free()`: Bu Atomic tipinin donanım tarafından kilitsiz olarak desteklenip desteklenmediğini kontrol eder.
+///
+/// # Parametreler
+/// - `a`: Kontrol edilecek Atomic nesnesi.
+///
+/// # Dönüş Değeri
+/// `bool`: Eğer kilitsiz (lock-free) ise `true`, değilse `false`.
+pub fn is_lock_free<T>(a: &Atomic<T>) -> bool {
+    compiler_is_lock_free::<T>()
+}
+
+// --- 2. Temel Atomik Operasyonlar ---
+
+/// `load()`: Atomik olarak depolanan değeri okur.
+///
+/// # Parametreler
+/// - `a`: Okunacak Atomic nesnesi.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `T`: Atomik olarak okunan değer.
+pub fn load<T>(a: &Atomic<T>, order: MemoryOrder) -> T {
+    // `a.value`'nun pointer'ına erişim ve atomik yükleme.
+    unsafe { compiler_atomic_load::<T>(&a.value as raw_ptr<T>, order) }
+}
+
+/// `store()`: Atomik olarak yeni bir değeri depolar.
+///
+/// # Parametreler
+/// - `a`: Yazılacak Atomic nesnesi (mutable).
+/// - `val`: Depolanacak yeni değer.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn store<T>(a: &mut Atomic<T>, val: T, order: MemoryOrder) -> void {
+    unsafe { compiler_atomic_store::<T>(&mut a.value as raw_ptr<T>, val, order) }
+}
+
+/// `exchange()`: Atomik olarak yeni bir değeri depolar ve eski değeri döndürür.
+///
+/// # Parametreler
+/// - `a`: Değer değiştirilecek Atomic nesnesi (mutable).
+/// - `val`: Depolanacak yeni değer.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `T`: Operasyondan önceki eski değer.
+pub fn exchange<T>(a: &mut Atomic<T>, val: T, order: MemoryOrder) -> T {
+    unsafe { compiler_atomic_exchange::<T>(&mut a.value as raw_ptr<T>, val, order) }
+}
+
+/// `compare_exchange_weak()`: Beklenen değeri mevcut değerle karşılaştırır.
+/// Eşleşirse, değeri atomik olarak istenen yeni değerle değiştirir ve `true` döndürür.
+/// Eşleşmezse, değeri değiştirmez, beklenen değeri mevcut değerle günceller ve `false` döndürür.
+/// Zayıf versiyon, bazen koşul karşılandığı halde `false` döndürebilir (spurious failures),
+/// bu yüzden döngü içinde kullanılmalıdır.
+///
+/// # Parametreler
+/// - `a`: Değer değiştirilecek Atomic nesnesi (mutable).
+/// - `expected`: Beklenen değerin mutable referansı. İşlem başarısız olursa bu değer güncellenir.
+/// - `desired`: İstenen yeni değer.
+/// - `success_order`: Başarılı durumda bellek sıralaması.
+/// - `failure_order`: Başarısız durumda bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `bool`: Başarılı olursa `true`, başarısız olursa `false`.
+pub fn compare_exchange_weak<T>(
+    a: &mut Atomic<T>,
+    expected: &mut T,
+    desired: T,
+    success_order: MemoryOrder,
+    failure_order: MemoryOrder
+) -> bool {
+    unsafe {
+        compiler_atomic_compare_exchange_weak::<T>(
+            &mut a.value as raw_ptr<T>,
+            expected,
+            desired,
+            success_order,
+            failure_order
+        )
+    }
+}
+
+/// `compare_exchange_strong()`: `compare_exchange_weak()` ile aynıdır ancak sahte başarısızlıklar yapmaz.
+/// Garanti eder ki, eşleşme varsa kesinlikle `true` döner.
+///
+/// # Parametreler
+/// - `a`: Değer değiştirilecek Atomic nesnesi (mutable).
+/// - `expected`: Beklenen değerin mutable referansı. İşlem başarısız olursa bu değer güncellenir.
+/// - `desired`: İstenen yeni değer.
+/// - `success_order`: Başarılı durumda bellek sıralaması.
+/// - `failure_order`: Başarısız durumda bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `bool`: Başarılı olursa `true`, başarısız olursa `false`.
+pub fn compare_exchange_strong<T>(
+    a: &mut Atomic<T>,
+    expected: &mut T,
+    desired: T,
+    success_order: MemoryOrder,
+    failure_order: MemoryOrder
+) -> bool {
+    unsafe {
+        compiler_atomic_compare_exchange_strong::<T>(
+            &mut a.value as raw_ptr<T>,
+            expected,
+            desired,
+            success_order,
+            failure_order
+        )
+    }
+}
+
+
+// --- 3. Atomik Aritmetik Operasyonlar (Sadece sayısal tipler için) ---
+
+// Sadece tamsayı ve kayan nokta tipleri için geçerli olan bu fonksiyonlar için
+// CNT'nin template kısıtlamalarını (constraints) desteklemesi gerekir.
+
+/// `fetch_add()`: Atomik olarak değeri `arg` kadar artırır ve eski değeri döndürür.
+///
+/// # Parametreler
+/// - `a`: Değer artırılacak Atomic nesnesi (mutable).
+/// - `arg`: Eklenecek değer.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `T`: Operasyondan önceki eski değer.
+pub fn fetch_add<T>(a: &mut Atomic<T>, arg: T, order: MemoryOrder) -> T
+where T: addable + integer_or_float { // `addable` ve `integer_or_float` gibi trait'ler varsayılmıştır.
+    unsafe { compiler_atomic_add::<T>(&mut a.value as raw_ptr<T>, arg, order) }
+}
+
+/// `fetch_sub()`: Atomik olarak değeri `arg` kadar azaltır ve eski değeri döndürür.
+///
+/// # Parametreler
+/// - `a`: Değer azaltılacak Atomic nesnesi (mutable).
+/// - `arg`: Çıkarılacak değer.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `T`: Operasyondan önceki eski değer.
+pub fn fetch_sub<T>(a: &mut Atomic<T>, arg: T, order: MemoryOrder) -> T
+where T: subtractable + integer_or_float {
+    unsafe { compiler_atomic_sub::<T>(&mut a.value as raw_ptr<T>, arg, order) }
+}
+
+/// `fetch_and()`: Atomik olarak değeri `arg` ile bitwise AND işlemi yapar ve eski değeri döndürür.
+///
+/// # Parametreler
+/// - `a`: Değer üzerinde işlem yapılacak Atomic nesnesi (mutable).
+/// - `arg`: Bitwise AND yapılacak değer.
+/// - `order`: Bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `T`: Operasyondan önceki eski değer.
+pub fn fetch_and<T>(a: &mut Atomic<T>, arg: T, order: MemoryOrder) -> T
+where T: bitwise_andable + integer { // Sadece tamsayılar için
+    unsafe { compiler_atomic_and::<T>(&mut a.value as raw_ptr<T>, arg, order) }
+}
+
+/// `fetch_or()`: Atomik olarak değeri `arg` ile bitwise OR işlemi yapar ve eski değeri döndürür.
+pub fn fetch_or<T>(a: &mut Atomic<T>, arg: T, order: MemoryOrder) -> T
+where T: bitwise_orable + integer {
+    unsafe { compiler_atomic_or::<T>(&mut a.value as raw_ptr<T>, arg, order) }
+}
+
+/// `fetch_xor()`: Atomik olarak değeri `arg` ile bitwise XOR işlemi yapar ve eski değeri döndürür.
+pub fn fetch_xor<T>(a: &mut Atomic<T>, arg: T, order: MemoryOrder) -> T
+where T: bitwise_xorable + integer {
+    unsafe { compiler_atomic_xor::<T>(&mut a.value as raw_ptr<T>, arg, order) }
+}
+
+
+// --- 4. Tek Okuma/Yazma Kısayolları (SeqCst varsayımıyla) ---
+// Bu fonksiyonlar, varsayılan olarak en güçlü bellek sıralaması olan SeqCst'yi kullanır.
+
+/// `load_seqcst()`: `load()`'ın SeqCst bellek sıralamasıyla kısa versiyonu.
+pub fn load_seqcst<T>(a: &Atomic<T>) -> T {
+    load(a, MemoryOrder::SeqCst)
+}
+
+/// `store_seqcst()`: `store()`'un SeqCst bellek sıralamasıyla kısa versiyonu.
+pub fn store_seqcst<T>(a: &mut Atomic<T>, val: T) -> void {
+    store(a, val, MemoryOrder::SeqCst)
+}
+
+/// `fetch_add_seqcst()`: `fetch_add()`'in SeqCst bellek sıralamasıyla kısa versiyonu.
+pub fn fetch_add_seqcst<T>(a: &mut Atomic<T>, arg: T) -> T
+where T: addable + integer_or_float {
+    fetch_add(a, arg, MemoryOrder::SeqCst)
+}
+
+/// `fetch_sub_seqcst()`: `fetch_sub()`'un SeqCst bellek sıralamasıyla kısa versiyonu.
+pub fn fetch_sub_seqcst<T>(a: &mut Atomic<T>, arg: T) -> T
+where T: subtractable + integer_or_float {
+    fetch_sub(a, arg, MemoryOrder::SeqCst)
+}
+
+// --- 5. Bellek Çitleri (Memory Fences / Barriers) ---
+
+/// `atomic_thread_fence()`: Başka bir iş parçacığının bu iş parçacığının bellek operasyonlarını
+/// belirli bir sırayla görmesini sağlamak için bir bellek çiti oluşturur.
+///
+/// # Parametreler
+/// - `order`: Bellek çitinin bellek sıralaması.
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn atomic_thread_fence(order: MemoryOrder) -> void {
+    compiler_atomic_fence(order);
+}
+
+// --- Dahili Derleyici Intrinsics (Tekrar eden not) ---
+// `compiler_is_lock_free`, `compiler_atomic_load`, `compiler_atomic_store`,
+// `compiler_atomic_exchange`, `compiler_atomic_compare_exchange_weak`,
+// `compiler_atomic_compare_exchange_strong`, `compiler_atomic_add`,
+// `compiler_atomic_sub`, `compiler_atomic_and`, `compiler_atomic_or`,
+// `compiler_atomic_xor`, `compiler_atomic_fence`:
+// Bu fonksiyonlar, doğrudan CNT derleyicisi tarafından sağlanan işlemci seviyesi atomik talimatlarına
+// veya kütüphane destekli atomik implementasyonlara karşılık gelir.
+// Bunlar, CNT'nin dil düzeyinde bu tür düşük seviyeli operasyonları desteklemesini gerektirir.
