@@ -1,0 +1,282 @@
+// shared_mutex.cnt
+// Standart Paylaşımlı Mutex (Reader-Writer Lock) Modülü
+// Birden fazla okuyucuyu ve tek bir yazıcıyı destekleyerek eşzamanlı erişimi yönetir.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::alloc;      // Eğer mutex nesnesi dinamik tahsis gerektiriyorsa
+import std::mutex;      // Eğer altta yatan implementasyon mutex'e ihtiyaç duyarsa
+
+// Not: Bu modülün implementasyonu, CNT'nin işletim sistemi okuyucu-yazıcı kilit API'lerine
+// (pthreads rwlocks, Windows SRWLOCK) FFI veya runtime desteğine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'os::rwlock_init', 'os::rwlock_rdlock' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+/// `Error` Enum'u: Shared Mutex işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Shared Mutex başlatma başarısız oldu.
+    SharedMutexInitError(string);
+    /// Paylaşımlı kilitleme (okuma kilidi) başarısız oldu.
+    SharedLockError(string);
+    /// Özel kilitleme (yazma kilidi) başarısız oldu.
+    ExclusiveLockError(string);
+    /// Kilit açma başarısız oldu.
+    UnlockError(string);
+    /// Geçersiz Shared Mutex durumu.
+    InvalidSharedMutexState(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- Dahili OS API Wrapparları (CNT Runtime/Compiler Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, altta yatan OS API'lerini çağıran CNT'nin runtime'ına veya FFI'sına aittir.
+
+// İşletim sistemi seviyesi okuyucu-yazıcı kilit handle'ı (örneğin, pthread_rwlock_t* veya PSRWLOCK*)
+pub type OsRWLockHandle = raw_ptr<void>;
+
+ pub fn os_rwlock_init() -> Result<OsRWLockHandle, string>;
+ pub fn os_rwlock_destroy(handle: OsRWLockHandle) -> Result<void, string>;
+
+// Paylaşımlı (okuma) kilit alma:
+ pub fn os_rwlock_rdlock(handle: OsRWLockHandle) -> Result<void, string>;
+ pub fn os_rwlock_tryrdlock(handle: OsRWLockHandle) -> Result<bool, string>; // true: locked, false: not locked
+
+// Özel (yazma) kilit alma:
+ pub fn os_rwlock_wrlock(handle: OsRWLockHandle) -> Result<void, string>;
+ pub fn os_rwlock_trywrlock(handle: OsRWLockHandle) -> Result<bool, string>; // true: locked, false: not locked
+
+// Paylaşımlı (okuma) kilidi bırakma:
+ pub fn os_rwlock_rdunlock(handle: OsRWLockHandle) -> Result<void, string>;
+
+// Özel (yazma) kilidi bırakma:
+ pub fn os_rwlock_wrunlock(handle: OsRWLockHandle) -> Result<void, string>;
+
+
+// --- 1. SharedMutex Yapısı ---
+
+/// `SharedMutex` Struct'ı: Birden fazla okuyucuyu ve tek bir yazıcıyı destekleyen bir mutex.
+pub struct SharedMutex {
+    // İşletim sistemi seviyesi okuyucu-yazıcı kilit için dahili handle.
+    os_handle: OsRWLockHandle;
+    // Mutex'in zaten başlatılıp başlatılmadığını kontrol etmek için bayrak.
+    is_initialized: bool;
+}
+
+/// Yeni bir `SharedMutex` nesnesi oluşturur ve başlatır.
+///
+/// # Dönüş Değeri
+/// `Result<SharedMutex, Error>`: Başlatılan `SharedMutex` nesnesi veya hata.
+pub fn new_shared_mutex() -> Result<SharedMutex, Error> {
+    match os_rwlock_init() {
+        Result::Ok(handle) => Result::Ok(SharedMutex {
+            os_handle: handle,
+            is_initialized: true,
+        }),
+        Result::Err(msg) => Result::Err(Error::SharedMutexInitError("Failed to initialize shared mutex: ".to_string() + msg)),
+    }
+}
+
+/// `destroy_shared_mutex`: Bir `SharedMutex` nesnesinin kaynaklarını serbest bırakır.
+/// Bu fonksiyon, `SharedMutex` nesnesi kapsam dışına çıktığında veya artık kullanılmadığında
+/// otomatik olarak çağrılmalıdır (eğer CNT'de yıkıcılar varsa).
+///
+/// # Parametreler
+/// - `sm`: Yok edilecek shared mutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn destroy_shared_mutex(mut sm: SharedMutex) -> Result<void, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to destroy uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_destroy(sm.os_handle) {
+        Result::Ok(_) => {
+            sm.is_initialized = false;
+            sm.os_handle = null_ptr::<void>();
+            Result::Ok(())
+        },
+        Result::Err(msg) => Result::Err(Error::Other("Failed to destroy shared mutex: ".to_string() + msg)),
+    }
+}
+
+// --- 2. Paylaşımlı Kilitleme (Okuma Erişimi) ---
+
+/// `lock_shared()`: SharedMutex'i paylaşımlı (okuma) modda kilitler.
+/// Eğer mutex özel (yazma) modda kilitliyse, çağıran iş parçacığı bloke edilir.
+///
+/// # Parametreler
+/// - `sm`: Kilitlenecek SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn lock_shared(sm: &mut SharedMutex) -> Result<void, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to lock_shared uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_rdlock(sm.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::SharedLockError("Failed to acquire shared lock: ".to_string() + msg)),
+    }
+}
+
+/// `try_lock_shared()`: SharedMutex'i paylaşımlı (okuma) modda kilitlemeye çalışır.
+/// Eğer hemen kilitlenebilirse `true` döndürür ve kilidi alır. Bloke olmaz.
+///
+/// # Parametreler
+/// - `sm`: Kilitlenecek SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<bool, Error>`: Başarılı olursa `Ok(true)` (kilit alındı) veya `Ok(false)` (kilit alınamadı),
+/// hata olursa `Err`.
+pub fn try_lock_shared(sm: &mut SharedMutex) -> Result<bool, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to try_lock_shared uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_tryrdlock(sm.os_handle) {
+        Result::Ok(locked) => Result::Ok(locked),
+        Result::Err(msg) => Result::Err(Error::SharedLockError("Failed to try_lock_shared: ".to_string() + msg)),
+    }
+}
+
+/// `unlock_shared()`: SharedMutex'in paylaşımlı (okuma) kilidini açar.
+///
+/// # Parametreler
+/// - `sm`: Kilidi açılacak SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn unlock_shared(sm: &mut SharedMutex) -> Result<void, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to unlock_shared uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_rdunlock(sm.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::UnlockError("Failed to release shared lock: ".to_string() + msg)),
+    }
+}
+
+// --- 3. Özel Kilitleme (Yazma Erişimi) ---
+
+/// `lock()`: SharedMutex'i özel (yazma) modda kilitler.
+/// Eğer mutex zaten herhangi bir modda kilitliyse (okuma veya yazma), çağıran iş parçacığı bloke edilir.
+///
+/// # Parametreler
+/// - `sm`: Kilitlenecek SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn lock(sm: &mut SharedMutex) -> Result<void, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to lock uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_wrlock(sm.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::ExclusiveLockError("Failed to acquire exclusive lock: ".to_string() + msg)),
+    }
+}
+
+/// `try_lock()`: SharedMutex'i özel (yazma) modda kilitlemeye çalışır.
+/// Eğer hemen kilitlenebilirse `true` döndürür ve kilidi alır. Bloke olmaz.
+///
+/// # Parametreler
+/// - `sm`: Kilitlenecek SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<bool, Error>`: Başarılı olursa `Ok(true)` (kilit alındı) veya `Ok(false)` (kilit alınamadı),
+/// hata olursa `Err`.
+pub fn try_lock(sm: &mut SharedMutex) -> Result<bool, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to try_lock uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_trywrlock(sm.os_handle) {
+        Result::Ok(locked) => Result::Ok(locked),
+        Result::Err(msg) => Result::Err(Error::ExclusiveLockError("Failed to try_lock: ".to_string() + msg)),
+    }
+}
+
+/// `unlock()`: SharedMutex'in özel (yazma) kilidini açar.
+///
+/// # Parametreler
+/// - `sm`: Kilidi açılacak SharedMutex nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn unlock(sm: &mut SharedMutex) -> Result<void, Error> {
+    if !sm.is_initialized {
+        return Result::Err(Error::InvalidSharedMutexState("Attempted to unlock uninitialized shared mutex.".to_string()));
+    }
+    match os_rwlock_wrunlock(sm.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::UnlockError("Failed to release exclusive lock: ".to_string() + msg)),
+    }
+}
+
+// --- 4. RAII Kilit Koruyucuları ---
+// Kilitlerin otomatik olarak yönetilmesi için SharedLock ve UniqueLock.
+
+/// `SharedLock` Struct'ı: Bir `SharedMutex`'in paylaşımlı (okuma) kilidini otomatik olarak yöneten RAII nesnesi.
+/// Kapsam dışına çıktığında kilidi otomatik olarak açar.
+pub struct SharedLock<'a> {
+    shared_mutex: &'a mut SharedMutex;
+    locked_successfully: bool;
+}
+
+/// Yeni bir `SharedLock` nesnesi oluşturur ve verilen shared mutex'i paylaşımlı modda kilitler.
+pub fn make_shared_lock<'a>(sm: &'a mut SharedMutex) -> Result<SharedLock<'a>, Error> {
+    match lock_shared(sm) {
+        Result::Ok(_) => Result::Ok(SharedLock { shared_mutex: sm, locked_successfully: true }),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `SharedLock`'ın yıkıcısı. Kapsam dışına çıktığında mutex'in paylaşımlı kilidini açar.
+pub fn drop_shared_lock(mut sl: SharedLock) -> void {
+    if sl.locked_successfully {
+        match unlock_shared(sl.shared_mutex) {
+            Result::Ok(_) => { /* Kilit başarıyla açıldı */ },
+            Result::Err(e) => {
+                std::println("Warning: Failed to unlock_shared in SharedLock destructor: ".to_string() + e.to_string());
+            }
+        }
+    }
+}
+
+/// `UniqueLock` Struct'ı: Bir `SharedMutex`'in özel (yazma) kilidini otomatik olarak yöneten RAII nesnesi.
+/// Kapsam dışına çıktığında kilidi otomatik olarak açar.
+/// (Adı `UniqueLock` olsa da, bu `std::mutex::LockGuard` ile aynı işlevi görür ancak `SharedMutex` üzerinde çalışır).
+pub struct UniqueLock<'a> {
+    shared_mutex: &'a mut SharedMutex;
+    locked_successfully: bool;
+}
+
+/// Yeni bir `UniqueLock` nesnesi oluşturur ve verilen shared mutex'i özel modda kilitler.
+pub fn make_unique_lock<'a>(sm: &'a mut SharedMutex) -> Result<UniqueLock<'a>, Error> {
+    match lock(sm) {
+        Result::Ok(_) => Result::Ok(UniqueLock { shared_mutex: sm, locked_successfully: true }),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `UniqueLock`'ın yıkıcısı. Kapsam dışına çıktığında mutex'in özel kilidini açar.
+pub fn drop_unique_lock(mut ul: UniqueLock) -> void {
+    if ul.locked_successfully {
+        match unlock(ul.shared_mutex) {
+            Result::Ok(_) => { /* Kilit başarıyla açıldı */ },
+            Result::Err(e) => {
+                std::println("Warning: Failed to unlock in UniqueLock destructor: ".to_string() + e.to_string());
+            }
+        }
+    }
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// `os_rwlock_init`, `os_rwlock_destroy`, `os_rwlock_rdlock`, `os_rwlock_tryrdlock`,
+// `os_rwlock_wrlock`, `os_rwlock_trywrlock`, `os_rwlock_rdunlock`, `os_rwlock_wrunlock`:
+// Bu fonksiyonlar, işletim sisteminin alt seviye okuyucu-yazıcı kilit API'leriyle etkileşimi simgeler.
+// CNT runtime veya FFI aracılığıyla sağlanmalıdır.
