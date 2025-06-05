@@ -1,0 +1,184 @@
+// hash.cnt
+// Standart Hash Modülü
+// Çeşitli veri tipleri için hash fonksiyonları sağlar.
+
+// Gerekli import'lar (burada sadece temel tipler için yerleşik destek varsayılıyor)
+// Kullanıcı tanımlı tipler için bu trait'in uygulanması gerekecektir.
+// `std::string` gibi daha karmaşık tipler için string modülünden faydalanılabilir.
+
+/// `Hash` Trait'i (veya Interface'i):
+/// `T` tipindeki değerler için bir hash değeri hesaplama yeteneğini tanımlar.
+/// CNT'nin trait sistemi varsa, bu şekilde tanımlanabilir.
+/// Aksi takdirde, her tip için aşırı yüklenmiş `hash` fonksiyonları olarak düşünülebilir.
+// pub trait Hash {
+//    fn hash(&self) -> size_t; // Veya int, u64
+// }
+
+/// Hash değeri tipi. Genellikle `size_t` veya `u64` gibi işaretsiz bir tam sayı kullanılır.
+pub type HashValue = u64;
+
+// --- 1. Temel Tipler İçin Hash Fonksiyonları ---
+
+/// Bir `int` değeri için hash değeri hesaplar.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `int` değeri.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_int(value: int) -> HashValue {
+    // Basit bir örnek hash fonksiyonu (daha karmaşık ve sağlam algoritmalar kullanılabilir)
+    // Örneğin, FNV-1a gibi algoritmalar daha iyi çarpışma dağılımı sağlar.
+    (value as u64) ^ (value as u64 >> 32)
+}
+
+/// Bir `u64` değeri için hash değeri hesaplar.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `u64` değeri.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_u64(value: u64) -> HashValue {
+    // Identity hash, zaten bir u64 olduğu için
+    value
+}
+
+/// Bir `bool` değeri için hash değeri hesaplar.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `bool` değeri.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_bool(value: bool) -> HashValue {
+    if value { 1 as HashValue } else { 0 as HashValue }
+}
+
+/// Bir `char` değeri için hash değeri hesaplar.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `char` değeri.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_char(value: char) -> HashValue {
+    value as HashValue // Karakterin Unicode/ASCII değerini kullan
+}
+
+/// Bir `float` değeri için hash değeri hesaplar.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_float(value: float) -> HashValue {
+    // float'ı bit düzeyinde bir tam sayıya dönüştürerek hashleme.
+    // NaN'ler ve -0.0 gibi özel durumlar dikkatle ele alınmalıdır.
+    // Bu basit bir örnek. Gerçek uygulamalarda IEEE 754 float temsili üzerine daha fazla çalışılmalı.
+    // Örneğin, float'ı `u64`'e cast edip hash_u64'ü kullanmak.
+    // float_to_bits fonksiyonu varsayılmıştır.
+    // (value as u64) // Bu direkt cast veri kaybına yol açabilir, bit düzeyinde dönüştürme gerekli.
+    // Alternatif: `std::mem::transmute::<float, u64>(value)` gibi bir fonksiyon gereklidir.
+    // Geçici olarak basit bir cast kullanıldı, ancak gerçekte güvensiz olabilir.
+    (value as u64) // NOT: Bu doğrudan dönüştürme tam olarak IEEE 754'e uymayabilir.
+}
+
+
+/// Bir `string` değeri için hash değeri hesaplar.
+/// `string` modülünün var olduğu varsayılmıştır.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `string` referansı.
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash_string(value: &string) -> HashValue {
+    // FNV-1a Hash Algoritması (küçük string'ler için yeterince iyi)
+    // Offset basis: 14695981039346656037ULL (64-bit)
+    // Prime: 1099511628211ULL (64-bit)
+    const FNV_OFFSET_BASIS: HashValue = 14695981039346656037;
+    const FNV_PRIME: HashValue = 1099511628211;
+
+    let mut hash_val: HashValue = FNV_OFFSET_BASIS;
+
+    for i in 0..value.len() {
+        hash_val = hash_val ^ (value.char_at(i) as HashValue);
+        hash_val = hash_val * FNV_PRIME;
+    }
+    hash_val
+}
+
+// --- 2. Generic Hash Fonksiyonu (Eğer trait sistemi varsa) ---
+
+// Eğer CNT'de bir `Hash` trait'i veya aşırı yükleme mekanizması varsa,
+// tüm tipler için tek bir genel `hash` fonksiyonu tanımlanabilir.
+// Aksi takdirde, her tip için ayrı `hash_type` fonksiyonları kullanılmalıdır.
+
+/// Verilen herhangi bir `T` tipi için hash değeri hesaplar.
+///
+/// Bu fonksiyonun çalışması için, `T` tipinin `std::hash::Hash` trait'ini (veya
+/// benzer bir hashleme mekanizmasını) uygulaması gerekmektedir.
+///
+/// # Parametreler
+/// - `value`: Hashlenecek `T` değeri (referans veya kopyalanabilir).
+///
+/// # Dönüş Değeri
+/// `HashValue`: Hesaplanan hash değeri.
+pub fn hash<T>(value: &T) -> HashValue {
+    // Bu, CNT'nin tür sistemine ve özelliklerine bağlı olarak değişecektir.
+    // Eğer `Hash` trait'i varsa:
+     return value.hash();
+
+    // Eğer her tip için ayrı fonksiyonları manuel olarak çağırmak gerekiyorsa:
+    // Bu, derleme zamanında tip çıkarımı veya makro benzeri bir yapı gerektirebilir.
+    // Şimdilik, temel tipler için özel `hash_type` fonksiyonlarının çağrıldığını varsayalım.
+    // Örneğin, `typeof(value)` kontrolü ile:
+     if typeof(value) == Type::Int {
+         return hash_int(*(value as &int));
+     } else if typeof(value) == Type::U64 {
+         return hash_u64(*(value as &u64));
+     } else if typeof(value) == Type::Bool {
+         return hash_bool(*(value as &bool));
+     } else if typeof(value) == Type::Char {
+         return hash_char(*(value as &char));
+     } else if typeof(value) == Type::Float {
+         return hash_float(*(value as &float));
+     } else if typeof(value) == Type::String {
+         return hash_string(*(value as &string));
+     } else {
+    //     // Kullanıcı tanımlı tipler için bir hata veya varsayılan bir hash stratejisi
+    //     // Örneğin, bellek adresini hashlemek (güvenli değil!) veya bir hata fırlatmak.
+         panic("No hash function defined for this type!");
+     }
+
+    // CNT'nin tip sistemi ve dinamik/statik dispatch yetenekleri burada önemli.
+    // En yaygın yaklaşım, compile-time'da generic fonksiyonun belirli tipler için uzmanlaşmasıdır.
+    // Şimdilik, bu `hash` fonksiyonunu bir placeholder olarak bırakıp,
+    // doğrudan `hash_int`, `hash_string` vb. fonksiyonların kullanılacağını varsayalım.
+    // Veya: Compiler, `hash(value)` çağrısını `value`'nun tipine göre uygun `hash_type`'a yönlendirir.
+    // Bu taslakta, genel `hash` fonksiyonunun sihirli bir şekilde doğru spesifik hash fonksiyonunu çağıracağını varsayıyoruz.
+    // Bu, CNT'nin gelecekteki bir derleyici özelliği olabilir.
+    // Eğer böyle bir özellik yoksa, kullanıcıların spesifik `hash_int`, `hash_string` vb. fonksiyonları kullanması gerekecektir.
+    // Ya da bir trait uygulaması olması gerekecektir.
+    // Şimdilik, bu `hash` fonksiyonunun varlığını ve tip güvenliğini sağlayacak bir mekanizmanın (trait/interface gibi)
+    // var olduğunu varsayalım ve burada sadece bir "stub" olarak gösterelim.
+    // Bu bir pseudo-kod olduğu için, böyle bir "sihirli" yönlendirme yapılabilir.
+
+    // placeholder: Geliştirme notu: Bu kısım, CNT'nin gerçek tür sistemine ve `trait` (özellik)
+    // veya `interface` (arayüz) desteğine bağlı olarak yeniden yazılmalıdır.
+    // Geçici olarak 0 döndürüldü, bu hatalı bir davranıştır!
+    // Bu, genel `hash` fonksiyonunun sadece bir konsept gösterimidir.
+    0 as HashValue
+}
+
+
+// --- 3. Hash Birleştirme / Karıştırma Yardımcıları (Gelecekteki Geliştirmeler) ---
+
+// Daha karmaşık veri yapıları (tuple, struct) için hash değerlerini birleştirmeye yarayan
+// yardımcı fonksiyonlar eklenebilir. Örneğin:
+ pub fn combine_hashes(h1: HashValue, h2: HashValue) -> HashValue {
+//     // İyi bir hash birleştirme algoritması (örneğin Boost'taki `hash_combine`)
+     h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2))
+ }
