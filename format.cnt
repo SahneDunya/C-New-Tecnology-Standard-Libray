@@ -1,0 +1,287 @@
+// format.cnt
+// Standart Format Modülü
+// Güvenli, verimli ve genişletilebilir string biçimlendirme sağlar.
+
+import std::string;     // String manipülasyonları için
+import std::vector;     // Dahili argüman listeleri için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::result;     // Operasyon sonuçları için (Ok/Err)
+import std::any;        // Argümanları dinamik olarak saklamak için (varsayımsal std::any modülü)
+import std::u64;        // Sayısal dönüşümler için
+
+/// `Error` Enum'u: Biçimlendirme işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Biçim string'i geçersiz (örn. eksik '{' veya '}', geçersiz spesifikatör).
+    FormatSyntaxError(string);
+    /// Argüman sayısı veya tipi beklenenle eşleşmiyor.
+    ArgumentMismatch(string);
+    /// Desteklenmeyen biçimlendirme spesifikasyonu.
+    UnsupportedSpecifier(string);
+    /// Bellek tahsis edilemedi.
+    OutOfMemory(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Tip Alias'ı: `std::result::Result` ile Format modülünün hatalarını birleştirir.
+pub type Result<T> = std::result::Result<T, Error>;
+
+// --- 1. Formatter Trait'i ---
+// Kullanıcı tanımlı tiplerin nasıl biçimlendirileceğini belirten trait.
+// C++'daki `std::formatter` sınıf şablonuna benzer.
+
+/// `Formatter<T>` Trait'i: Belirli bir `T` tipinin nasıl string'e biçimlendirileceğini tanımlar.
+///
+/// # Şablon Parametreleri
+/// - `T`: Biçimlendirilecek tip.
+pub trait Formatter<T> {
+    /// `format()`: Verilen değeri belirtilen biçimlendirme spesifikasyonlarına göre string'e dönüştürür.
+    ///
+    /// # Parametreler
+    /// - `value`: Biçimlendirilecek değer.
+    /// - `format_spec`: Biçimlendirme spesifikasyonlarını içeren string (örn. "{}").
+    ///                  Bu spesifikasyon, hizalama, genişlik, kesinlik, sayısal taban vb. içerebilir.
+    ///
+    /// # Dönüş Değeri
+    /// `Result<string, Error>`: Biçimlendirilmiş string veya hata.
+    fn format(&self, value: &T, format_spec: string) -> Result<string>;
+}
+
+// --- Temel Tipler İçin `Formatter` Implementasyonları ---
+
+// `Formatter<string>` için implementasyon
+impl Formatter<string> for string { // Self reference is implied by `string`
+    fn format(&self, value: &string, format_spec: string) -> Result<string> {
+        // Biçimlendirme spesifikasyonlarını burada ayrıştırın ve uygulayın.
+        // Şimdilik sadece basit bir kopya döndürelim, daha sonra genişletilebilir.
+        // Örn: `{:<10}` gibi hizalama, `{:.5}` gibi kesinlik.
+        // Bu örnek için basitçe format_spec'i yok sayıp değeri döndürelim.
+        Result::Ok(value.clone())
+    }
+}
+
+// `Formatter<i64>` için implementasyon
+impl Formatter<i64> for i64 {
+    fn format(&self, value: &i64, format_spec: string) -> Result<string> {
+        // Daha karmaşık sayı biçimlendirme (taban, dolgu, işaret vb.) burada ele alınabilir.
+        // Şimdilik sadece temel to_string() yapalım.
+        // format_spec: 'd' (decimal), 'x' (hex), 'b' (binary)
+        if format_spec == "d" || format_spec.is_empty() {
+            Result::Ok(value.to_string())
+        } else if format_spec == "x" {
+            Result::Ok(std::u64::to_hex_string(*value as u64)) // i64 -> u64 cast
+        } else if format_spec == "b" {
+            Result::Ok(std::u64::to_binary_string(*value as u64)) // i64 -> u64 cast
+        } else {
+            Result::Err(Error::UnsupportedSpecifier("Unsupported integer format specifier.".to_string()))
+        }
+    }
+}
+
+// `Formatter<u64>` için implementasyon
+impl Formatter<u64> for u64 {
+    fn format(&self, value: &u64, format_spec: string) -> Result<string> {
+        if format_spec == "d" || format_spec.is_empty() {
+            Result::Ok(value.to_string())
+        } else if format_spec == "x" {
+            Result::Ok(std::u64::to_hex_string(*value))
+        } else if format_spec == "b" {
+            Result::Ok(std::u64::to_binary_string(*value))
+        } else {
+            Result::Err(Error::UnsupportedSpecifier("Unsupported unsigned integer format specifier.".to_string()))
+        }
+    }
+}
+
+// `Formatter<bool>` için implementasyon
+impl Formatter<bool> for bool {
+    fn format(&self, value: &bool, format_spec: string) -> Result<string> {
+        if format_spec.is_empty() { // Varsayılan "true" veya "false"
+            Result::Ok(value.to_string())
+        } else {
+            Result::Err(Error::UnsupportedSpecifier("Unsupported boolean format specifier.".to_string()))
+        }
+    }
+}
+
+// Float (f32, f64) ve diğer tipler için de benzer implementasyonlar yapılabilir.
+// Bu implementasyonlar, CNT'nin dahili tip dönüştürme yeteneklerine ve string kütüphanesine bağlıdır.
+
+// --- 2. `format()` Fonksiyonu (Variadic Template Benzeri) ---
+
+// CNT'nin `variadic` (değişken argümanlı) şablon/fonksiyon desteği varsayılmalıdır.
+// Eğer doğrudan variadic destek yoksa, argümanlar için `std::vector<std::any>` kullanılabilir.
+// Bu örnekte `std::any` varsayımıyla gidilecektir.
+
+/// `format_internal_impl()`: Biçim string'ini ayrıştırır ve argümanları biçimlendirir.
+/// Bu fonksiyon, `format!` makrosu veya `format()` yardımcı fonksiyonu tarafından dahili olarak çağrılır.
+///
+/// # Parametreler
+/// - `format_string`: Biçim string'i (örn. "Hello, {}!").
+/// - `args`: Biçimlendirilecek argümanların bir listesi (std::any olarak).
+///
+/// # Dönüş Değeri
+/// `Result<string, Error>`: Biçimlendirilmiş string veya hata.
+fn format_internal_impl(format_string: string, args: std::vector::Vector<std::any::Any>) -> Result<string> {
+    let mut result_string = std::string::new_string();
+    let mut arg_idx = 0;
+    let mut i = 0;
+
+    while i < format_string.len() {
+        let current_char = format_string.char_at(i);
+
+        if current_char == '{' {
+            if i + 1 < format_string.len() && format_string.char_at(i + 1) == '{' {
+                // Escaped '{'
+                result_string.push_char('{');
+                i += 2;
+                continue;
+            }
+
+            // Format specifier başlangıcı
+            let mut j = i + 1;
+            let mut format_specifier = std::string::new_string();
+            let mut found_closing_brace = false;
+
+            while j < format_string.len() {
+                let spec_char = format_string.char_at(j);
+                if spec_char == '}' {
+                    found_closing_brace = true;
+                    break;
+                }
+                format_specifier.push_char(spec_char);
+                j += 1;
+            }
+
+            if !found_closing_brace {
+                return Result::Err(Error::FormatSyntaxError("Unmatched '{' in format string.".to_string()));
+            }
+
+            if arg_idx >= args.len() {
+                return Result::Err(Error::ArgumentMismatch("Not enough arguments for format string.".to_string()));
+            }
+
+            let current_arg = &args[arg_idx];
+            arg_idx += 1;
+
+            // `std::any`'den tipi çıkar ve `Formatter` trait'ini kullan
+            // Bu kısım, CNT'nin `std::any` ve dinamik dispatch yeteneklerine bağlıdır.
+            let formatted_arg = {
+                // Tipi kontrol et ve ilgili Formatter'ı çağır.
+                // Bu, CNT'nin `any` cast mekanizmasına bağlıdır.
+                if current_arg.is::<string>() {
+                    let val = current_arg.downcast_ref::<string>().expect("Failed to downcast to string");
+                    <string as Formatter<string>>::format(&"", val, format_specifier.clone())? // `""` self instance olarak kullanıldı
+                } else if current_arg.is::<i64>() {
+                    let val = current_arg.downcast_ref::<i64>().expect("Failed to downcast to i64");
+                    <i64 as Formatter<i64>>::format(&0i64, val, format_specifier.clone())?
+                } else if current_arg.is::<u64>() {
+                    let val = current_arg.downcast_ref::<u64>().expect("Failed to downcast to u64");
+                    <u64 as Formatter<u64>>::format(&0u64, val, format_specifier.clone())?
+                } else if current_arg.is::<bool>() {
+                    let val = current_arg.downcast_ref::<bool>().expect("Failed to downcast to bool");
+                    <bool as Formatter<bool>>::format(&false, val, format_specifier.clone())?
+                }
+                // Diğer temel tipler ve kullanıcı tanımlı tipler buraya eklenecek
+                else {
+                    return Result::Err(Error::ArgumentMismatch("Unsupported argument type for formatting.".to_string()));
+                }
+            };
+            result_string.push_str(&formatted_arg);
+            i = j + 1; // '}''den sonra devam et
+        } else if current_char == '}' {
+            if i + 1 < format_string.len() && format_string.char_at(i + 1) == '}' {
+                // Escaped '}'
+                result_string.push_char('}');
+                i += 2;
+                continue;
+            }
+            return Result::Err(Error::FormatSyntaxError("Unmatched '}' in format string.".to_string()));
+        } else {
+            result_string.push_char(current_char);
+            i += 1;
+        }
+    }
+
+    Result::Ok(result_string)
+}
+
+// --- 3. `format!` Makrosu veya Yardımcı Fonksiyonları ---
+
+// CNT'nin makro sistemi veya variadic fonksiyonları desteklediği varsayımıyla:
+
+/// `format!(format_string: string, ...args: T)`: Biçimlendirme işlemini gerçekleştiren makro.
+/// Rust'taki `format!` makrosuna benzer bir kullanım sağlar.
+/// Derleme zamanında argüman tiplerini kontrol eder ve uygun Formatter'ı bağlar.
+///
+/// `format!` makrosunun iç yapısı, bir format string'ini ve değişken sayıda argümanı alır.
+/// Bu argümanları `std::any` vektörüne dönüştürür ve `format_internal_impl` fonksiyonunu çağırır.
+
+// Makro tanımı (CNT'nin makro sözdizimi varsayımıyla)
+// Bu pseudo-kod, bir makronun nasıl çalışacağını gösterir.
+macro format(format_str: string, ...args) {
+    let mut arg_vec = std::vector::new_vector();
+    for arg in args {
+        arg_vec.push(std::any::Any(arg)); // Argümanları `std::any` olarak paketle
+    }
+    std::format::format_internal_impl(format_str, arg_vec)
+}
+
+
+// Eğer makro desteği yoksa, statik olarak aşırı yüklenmiş fonksiyonlar kullanılabilir.
+// Bu, belirli sayıda argümanı destekler ve çok fazla argüman tipi/sayısı için uygun değildir.
+// Bu yüzden `std::any`'ye dayalı bir `format_internal_impl` daha esnektir.
+
+/// `format_string()`: `format!` makrosunun yerine geçici olarak kullanılabilir
+/// ve sadece string ve i64 argümanlarını destekleyen aşırı yüklenmiş bir fonksiyon.
+/// Gerçek `format` makrosunun yerini tutmaz ama örnek kullanım sağlar.
+pub fn format_string(format_str: string, arg1: std::any::Any, arg2: std::any::Any) -> Result<string> {
+    let mut args = std::vector::new_vector();
+    args.push(arg1);
+    args.push(arg2);
+    format_internal_impl(format_str, args)
+}
+
+// --- Örnek Kullanım (Ana Fonksiyon İçinde) ---
+
+fn main() {
+    println("Starting Format example...".to_string());
+
+    // Basit string biçimlendirme
+    let name = "Alice";
+    let age = 30i64;
+    let formatted_str1 = format_string("Hello, {}! You are {} years old.".to_string(),
+                                       std::any::Any(name.to_string()),
+                                       std::any::Any(age))
+                         .expect("Format failed for str1");
+    println(formatted_str1); // "Hello, Alice! You are 30 years old."
+
+    // Sayısal biçimlendirme (varsayılan decimal)
+    let num = 255u64;
+    let formatted_str2 = format_string("Decimal: {}, Hex: {:x}, Binary: {:b}".to_string(),
+                                       std::any::Any(num),
+                                       std::any::Any(num),
+                                       std::any::Any(num))
+                         .expect("Format failed for str2");
+    println(formatted_str2); // "Decimal: 255, Hex: ff, Binary: 11111111"
+
+    // String hizalama ve genişlik (varsayımsal)
+    // Şu anki Formatter<string> implementasyonu bunları desteklemiyor,
+    // ancak gelecekte genişletilebilirlik potansiyelini gösterir.
+    // let item = "Widget";
+    // let price = 99.99f32; // f32 için Formatter implementasyonu gerekli
+    // let formatted_str3 = format!("Item: {:<10} Price: {:>8.2f}", item, price);
+
+    // Hata durumu: Argüman eksikliği
+    match format_string("My name is {}.".to_string(), std::any::Any("Bob".to_string()), std::any::Any(0i64)) {
+        Ok(s) => println("Unexpected success: ".to_string() + s),
+        Err(e) => println("Expected error (too many args): ".to_string() + e.to_string()),
+    }
+    // Hata durumu: Eksik parantez
+    match format_string("Invalid format string {".to_string(), std::any::Any("test".to_string()), std::any::Any(0i64)) {
+        Ok(s) => println("Unexpected success: ".to_string() + s),
+        Err(e) => println("Expected error (syntax error): ".to_string() + e.to_string()),
+    }
+
+    println("Format example finished.".to_string());
+}
