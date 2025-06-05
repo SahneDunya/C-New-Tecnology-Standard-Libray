@@ -1,0 +1,329 @@
+// ranges.cnt
+// Standart Ranges Modülü
+// Kapsayıcılar üzerinde birleştirilebilir ve tembel algoritmalar için araçlar.
+
+import std::option;     // Sonuçlar için Option
+import std::vector;     // Örnekler için temel kapsayıcı
+import std::string;     // Örnekler için
+import std::iterators;  // Iterator kavramı (varsayımsal)
+
+// Not: Ranges konsepti, temelde iteratörler ve üzerinde çalışan "view"lar etrafında döner.
+// CNT'nin bir `Iterator` trait'i ve `Deref` / `DerefMut` benzeri referans çözme mekanizmaları olduğu varsayılmıştır.
+
+// --- 1. Temel Aralık (Range) Kavramı ---
+
+/// `Range` Trait'i: Bir türün bir aralık olarak ele alınabileceğini belirtir.
+/// Bu, `begin()` ve `end()` iteratör metotlarını sağlamalıdır.
+pub trait Range {
+    type Item; // Aralıktaki elemanların tipi
+    type Iterator: std::iterators::Iterator<Item = Self::Item>; // Aralığın iteratör tipi
+
+    /// `begin()`: Aralığın başlangıcını işaret eden bir iteratör döndürür.
+    fn begin(&self) -> Self::Iterator;
+
+    /// `end()`: Aralığın sonunu işaret eden (past-the-end) bir iteratör döndürür.
+    fn end(&self) -> Self::Iterator;
+}
+
+// Örnek: `std::vector` için `Range` implementasyonu (varsayımsal)
+// CNT'nin C++'daki gibi `vector` üzerinde `begin()` ve `end()` metotları olmalı.
+impl<T> Range for std::vector::Vector<T> {
+    type Item = T;
+    type Iterator = std::vector::VectorIterator<T>; // Varsayımsal VectorIterator
+
+    fn begin(&self) -> Self::Iterator {
+        self.iter() // Varsayımsal `iter()` metodu
+    }
+
+    fn end(&self) -> Self::Iterator {
+        self.end_iter() // Varsayımsal `end_iter()` metodu
+    }
+}
+
+// --- 2. Aralık Görünümleri (Range Views) ---
+// Görünümler, orijinal veriyi kopyalamadan veya değiştirmeden bir aralığın farklı bir temsilini sağlar.
+// Tembel değerlendirilirler.
+
+/// `FilterView<R, Pred>`: Bir aralığı belirli bir predicate'e göre filtreleyen bir görünüm.
+pub struct FilterView<R: Range, Pred: Fn(&R::Item) -> bool> {
+    base_range: R,
+    predicate: Pred,
+}
+
+impl<R: Range, Pred: Fn(&R::Item) -> bool> FilterView<R, Pred> {
+    pub fn new(range: R, pred: Pred) -> FilterView<R, Pred> {
+        FilterView {
+            base_range: range,
+            predicate: pred,
+        }
+    }
+}
+
+impl<R: Range, Pred: Fn(&R::Item) -> bool> Range for FilterView<R, Pred> {
+    type Item = R::Item;
+    type Iterator = FilterIterator<R::Iterator, Pred>;
+
+    fn begin(&self) -> Self::Iterator {
+        FilterIterator::new(self.base_range.begin(), self.base_range.end(), &self.predicate)
+    }
+
+    fn end(&self) -> Self::Iterator {
+        FilterIterator::new(self.base_range.end(), self.base_range.end(), &self.predicate)
+    }
+}
+
+/// `FilterIterator`: `FilterView` için iteratör implementasyonu.
+pub struct FilterIterator<'a, BaseIter: std::iterators::Iterator, Pred: Fn(&BaseIter::Item) -> bool> {
+    current: BaseIter,
+    end: BaseIter,
+    predicate: &'a Pred,
+}
+
+impl<'a, BaseIter: std::iterators::Iterator, Pred: Fn(&BaseIter::Item) -> bool> FilterIterator<'a, BaseIter, Pred> {
+    pub fn new(current: BaseIter, end: BaseIter, pred: &'a Pred) -> FilterIterator<'a, BaseIter, Pred> {
+        let mut it = FilterIterator { current, end, predicate: pred };
+        it.find_next(); // Başlangıçta ilk eşleşen elemanı bul
+        it
+    }
+
+    fn find_next(&mut self) {
+        while self.current.ne(&self.end) && !self.predicate(&self.current.deref()) {
+            // `deref()` metodu, iteratörün işaret ettiği değeri almak için varsayılmıştır.
+            self.current.increment(); // Bir sonraki elemana geç
+        }
+    }
+}
+
+impl<'a, BaseIter: std::iterators::Iterator, Pred: Fn(&BaseIter::Item) -> bool> std::iterators::Iterator for FilterIterator<'a, BaseIter, Pred> {
+    type Item = BaseIter::Item;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        if self.current.eq(&self.end) {
+            return std::option::Option::None;
+        }
+
+        let item = self.current.deref().clone(); // Değeri al (klonlama gerekli olabilir)
+        self.current.increment(); // Bir sonraki konuma geç
+        self.find_next();         // Bir sonraki eşleşen elemanı bul
+        std::option::Option::Some(item)
+    }
+
+    fn eq(&self, other: &Self) -> bool {
+        self.current.eq(&other.current)
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.current.ne(&other.current)
+    }
+
+    fn deref(&self) -> &Self::Item {
+        self.current.deref()
+    }
+    // `deref_mut` de gerekli olabilir
+}
+
+
+/// `TransformView<R, F>`: Bir aralığın elemanlarını belirli bir fonksiyonla dönüştüren bir görünüm.
+pub struct TransformView<R: Range, F: Fn(R::Item) -> U, U> {
+    base_range: R,
+    transform_fn: F,
+    _phantom_data: U, // U tipini tutmak için
+}
+
+impl<R: Range, F: Fn(R::Item) -> U, U> TransformView<R, F, U> {
+    pub fn new(range: R, f: F) -> TransformView<R, F, U> {
+        TransformView {
+            base_range: range,
+            transform_fn: f,
+            _phantom_data: U, // Tipi belirtmek için geçici
+        }
+    }
+}
+
+impl<R: Range, F: Fn(R::Item) -> U, U> Range for TransformView<R, F, U> {
+    type Item = U;
+    type Iterator = TransformIterator<R::Iterator, F, U>;
+
+    fn begin(&self) -> Self::Iterator {
+        TransformIterator::new(self.base_range.begin(), &self.transform_fn)
+    }
+
+    fn end(&self) -> Self::Iterator {
+        TransformIterator::new(self.base_range.end(), &self.transform_fn)
+    }
+}
+
+/// `TransformIterator`: `TransformView` için iteratör implementasyonu.
+pub struct TransformIterator<'a, BaseIter: std::iterators::Iterator, F: Fn(BaseIter::Item) -> U, U> {
+    base_iter: BaseIter,
+    transform_fn: &'a F,
+    _phantom_data: U,
+}
+
+impl<'a, BaseIter: std::iterators::Iterator, F: Fn(BaseIter::Item) -> U, U> TransformIterator<'a, BaseIter, F, U> {
+    pub fn new(base_iter: BaseIter, f: &'a F) -> TransformIterator<'a, BaseIter, F, U> {
+        TransformIterator {
+            base_iter: base_iter,
+            transform_fn: f,
+            _phantom_data: U,
+        }
+    }
+}
+
+impl<'a, BaseIter: std::iterators::Iterator, F: Fn(BaseIter::Item) -> U, U> std::iterators::Iterator for TransformIterator<'a, BaseIter, F, U> {
+    type Item = U;
+
+    fn next(&mut self) -> std::option::Option<Self::Item> {
+        match self.base_iter.next() {
+            std::option::Option::Some(item) => std::option::Option::Some((self.transform_fn)(item)),
+            std::option::Option::None => std::option::Option::None,
+        }
+    }
+
+    fn eq(&self, other: &Self) -> bool {
+        self.base_iter.eq(&other.base_iter)
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.base_iter.ne(&other.base_iter)
+    }
+
+    // `deref` ve `deref_mut` burada doğrudan geçerli olmayabilir
+    // çünkü dönüşüm uygulanmış bir değeri temsil ederler.
+    // Ancak `next()` ile değeri tüketmek daha yaygındır.
+    // Eğer `deref` veya `deref_mut` isteniyorsa, `Option` ile dönmeliler.
+}
+
+
+// --- 3. Aralık Adaptörleri (Range Adaptors) ---
+// Fonksiyonel olarak aralıkları dönüştüren ve yeni görünümler oluşturan yardımcı fonksiyonlar.
+// Bunlar C++'daki `views::filter`, `views::transform` gibi şeylerdir.
+
+pub mod views {
+    import super::Range;
+    import super::FilterView;
+    import super::TransformView;
+
+    /// `filter(pred)`: Bir aralığı belirli bir predicate'e göre filtreleyen bir adaptör.
+    pub fn filter<R: Range, Pred: Fn(&R::Item) -> bool>(pred: Pred) -> impl Fn(R) -> FilterView<R, Pred> {
+        // Bu, bir closure döndüren bir higher-order fonksiyon olacaktır.
+        // C++'daki "pipeable" adaptörleri taklit eder.
+        move |range: R| {
+            FilterView::new(range, pred)
+        }
+    }
+
+    /// `transform(f)`: Bir aralığın elemanlarını belirli bir fonksiyonla dönüştüren bir adaptör.
+    pub fn transform<R: Range, F: Fn(R::Item) -> U, U>(f: F) -> impl Fn(R) -> TransformView<R, F, U> {
+        move |range: R| {
+            TransformView::new(range, f)
+        }
+    }
+
+    // `take`, `drop`, `join`, `split` gibi daha fazla adaptör buraya eklenebilir.
+}
+
+// --- 4. Aralık Algoritmaları ---
+// Aralıklar üzerinde çalışan, iteratörler yerine doğrudan aralıkları alan algoritmalar.
+
+pub mod algorithms {
+    import super::Range;
+    import std::vector::Vector;
+    import std::string::String;
+
+    /// `for_each(range, f)`: Bir aralıktaki her elemana bir fonksiyon uygular.
+    pub fn for_each<R: Range, F: Fn(&R::Item)>(range: R, f: F) {
+        let mut it = range.begin();
+        let end = range.end();
+        while it.ne(&end) {
+            f(it.deref());
+            it.increment();
+        }
+    }
+
+    /// `to_vector(range)`: Bir aralıktaki tüm elemanları yeni bir `Vector`'e kopyalar.
+    pub fn to_vector<R: Range>(range: R) -> Vector<R::Item> {
+        let mut vec = std::vector::Vector::new();
+        let mut it = range.begin();
+        let end = range.end();
+        while it.ne(&end) {
+            vec.push(it.deref().clone()); // Klonlama gerekli olabilir
+            it.increment();
+        }
+        vec
+    }
+
+    /// `count_if(range, pred)`: Bir aralıkta belirli bir predicate'i karşılayan elemanların sayısını döndürür.
+    pub fn count_if<R: Range, Pred: Fn(&R::Item) -> bool>(range: R, pred: Pred) -> u64 {
+        let mut count = 0u64;
+        let mut it = range.begin();
+        let end = range.end();
+        while it.ne(&end) {
+            if pred(it.deref()) {
+                count += 1;
+            }
+            it.increment();
+        }
+        count
+    }
+
+    // `find`, `sort`, `transform_into`, `sum` gibi daha fazla algoritma buraya eklenebilir.
+}
+
+// --- 5. Piping Operatörü Desteği (Varsayımsal) ---
+// CNT'nin `|` operatörünü aşırı yükleme yeteneği varsa, bu aralık adaptörlerini zincirlemeyi sağlar.
+// Bu kısım, CNT'nin dilbilgisel özelliklerine bağlıdır.
+
+
+// Örnek: `|` operatörü aşırı yüklemesi için pseudo-kod
+// Bu, `Operator` trait'i veya özel derleyici desteği gerektirir.
+impl<R: Range, Pred: Fn(&R::Item) -> bool> std::ops::Pipe<Fn(R) -> FilterView<R, Pred>> for R {
+    type Output = FilterView<R, Pred>;
+
+    fn pipe(self, adaptor: Fn(R) -> FilterView<R, Pred>) -> FilterView<R, Pred> {
+        adaptor(self)
+    }
+}
+
+impl<R: Range, F: Fn(R::Item) -> U, U> std::ops::Pipe<Fn(R) -> TransformView<R, F, U>> for R {
+    type Output = TransformView<R, F, U>;
+
+    fn pipe(self, adaptor: Fn(R) -> TransformView<R, F, U>) -> TransformView<R, F, U> {
+        adaptor(self)
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+fn main() {
+    println("Starting Ranges example...".to_string());
+
+    let my_vector = std::vector::Vector::from_elements([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    println("Original vector: ".to_string() + my_vector.to_string()); // [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    // 1. Filter View kullanımı
+    let even_numbers_view = std::ranges::views::filter(|&n| n % 2 == 0)(my_vector);
+    println("Even numbers (view): ".to_string() + std::ranges::algorithms::to_vector(even_numbers_view).to_string()); // [2, 4, 6, 8, 10]
+
+    // 2. Transform View kullanımı
+    let doubled_numbers_view = std::ranges::views::transform(|n| n * 2)(my_vector);
+    println("Doubled numbers (view): ".to_string() + std::ranges::algorithms::to_vector(doubled_numbers_view).to_string()); // [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+    // 3. Zincirleme (Piping) ve Karmaşık İşlem
+    // Eğer `|` operatörü destekleniyorsa:
+     let processed_numbers = my_vector
+         | std::ranges::views::filter(|&n| n > 3)
+         | std::ranges::views::transform(|n| n * 10);
+    // Veya fonksiyonel olarak:
+    let processed_numbers = std::ranges::views::transform(|n| n * 10)(
+        std::ranges::views::filter(|&n| n > 3)(my_vector)
+    );
+    println("Processed numbers (chained): ".to_string() + std::ranges::algorithms::to_vector(processed_numbers).to_string()); // [40, 50, 60, 70, 80, 90, 100]
+
+    // 4. Algoritma kullanımı
+    let count_of_large_numbers = std::ranges::algorithms::count_if(my_vector, |&n| n > 5);
+    println("Count of numbers > 5: ".to_string() + count_of_large_numbers.to_string()); // 5 (6, 7, 8, 9, 10)
+
+    println("Ranges example finished.".to_string());
+}
