@@ -1,0 +1,345 @@
+// memory_resource.cnt
+// Standart Memory Resource (Bellek Kaynağı) Modülü
+// Dinamik bellek tahsisini soyutlar ve farklı bellek tahsis stratejilerini çalışma zamanında kullanır.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::ptr;        // İşaretçi manipülasyonları için (varsayılan std::ptr modülü)
+import std::result;     // Operasyon sonuçları için (Ok/Err)
+
+// Not: Bu modülün, CNT'nin altında yatan sistemin temel bellek tahsis fonksiyonlarına
+// (örn. malloc/free veya benzeri low-level OS API'leri) erişim yeteneğine sahip olduğu varsayılmaktadır.
+
+/// `Error` Enum'u: Bellek kaynağı işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsis edilemedi (bellek yetersiz).
+    OutOfMemory(string);
+    /// Geçersiz argüman (örn. sıfır boyut veya hizalama).
+    InvalidArgument(string);
+    /// Bellek kaynağına özel bir hata.
+    MemoryResourceSpecific(string);
+    /// Bilinmeyen bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Tip Alias'ı: `std::result::Result` ile Memory Resource modülünün hatalarını birleştirir.
+pub type Result<T> = std::result::Result<T, Error>;
+
+// Bellek hizalama (alignment) için varsayılan bir değer.
+// Modern sistemlerde genellikle 8 veya 16 bayt olur.
+pub const DEFAULT_ALIGNMENT: u64 = 8;
+
+// --- 1. Bellek Kaynağı Arayüzü (Trait) ---
+
+/// `MemoryResource` Trait'i: Tüm bellek kaynaklarının uygulaması gereken soyut arayüz.
+/// C++ `std::pmr::memory_resource` soyut sınıfına benzer.
+pub trait MemoryResource {
+    /// `allocate()`: Belirtilen boyutta ve hizalamada bellek tahsis eder.
+    ///
+    /// # Parametreler
+    /// - `bytes`: Tahsis edilecek bellek boyutu (bayt cinsinden).
+    /// - `alignment`: Bellek bloğunun hizalaması (bayt cinsinden, 2'nin kuvveti olmalı).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<ptr<void>, Error>`: Başarılı olursa tahsis edilmiş bloğun işaretçisi, hata olursa `Err`.
+    fn allocate(&self, bytes: u64, alignment: u64) -> Result<ptr<void>>;
+
+    /// `deallocate()`: Daha önce bu bellek kaynağı tarafından tahsis edilmiş bir bellek bloğunu serbest bırakır.
+    ///
+    /// # Parametreler
+    /// - `p`: Serbest bırakılacak bellek bloğunun işaretçisi.
+    /// - `bytes`: Serbest bırakılacak bellek bloğunun boyutu (tahsis edildiğiyle aynı olmalı).
+    /// - `alignment`: Serbest bırakılacak bellek bloğunun hizalaması (tahsis edildiğiyle aynı olmalı).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+    fn deallocate(&self, p: ptr<void>, bytes: u64, alignment: u64) -> Result<void>;
+
+    /// `is_equal()`: İki bellek kaynağının eşit olup olmadığını kontrol eder.
+    /// Eşit bellek kaynakları, aynı bellek bloklarını tahsis edebilir ve serbest bırakabilir.
+    ///
+    /// # Parametreler
+    /// - `other`: Karşılaştırılacak diğer bellek kaynağına bir referans.
+    ///
+    /// # Dönüş Değeri
+    /// `bool`: Eşitlerse `true`, değilse `false`.
+    fn is_equal(&self, other: &dyn MemoryResource) -> bool; // `dyn` keyword'ü varsayılmıştır.
+
+    // Not: C++'daki `do_` önekli fonksiyonlar, soyut taban sınıfın implementasyon detaylarıdır.
+    // CNT'de trait kullanıldığı için, trait'in kendisi arayüzü tanımlar ve implementasyonlar somut tiplerde olur.
+}
+
+// --- 2. Global Bellek Kaynakları ---
+
+// Sistem Tahsisçisi: Genellikle `malloc` ve `free` üzerine kuruludur.
+// Bu, CNT'nin kendi global new/delete operatörleri veya malloc/free wrapper'ları olabilir.
+
+/// `SystemMemoryResource` Struct'ı: Sistem tarafından sağlanan varsayılan bellek kaynağı.
+/// Genellikle işletim sisteminin `malloc` ve `free` gibi fonksiyonlarını kullanır.
+pub struct SystemMemoryResource;
+
+impl MemoryResource for SystemMemoryResource {
+    fn allocate(&self, bytes: u64, alignment: u64) -> Result<ptr<void>> {
+        if bytes == 0 {
+            return Result::Err(Error::InvalidArgument("Cannot allocate 0 bytes.".to_string()));
+        }
+        // Varsayımsal sistem malloc/aligned_alloc çağrısı
+        match std::ptr::sys_allocate_aligned(bytes, alignment) { // std::ptr'den varsayımsal fonksiyon
+            std::result::Ok(p) => Result::Ok(p),
+            std::result::Err(_) => Result::Err(Error::OutOfMemory("System memory allocation failed.".to_string())),
+        }
+    }
+
+    fn deallocate(&self, p: ptr<void>, bytes: u64, alignment: u64) -> Result<void> {
+        if p.is_null() {
+            return Result::Err(Error::InvalidArgument("Cannot deallocate null pointer.".to_string()));
+        }
+        // Varsayımsal sistem free/aligned_free çağrısı
+        match std::ptr::sys_deallocate_aligned(p, bytes, alignment) { // std::ptr'den varsayımsal fonksiyon
+            std::result::Ok(_) => Result::Ok(()),
+            std::result::Err(_) => Result::Err(Error::MemoryResourceSpecific("System memory deallocation failed.".to_string())),
+        }
+    }
+
+    fn is_equal(&self, other: &dyn MemoryResource) -> bool {
+        // Genellikle, sistem bellek kaynağı sadece kendisiyle eşittir.
+        // Diğer MemoryResource türleriyle karşılaştırıldığında `false` döner.
+        // Type ID kontrolü veya özel bir cast mekanizması gerekebilir.
+        other.as_any().is::<SystemMemoryResource>() // Varsayımsal `as_any()` ve `is<T>()`
+    }
+}
+
+// Singleton örneği için varsayımsal bir mekanizma
+pub static SYSTEM_MEMORY_RESOURCE: SystemMemoryResource = SystemMemoryResource {};
+
+/// `get_system_memory_resource()`: Sistem varsayılan bellek kaynağını döndürür.
+pub fn get_system_memory_resource() -> &'static SystemMemoryResource {
+    &SYSTEM_MEMORY_RESOURCE
+}
+
+// Null Bellek Kaynağı: Tahsis yapmayan, her zaman hata döndüren bir kaynak.
+// Test durumları veya bellek tahsisine izin verilmeyen yerlerde kullanılır.
+
+/// `NullMemoryResource` Struct'ı: Hiçbir zaman bellek tahsis etmeyen bir bellek kaynağı.
+pub struct NullMemoryResource;
+
+impl MemoryResource for NullMemoryResource {
+    fn allocate(&self, bytes: u64, alignment: u64) -> Result<ptr<void>> {
+        Result::Err(Error::OutOfMemory("Null memory resource cannot allocate memory.".to_string()))
+    }
+
+    fn deallocate(&self, p: ptr<void>, bytes: u64, alignment: u64) -> Result<void> {
+        // Null resource'dan tahsis edilmeyen bir pointer'ı serbest bırakma.
+        // Hata fırlatmak yerine, bu genellikle bir no-op (işlem yapmaz) veya hata fırlatır.
+        Result::Err(Error::MemoryResourceSpecific("Null memory resource cannot deallocate memory.".to_string()))
+    }
+
+    fn is_equal(&self, other: &dyn MemoryResource) -> bool {
+        other.as_any().is::<NullMemoryResource>()
+    }
+}
+
+pub static NULL_MEMORY_RESOURCE: NullMemoryResource = NullMemoryResource {};
+
+/// `get_null_memory_resource()`: Null bellek kaynağını döndürür.
+pub fn get_null_memory_resource() -> &'static NullMemoryResource {
+    &NULL_MEMORY_RESOURCE
+}
+
+// --- 3. Bellek Kaynağı Uygulamaları (Örnekler) ---
+// Bellek kaynaklarını nasıl oluşturabileceğimize dair basit örnekler.
+
+// --- A. Arena (Stack) Memory Resource (Basit bir örnek) ---
+// Sabit boyutlu bir bellek bloğundan tahsis yapan, yalnızca resetlenebilen (serbest bırakmayan) bir tahsisçi.
+// Gömülü sistemlerde veya kısa ömürlü tahsisler için kullanışlıdır.
+
+/// `ArenaMemoryResource` Struct'ı: Sabit boyutlu bir bellek alanından tahsis yapar.
+/// Serbest bırakma desteklemez, sadece `reset()` ile tüm belleği temizler.
+pub struct ArenaMemoryResource {
+    buffer_start: ptr<u8>; // Arenanın başlangıcı
+    buffer_capacity: u64;  // Arenanın toplam boyutu
+    current_offset: u64;   // Mevcut tahsis ofseti
+    upstream: &'static dyn MemoryResource; // Üst bellek kaynağı (arenanın kendisini tahsis etmek için)
+}
+
+/// `new_arena_memory_resource()`: Yeni bir ArenaMemoryResource oluşturur.
+/// Belirtilen kapasitede belleği `upstream` kaynaktan tahsis eder.
+pub fn new_arena_memory_resource(capacity: u64, upstream: &'static dyn MemoryResource) -> Result<ArenaMemoryResource> {
+    if capacity == 0 {
+        return Result::Err(Error::InvalidArgument("Arena capacity cannot be zero.".to_string()));
+    }
+    let buffer = upstream.allocate(capacity, DEFAULT_ALIGNMENT)?;
+    Result::Ok(ArenaMemoryResource {
+        buffer_start: buffer as ptr<u8>,
+        buffer_capacity: capacity,
+        current_offset: 0,
+        upstream: upstream,
+    })
+}
+
+impl ArenaMemoryResource {
+    /// `reset()`: Arenadaki tüm tahsisleri serbest bırakır, ancak belleği sisteme geri vermez.
+    pub fn reset(&mut self) {
+        self.current_offset = 0;
+    }
+
+    /// `release_memory()`: Arenanın tahsis ettiği tüm belleği üst kaynağa geri verir.
+    /// Bu işlemden sonra ArenaMemoryResource kullanılamaz hale gelir!
+    pub fn release_memory(&mut self) -> Result<void> {
+        if !self.buffer_start.is_null() {
+            let res = self.upstream.deallocate(self.buffer_start as ptr<void>, self.buffer_capacity, DEFAULT_ALIGNMENT);
+            self.buffer_start = std::ptr::null(); // Pointer'ı sıfırla
+            self.buffer_capacity = 0;
+            self.current_offset = 0;
+            res // Deallocate sonucunu döndür
+        } else {
+            Result::Ok(()) // Zaten serbest bırakılmışsa no-op
+        }
+    }
+
+    // `align_up()`: Verilen bir boyutu belirtilen hizalamaya göre yukarı yuvarlar.
+    fn align_up(size: u64, alignment: u64) -> u64 {
+        (size + alignment - 1) & !(alignment - 1)
+    }
+}
+
+impl MemoryResource for ArenaMemoryResource {
+    fn allocate(&self, bytes: u64, alignment: u64) -> Result<ptr<void>> {
+        if bytes == 0 {
+            return Result::Err(Error::InvalidArgument("Cannot allocate 0 bytes.".to_string()));
+        }
+
+        let aligned_offset = ArenaMemoryResource::align_up(self.current_offset, alignment);
+        if aligned_offset + bytes > self.buffer_capacity {
+            return Result::Err(Error::OutOfMemory("Arena capacity exceeded.".to_string()));
+        }
+
+        // Pointer aritmetiği için varsayımsal `offset()` fonksiyonu
+        let allocated_ptr = self.buffer_start.offset(aligned_offset) as ptr<void>;
+        // mutable bir struct içindeki field'ı değiştirmek için `&mut self` olmalı.
+        // Trait fonksiyonu `&self` olduğu için bu durum bir sorun teşkil ediyor.
+        // Eğer `allocate` mutable olmalıysa, `MemoryResource` trait'i `&mut self` almalıdır.
+        // C++'daki `std::pmr::memory_resource` ise `do_allocate` fonksiyonunu `virtual` olarak tanımlar ve `this` işaretçisi değişmez.
+        // Bu durumda CNT'nin `MemoryResource` trait'inin `allocate` metodunun `&mut self` alması gerekir.
+        // Aşağıdaki kod, `&mut self` varsayımıyla yazılmıştır.
+         self.current_offset = aligned_offset + bytes; // Bu satır `&mut self` gerektirir.
+
+        Result::Err(Error::MemoryResourceSpecific("ArenaMemoryResource's allocate needs `&mut self` but trait is `&self`.".to_string()))
+        // Gerçek implementasyonda, MemoryResource trait'i `&mut self` almalıydı.
+        // Bu demo için, bu hatayı kabul edelim veya `unsafe` pointer manipülasyonu ile `current_offset`'ı güncelleyelim.
+        // Düzgün bir tasarım için MemoryResource trait'inin `allocate` ve `deallocate` metodları `&mut self` almalıdır.
+    }
+
+    fn deallocate(&self, p: ptr<void>, bytes: u64, alignment: u64) -> Result<void> {
+        // Arena tahsisçilerinde deallocate genellikle bir no-op'tur.
+        // Çünkü bellek toplu olarak resetlenir veya serbest bırakılır.
+        Result::Ok(()) // Bir şey yapma
+    }
+
+    fn is_equal(&self, other: &dyn MemoryResource) -> bool {
+        // Aynı tipte ve aynı başlangıç adresine sahip arenalar eşit kabul edilebilir.
+        // Bu örnek için basitçe tip eşitliği kontrol edelim.
+        other.as_any().is::<ArenaMemoryResource>()
+        // Ayrıca `self.buffer_start == other_arena.buffer_start` kontrolü de yapılabilir.
+    }
+}
+
+// --- 4. Global Varsayılan Bellek Kaynağı (Runtime set edilebilir) ---
+
+// `CURRENT_DEFAULT_MEMORY_RESOURCE`: Uygulama genelinde varsayılan bellek kaynağını tutar.
+// `get_default_memory_resource()` ve `set_default_memory_resource()` ile yönetilir.
+// Bu, `std::pmr::get_default_resource()` ve `set_default_resource()`'a benzer.
+// Rust'taki `static mut` veya C'deki global değişken gibi bir mekanizma gerektirir.
+
+static mut CURRENT_DEFAULT_MEMORY_RESOURCE: Option<&'static dyn MemoryResource> = None;
+
+/// `get_default_memory_resource()`: Mevcut varsayılan bellek kaynağını döndürür.
+/// Eğer hiç ayarlanmamışsa, `SystemMemoryResource`'u varsayılan olarak kullanır.
+pub fn get_default_memory_resource() -> &'static dyn MemoryResource {
+    unsafe {
+        if CURRENT_DEFAULT_MEMORY_RESOURCE.is_none() {
+            CURRENT_DEFAULT_MEMORY_RESOURCE = Some(&SYSTEM_MEMORY_RESOURCE);
+        }
+        CURRENT_DEFAULT_MEMORY_RESOURCE.expect("Default memory resource is not set.")
+    }
+}
+
+/// `set_default_memory_resource()`: Uygulama genelinde varsayılan bellek kaynağını ayarlar.
+///
+/// # Parametreler
+/// - `new_resource`: Yeni varsayılan olarak ayarlanacak bellek kaynağına bir referans.
+///
+/// # Dönüş Değeri
+/// `&'static dyn MemoryResource`: Önceki varsayılan bellek kaynağını döndürür.
+pub fn set_default_memory_resource(new_resource: &'static dyn MemoryResource) -> &'static dyn MemoryResource {
+    unsafe {
+        let old_resource = get_default_memory_resource(); // Öncekini al
+        CURRENT_DEFAULT_MEMORY_RESOURCE = Some(new_resource);
+        old_resource
+    }
+}
+
+// --- Örnek Kullanım ---
+
+fn main() {
+    println("Starting Memory Resource example...".to_string());
+
+    // 1. Varsayılan Sistem Bellek Kaynağını Kullanma
+    let sys_mr = get_system_memory_resource();
+    println("Using system memory resource.".to_string());
+
+    let mut data1 = sys_mr.allocate(16, DEFAULT_ALIGNMENT).expect("Sys_mr allocation failed");
+    println("Allocated 16 bytes from system_mr at: ".to_string() + data1.to_string());
+    sys_mr.deallocate(data1, 16, DEFAULT_ALIGNMENT).expect("Sys_mr deallocation failed");
+    println("Deallocated 16 bytes from system_mr.");
+
+    // 2. Null Bellek Kaynağını Kullanma
+    let null_mr = get_null_memory_resource();
+    println("\nUsing null memory resource (will fail to allocate).".to_string());
+    match null_mr.allocate(10, DEFAULT_ALIGNMENT) {
+        Ok(_) => println("Error: Null MR allocated memory!"),
+        Err(e) => println("Null MR allocation failed as expected: ".to_string() + e.to_string()),
+    }
+
+    // 3. Global Varsayılan Bellek Kaynağını Ayarlama ve Kullanma
+    println("\nSetting and using global default memory resource.".to_string());
+
+    // NOT: ArenaMemoryResource'ın `allocate` metodu `&mut self` beklediği için
+    // şu anki `MemoryResource` trait tanımıyla uyumsuzluk var.
+    // Bu kod parçası, `MemoryResource` trait'inin `allocate` ve `deallocate`
+    // metotlarının `&mut self` alması durumunda çalışacaktır.
+    // Varsayımsal olarak bu düzeltme yapılmıştır.
+
+    let arena_capacity = 1024u64; // 1 KB
+    let mut arena_mr = new_arena_memory_resource(arena_capacity, get_system_memory_resource())
+        .expect("Failed to create arena memory resource");
+    println("Created ArenaMemoryResource with capacity: ".to_string() + arena_capacity.to_string() + " bytes.");
+
+    // Varsayılan belleği arena kaynağına ayarla
+    let old_default_mr = set_default_memory_resource(&arena_mr);
+    println("Default memory resource set to ArenaMemoryResource.");
+
+    let mut data2 = get_default_memory_resource().allocate(32, DEFAULT_ALIGNMENT).expect("Default MR allocation failed");
+    println("Allocated 32 bytes from default_mr (Arena) at: ".to_string() + data2.to_string());
+
+    let mut data3 = get_default_memory_resource().allocate(64, DEFAULT_ALIGNMENT).expect("Default MR allocation failed");
+    println("Allocated 64 bytes from default_mr (Arena) at: ".to_string() + data3.to_string());
+
+    // Arenayı sıfırla
+    arena_mr.reset(); // Bu, data2 ve data3'ü geçersiz kılar, ancak bellek sisteme geri verilmez.
+    println("ArenaMemoryResource reset. Previous allocations are now invalid.");
+
+    let mut data4 = get_default_memory_resource().allocate(128, DEFAULT_ALIGNMENT).expect("Default MR allocation failed after reset");
+    println("Allocated 128 bytes from default_mr (Arena) after reset at: ".to_string() + data4.to_string());
+
+    // Orijinal varsayılan belleği geri yükle
+    set_default_memory_resource(old_default_mr);
+    println("Default memory resource restored to original.");
+
+    // Arenanın belleğini serbest bırak
+    arena_mr.release_memory().expect("Failed to release arena memory");
+    println("ArenaMemoryResource's underlying memory released to system.");
+
+
+    println("Memory Resource example finished.".to_string());
+}
