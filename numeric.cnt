@@ -1,0 +1,169 @@
+// numeric.cnt
+// Standart Sayısal Algoritma Modülü
+// Sayısal veri aralıkları üzerinde genel matematiksel işlemler sağlar.
+
+import std::string;     // Hata mesajları için (çok az kullanılır ama güvenlik için)
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// Not: Bu algoritmalar genellikle iteratörler (veya raw_ptr aralıkları) üzerinde çalışır.
+// CNT'de güçlü bir iteratör arayüzü varsayıyoruz.
+// Eğer iteratörler yoksa, fonksiyonlar (ptr start, ptr end) veya (ptr start, size) şeklinde parametre almalıdır.
+// Bu taslakta, basitlik adına `raw_ptr` ve `len` (uzunluk) kombinasyonunu kullanacağız.
+
+/// `Error` Enum'u: Sayısal işlemler sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz argüman hatası (örn. boş aralık).
+    InvalidArgument(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 1. Toplama ve Çarpma (Reduction) Algoritmaları ---
+
+/// Bir aralıktaki tüm elemanların toplamını hesaplar. O($N$)
+///
+/// # Parametreler
+/// - `data`: Toplamı alınacak sayısal aralığın başlangıç işaretçisi.
+/// - `len`: Eleman sayısı.
+/// - `initial_value`: Toplamaya başlanacak başlangıç değeri.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (toplanabilir olmalı, yani `+` operatörü tanımlı olmalı).
+/// - `U`: Toplamın tutulacağı tip (genellikle `T` ile aynı veya daha büyük bir sayısal tip).
+///
+/// # Dönüş Değeri
+/// `U`: Hesaplanan toplam.
+pub fn accumulate<T, U>(data: raw_ptr<T>, len: int, initial_value: U) -> U {
+    let mut sum = initial_value;
+    for i in 0..len {
+        sum = sum + (raw_ptr_read(data, i) as U); // Tip dönüşümü gerekebilir
+    }
+    sum
+}
+
+/// Bir aralıktaki tüm elemanların çarpımını hesaplar. O($N$)
+///
+/// # Parametreler
+/// - `data`: Çarpımı alınacak sayısal aralığın başlangıç işaretçisi.
+/// - `len`: Eleman sayısı.
+/// - `initial_value`: Çarpmaya başlanacak başlangıç değeri (genellikle 1).
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (çarpılabilir olmalı, yani `*` operatörü tanımlı olmalı).
+/// - `U`: Çarpımın tutulacağı tip (genellikle `T` ile aynı veya daha büyük bir sayısal tip).
+///
+/// # Dönüş Değeri
+/// `U`: Hesaplanan çarpım.
+pub fn product<T, U>(data: raw_ptr<T>, len: int, initial_value: U) -> U {
+    let mut prod = initial_value;
+    for i in 0..len {
+        prod = prod * (raw_ptr_read(data, i) as U); // Tip dönüşümü gerekebilir
+    }
+    prod
+}
+
+// --- 2. Dizi Üretimi ve Doldurma Algoritmaları ---
+
+/// Belirli bir aralıkta artan değerler üretir ve bir diziye doldurur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Değerlerin doldurulacağı dizi aralığının başlangıç işaretçisi (mutable).
+/// - `len`: Doldurulacak eleman sayısı.
+/// - `start_value`: Başlangıç değeri.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (artırılabilir olmalı, yani `+` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn iota<T>(data: raw_ptr<T>, len: int, start_value: T) -> void {
+    let mut current_value = start_value;
+    for i in 0..len {
+        raw_ptr_write(data, i, current_value);
+        current_value = current_value + (1 as T); // Her adımda 1 artır
+    }
+}
+
+/// Belirli bir başlangıç değeri ve artış adımıyla bir diziye değerler doldurur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Değerlerin doldurulacağı dizi aralığının başlangıç işaretçisi (mutable).
+/// - `len`: Doldurulacak eleman sayısı.
+/// - `start_value`: Başlangıç değeri.
+/// - `step`: Her adımda eklenecek artış miktarı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (toplanabilir olmalı, yani `+` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn fill_range_stepped<T>(data: raw_ptr<T>, len: int, start_value: T, step: T) -> void {
+    let mut current_value = start_value;
+    for i in 0..len {
+        raw_ptr_write(data, i, current_value);
+        current_value = current_value + step;
+    }
+}
+
+// --- 3. Diğer Sayısal Algoritmalar ---
+
+/// Bir aralıktaki elemanların kümülatif toplamını (prefix sum) hesaplar. O($N$)
+/// Sonuçlar aynı diziye yazılır.
+///
+/// # Parametreler
+/// - `data`: Kümülatif toplamı alınacak dizi aralığının başlangıç işaretçisi (mutable).
+/// - `len`: Eleman sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (toplanabilir olmalı).
+///
+/// # Not
+/// İlk eleman olduğu gibi kalır, sonraki elemanlar kendinden önceki elemanların toplamıdır.
+/// Örn: [1, 2, 3, 4] -> [1, 3, 6, 10]
+pub fn partial_sum<T>(data: raw_ptr<T>, len: int) -> void {
+    if len <= 1 { return; }
+    let mut current_sum = raw_ptr_read(data, 0);
+    for i in 1..len {
+        current_sum = current_sum + raw_ptr_read(data, i);
+        raw_ptr_write(data, i, current_sum);
+    }
+}
+
+/// İki aralıktaki elemanların karşılıklı çarpımlarını toplayarak nokta çarpımını (dot product) hesaplar. O($N$)
+///
+/// # Parametreler
+/// - `data1`: Birinci sayısal aralığın başlangıç işaretçisi.
+/// - `data2`: İkinci sayısal aralığın başlangıç işaretçisi.
+/// - `len`: Her iki aralıktaki eleman sayısı (eşit olmalı).
+/// - `initial_value`: Toplamaya başlanacak başlangıç değeri.
+///
+/// # Tip Parametreleri
+/// - `T1`: Birinci dizinin eleman tipi (çarpılabilir olmalı).
+/// - `T2`: İkinci dizinin eleman tipi (çarpılabilir olmalı).
+/// - `U`: Sonucun tutulacağı tip (çarpım ve toplam işlemlerini desteklemeli).
+///
+/// # Dönüş Değeri
+/// `U`: Hesaplanan nokta çarpımı.
+pub fn dot_product<T1, T2, U>(data1: raw_ptr<T1>, data2: raw_ptr<T2>, len: int, initial_value: U) -> U {
+    let mut result = initial_value;
+    for i in 0..len {
+        result = result + (raw_ptr_read(data1, i) as U) * (raw_ptr_read(data2, i) as U);
+    }
+    result
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
