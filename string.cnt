@@ -1,0 +1,180 @@
+// string.cnt
+// Standart Dize (String) İşlemleri modülü
+
+// Harici C veya sistem fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, gerçek dize manipülasyonunu ve bellek yönetimini C/C++ seviyesinde halleder.
+extern fn _cnt_string_length(s: &string) -> int;
+extern fn _cnt_string_equals(s1: &string, s2: &string) -> bool;
+extern fn _cnt_string_starts_with(s: &string, prefix: &string) -> bool;
+extern fn _cnt_string_ends_with(s: &string, suffix: &string) -> bool;
+extern fn _cnt_string_contains(s: &string, sub: &string) -> bool;
+extern fn _cnt_string_substring(s: &string, start: int, end: int) -> string; // Yeni string döndürür
+extern fn _cnt_string_to_lower(s: &string) -> string; // Yeni string döndürür
+extern fn _cnt_string_to_upper(s: &string) -> string; // Yeni string döndürür
+extern fn _cnt_string_trim(s: &string) -> string; // Yeni string döndürür
+extern fn _cnt_int_to_string(value: int) -> string; // int'i string'e çevirir
+extern fn _cnt_float_to_string(value: float) -> string; // float'ı string'e çevirir
+extern fn _cnt_bool_to_string(value: bool) -> string; // bool'u string'e çevirir
+
+/// Bir dizenin uzunluğunu döndürür.
+///
+/// # Parametreler
+/// - `s`: Uzunluğu alınacak dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dizenin karakter sayısı olarak int.
+pub fn length(s: &string) -> int {
+    _cnt_string_length(s)
+}
+
+/// Bir dizenin boş olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `s`: Kontrol edilecek dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dize boşsa `true`, değilse `false`.
+pub fn is_empty(s: &string) -> bool {
+    _cnt_string_length(s) == 0
+}
+
+/// İki dizenin eşit olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `s1`: İlk dizenin referansı.
+/// - `s2`: İkinci dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dizeler eşitse `true`, değilse `false`.
+pub fn equals(s1: &string, s2: &string) -> bool {
+    _cnt_string_equals(s1, s2)
+}
+
+/// Bir dizenin belirli bir ön ekle başlayıp başlamadığını kontrol eder.
+///
+/// # Parametreler
+/// - `s`: Kontrol edilecek dizenin referansı.
+/// - `prefix`: Ön ek olarak aranacak dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dize ön ekle başlıyorsa `true`, değilse `false`.
+pub fn starts_with(s: &string, prefix: &string) -> bool {
+    _cnt_string_starts_with(s, prefix)
+}
+
+/// Bir dizenin belirli bir son ekle bitip bitmediğini kontrol eder.
+///
+/// # Parametreler
+/// - `s`: Kontrol edilecek dizenin referansı.
+/// - `suffix`: Son ek olarak aranacak dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dize son ekle bitiyorsa `true`, değilse `false`.
+pub fn ends_with(s: &string, suffix: &string) -> bool {
+    _cnt_string_ends_with(s, suffix)
+}
+
+/// Bir dizenin belirli bir alt dize içerip içermediğini kontrol eder.
+///
+/// # Parametreler
+/// - `s`: Kontrol edilecek dizenin referansı.
+/// - `sub`: İçerip içermediği kontrol edilecek alt dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Dize alt dizeyi içeriyorsa `true`, değilse `false`.
+pub fn contains(s: &string, sub: &string) -> bool {
+    _cnt_string_contains(s, sub)
+}
+
+/// Bir dizenin belirtilen başlangıç ve bitiş indeksleri arasındaki alt dizesini döndürür.
+/// Yeni bir dize oluşturur ve sahipliğini çağrı yapan tarafa aktarır.
+///
+/// # Parametreler
+/// - `s`: Alt dizesi alınacak dizenin referansı.
+/// - `start`: Alt dizenin başlangıç indeksi (dahil).
+/// - `end`: Alt dizenin bitiş indeksi (hariç).
+///
+/// # Dönüş Değeri
+/// Yeni oluşturulmuş alt dize.
+pub fn substring(s: &string, start: int, end: int) -> string {
+    // Hata kontrolü burada yapılabilir: start < 0, end > length, start > end
+    // Geçersiz indeksler için boş string veya hata (Result) döndürülebilir.
+    _cnt_string_substring(s, start, end)
+}
+
+/// Bir dizenin tüm karakterlerini küçük harfe dönüştürerek yeni bir dize döndürür.
+///
+/// # Parametreler
+/// - `s`: Dönüştürülecek dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Yeni oluşturulmuş küçük harfli dize.
+pub fn to_lower(s: &string) -> string {
+    _cnt_string_to_lower(s)
+}
+
+/// Bir dizenin tüm karakterlerini büyük harfe dönüştürerek yeni bir dize döndürür.
+///
+/// # Parametreler
+/// - `s`: Dönüştürülecek dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Yeni oluşturulmuş büyük harfli dize.
+pub fn to_upper(s: &string) -> string {
+    _cnt_string_to_upper(s)
+}
+
+/// Bir dizenin başındaki ve sonundaki boşlukları (veya belirli karakterleri) kırparak yeni bir dize döndürür.
+///
+/// # Parametreler
+/// - `s`: Kırpılacak dizenin referansı.
+///
+/// # Dönüş Değeri
+/// Yeni oluşturulmuş kırpılmış dize.
+pub fn trim(s: &string) -> string {
+    _cnt_string_trim(s)
+}
+
+// Temel tiplerin string'e dönüştürülmesi için küresel (veya ilgili tipe ait) fonksiyonlar
+// Bu fonksiyonlar, `int.toString()` gibi metot çağrılarını mümkün kılar.
+// Eğer CNT'de metot benzeri bir yapı yoksa, bu fonksiyonlar doğrudan `string::from_int(my_int)` gibi çağrılabilir.
+// Mevcut dokümanda `value.toString()` kullanımı olduğu için, derleyicinin bunu yerleşik olarak
+// veya bu `extern` fonksiyonlara bağlayarak hallettiği varsayılır.
+
+/// Bir tam sayıyı string'e dönüştürür.
+///
+/// # Parametreler
+/// - `value`: Dönüştürülecek tam sayı.
+///
+/// # Dönüş Değeri
+/// Sayının string temsili.
+pub fn from_int(value: int) -> string {
+    _cnt_int_to_string(value)
+}
+
+/// Bir ondalık sayıyı string'e dönüştürür.
+///
+/// # Parametreler
+/// - `value`: Dönüştürülecek ondalık sayı.
+///
+/// # Dönüş Değeri
+/// Sayının string temsili.
+pub fn from_float(value: float) -> string {
+    _cnt_float_to_string(value)
+}
+
+/// Bir boolean değeri string'e dönüştürür ("true" veya "false").
+///
+/// # Parametreler
+/// - `value`: Dönüştürülecek boolean değer.
+///
+/// # Dönüş Değeri
+/// Boolean değerin string temsili.
+pub fn from_bool(value: bool) -> string {
+    _cnt_bool_to_string(value)
+}
+
+// Gelecekte eklenebilecek fonksiyonlar:
+// - split(s: &string, delimiter: &string) -> List<string> (List modülü gerektirir)
+// - replace(s: &string, old: &string, new: &string) -> string
+// - concat(s1: &string, s2: &string) -> string (Normalde '+' operatörü ile yapılabilir)
