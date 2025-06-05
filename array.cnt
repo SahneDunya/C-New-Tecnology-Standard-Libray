@@ -1,0 +1,278 @@
+// array.cnt
+// Standart Sabit Boyutlu Dizi (Array) Modülü
+// Derleme zamanında boyutu sabit olan, yığıt tabanlı diziler.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Array işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Dizi sınırı dışına erişim hatası.
+    IndexOutOfBounds(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Array<T, N>` Struct'ı: T tipinden N adet elemanı derleme zamanında belirlenmiş, sabit boyutlu dizi.
+///
+/// Not: CNT'nin tip sistemi eğer sabit boyutlu generic'leri destekliyorsa (örneğin Rust'taki [T; N] gibi),
+/// o zaman `data` alanı doğrudan bir dizi türü olarak tanımlanabilir.
+/// Aksi takdirde, `raw_ptr` ve manuel indeksleme kullanılır.
+/// Bu taslak, `raw_ptr` yaklaşımını kullanarak daha genel bir senaryo sunar.
+///
+/// # Tip Parametreleri
+/// - `T`: Dizide saklanacak elemanların tipi.
+/// - `N`: Dizinin boyutu (derleme zamanında bilinen bir sabit olmalı).
+pub struct Array<T, N: int> {
+    /// Dizinin elemanlarını tutan bellek bloğuna işaretçi.
+    /// Sabit boyutlu dizi olduğu için, bu bellek ya yığıtta ya da statik alanda olmalıdır.
+    /// `raw_ptr` sadece bir işaretçi olup, belleğin kendisinin yönetimi compiler'a bırakılır.
+    /// Gerçek bir CNT implementasyonunda, bu `[T; N]` gibi doğrudan bir dizi tipi olabilir.
+    data: raw_ptr<T>;
+    /// Dizinin boyutu. (Sadece bilgi amaçlı, N zaten sabittir).
+    len: int;
+}
+
+// --- 1. Array Oluşturma ve Yönetme ---
+
+/// Yeni, boş (varsayılan değerlerle dolu) bir `Array` oluşturur.
+///
+/// Not: `Array`'ler genellikle `[varsayılan_değer; N]` gibi derleyici intrinsics'leri veya
+/// doğrudan yığıt tahsisi ile oluşturulur. Bu fonksiyon, bir constructor benzeri görevi görür.
+///
+/// # Parametreler
+/// - `default_value`: Dizinin başlangıçta doldurulacağı varsayılan değer.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `Array<T, N>` nesnesi.
+pub fn new<T, N: int>(default_value: T) -> Array<T, N> {
+    // CNT'nin derleyici düzeyinde sabit boyutlu dizi tahsisini burada yapması beklenir.
+    // Örneğin, `let arr: [T; N];` syntax'ı.
+    // Bu, CNT'nin `raw_ptr`'nin işaret ettiği belleği nasıl yöneteceğine bağlıdır.
+    // Varsayalım ki, `alloc::stack_allocate` veya benzeri bir yığıt tahsis fonksiyonu var.
+    // Ancak `std::array` genellikle doğrudan yığıt üzerinde veya statik bellekte `[T; N]` olarak tanımlanır.
+
+    // Basitlik adına, burada `data` işaretçisinin zaten uygun bir belleği gösterdiğini
+    // ve bunun compiler tarafından sağlandığını varsayıyoruz.
+    // Örneğin, `let mut arr: Array<T, N>;` çağrıldığında, `arr.data` için yer ayrılır.
+
+    let mut temp_data_ptr: raw_ptr<T>;
+    // Gerçek bir senaryoda bu `raw_ptr`'nin arkasındaki bellek derleme zamanında tahsis edilir.
+    // Örneğin: `let internal_array: [T; N];` ve `temp_data_ptr = &internal_array[0];` gibi.
+    // Bu taslakta, CNT'nin bu mekanizmayı otomatik olarak sağladığını varsayıyoruz.
+    // (Bellek tahsisi doğrudan dilin kendisi tarafından yapılır, `alloc` modülü ile değil).
+    // Yığıt tahsisi için doğrudan bir API olmayabilir, bu genellikle dilin bir özelliğidir.
+
+    // placeholder for actual memory allocation by compiler for fixed-size array
+    // Since N is a compile-time constant, this allocation should happen automatically
+    // when an Array<T, N> instance is declared.
+    // We can't actually allocate a [T; N] directly and return its pointer in a generic way here,
+    // without language support for "value-typed" arrays that can be moved.
+
+    // Bu yüzden, bu `new` fonksiyonunun genellikle doğrudan kullanıcı tarafından çağrılmadığı,
+    // bunun yerine `Array<T, N> my_array;` gibi bir sentaks ile compiler'ın otomatik olarak
+    // belleği tahsis edip, bu struct'ı initialize ettiği bir senaryo daha uygun olabilir.
+
+    // Ancak bir init fonksiyonu gerekiyorsa:
+    let dummy_ptr = null_ptr::<T>(); // Geçici bir işaretçi.
+    let mut array_instance = Array {
+        data: dummy_ptr, // Bu kısım gerçekte compiler tarafından doldurulmalı.
+        len: N,
+    };
+
+    // Belleği varsayılan değerle doldur
+    // Bu, `raw_ptr`'nin arkasındaki belleğin erişilebilir ve N boyutunda olduğundan emin olmalıyız.
+    // Bu yine compiler tarafından sağlanan bir garanti olmalıdır.
+    // let data_ptr = array_instance.data; // Bu ptr henüz geçerli bir bellek göstermiyor olabilir!
+    // Bu nedenle, bir array oluşturma şekli daha çok C++'taki `std::array` gibidir:
+    // `std::array<int, 5> my_array;` veya `std::array<int, 5> my_array = {1, 2, 3, 4, 5};`
+
+    // Eğer `new` fonksiyonu gerekli ise ve belleği dolduruyorsa, compiler'ın `N` boyutunda bir `T` dizisi
+    // için yığıtta yer ayırması ve bu `raw_ptr`'yi o alana işaret etmesi gerekiyor.
+    // Varsayalım ki böyle bir "yığıt tahsisi ve işaretçi döndürme" mekanizması var.
+    // Örneğin, `alloc::stack_array_alloc<T, N>()` gibi.
+    // Bu taslakta, bu fonksiyonun doğru şekilde bir `Array` döndürdüğünü varsayacağız,
+    // ancak gerçek bellek yönetimi CNT runtime/compiler'ının sorumluluğundadır.
+
+    // Bu simülasyonda, bu fonksiyonun bir `Array` struct'ını döndürdüğünü ve `data` alanının
+    // doğru şekilde initialize edilmiş, `N` boyutunda bir bellek bloğunu işaret ettiğini varsayalım.
+    // Sentinel değer olarak `default_value` ile doldurmak için:
+    // (Bu kısım ancak `data` geçerli bir bellek bloğuna işaret ediyorsa çalışır)
+    // for i in 0..N {
+    //    raw_ptr_write(array_instance.data, i, default_value);
+    // }
+
+    // Bu, `std::array` için `new` fonksiyonu yerine bir `init_from_value` veya `fill` fonksiyonu
+    // ve struct'ın doğrudan kullanımı daha mantıklı olabilir.
+    Array {
+        data: dummy_ptr, // Compiler'ın doldurmasını bekleriz
+        len: N,
+    }
+}
+
+/// Mevcut bir `Array`'i verilen bir değerle doldurur (initialize eder).
+///
+/// # Parametreler
+/// - `arr`: Doldurulacak `Array<T, N>`'nin mutable referansı.
+/// - `value`: Dizinin doldurulacağı değer.
+pub fn fill<T, N: int>(arr: &mut Array<T, N>, value: T) -> void {
+    // Bu fonksiyonun doğru çalışması için `arr.data`'nın geçerli bir bellek alanına işaret etmesi gerekir.
+    assert!(arr.data != null_ptr(), "Array data pointer is null. Array not properly initialized by compiler.");
+    for i in 0..N {
+        raw_ptr_write(arr.data, i, value);
+    }
+}
+
+/// Bir `Array`'in bellek kaynaklarını serbest bırakır.
+///
+/// `std::array` yığıt tabanlı olduğu için, genellikle manuel bir `drop` fonksiyonu gerektirmez.
+/// Kapsam dışına çıktığında otomatik olarak temizlenir.
+/// Ancak, eğer `T` tipi kaynakları yönetiyorsa (örneğin dosya tanıtıcıları),
+/// `T`'nin destructor'ının çağrılması gerekir.
+pub fn drop<T, N: int>(arr: &mut Array<T, N>) -> void {
+    // Eğer `T` tipinin bir destructor'ı varsa, her eleman için çağrılmalıdır.
+    // for i in 0..N {
+    //    // raw_ptr_read(arr.data, i).drop(); // Eğer T'nin drop metodu varsa
+    // }
+    // `Array`'nin kendisi için manuel bellek serbest bırakma genellikle yoktur.
+}
+
+
+// --- 2. Element Erişimi ---
+
+/// Dizinin belirli bir indeksindeki elemanı döndürür.
+/// Sınır kontrolü yapar ve eğer indeks geçerli değilse hata döndürür. O(1)
+///
+/// # Parametreler
+/// - `arr`: Elemanın alınacağı `Array<T, N>`'nin referansı.
+/// - `index`: Erişilecek elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result<&T, Error>` elemanın referansı, `Result::Err(Error::IndexOutOfBounds)` indeks geçersizse.
+pub fn get<T, N: int>(arr: &Array<T, N>, index: int) -> Result<&T, Error> {
+    if index < 0 || index >= N {
+        return Result::Err(Error::IndexOutOfBounds(
+            "Index ".to_string() + index.to_string() + " out of bounds for array of size ".to_string() + N.to_string()
+        ));
+    }
+    // raw_ptr_offset, bir işaretçiden offsetlenmiş bir referans döndürür.
+    Result::Ok(raw_ptr_offset(arr.data, index))
+}
+
+/// Dizinin belirli bir indeksindeki elemanı döndürür (mutable).
+/// Sınır kontrolü yapar ve eğer indeks geçerli değilse hata döndürür. O(1)
+///
+/// # Parametreler
+/// - `arr`: Elemanın alınacağı `Array<T, N>`'nin mutable referansı.
+/// - `index`: Erişilecek elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result<&mut T, Error>` elemanın mutable referansı, `Result::Err(Error::IndexOutOfBounds)` indeks geçersizse.
+pub fn get_mut<T, N: int>(arr: &mut Array<T, N>, index: int) -> Result<&mut T, Error> {
+    if index < 0 || index >= N {
+        return Result::Err(Error::IndexOutOfBounds(
+            "Index ".to_string() + index.to_string() + " out of bounds for array of size ".to_string() + N.to_string()
+        ));
+    }
+    // raw_ptr_offset_mut, bir işaretçiden offsetlenmiş mutable bir referans döndürür.
+    Result::Ok(raw_ptr_offset_mut(arr.data, index))
+}
+
+/// Dizinin belirli bir indeksindeki elemana doğrudan erişir (sınır kontrolü olmadan).
+/// Güvenli olmayan bir fonksiyondur, dikkatli kullanılmalıdır. O(1)
+///
+/// # Parametreler
+/// - `arr`: Elemanın alınacağı `Array<T, N>`'nin referansı.
+/// - `index`: Erişilecek elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `&T` elemanın referansı.
+pub fn unchecked_get<T, N: int>(arr: &Array<T, N>, index: int) -> &T {
+    raw_ptr_offset(arr.data, index)
+}
+
+/// Dizinin belirli bir indeksindeki elemana doğrudan erişir (mutable, sınır kontrolü olmadan).
+/// Güvenli olmayan bir fonksiyondur, dikkatli kullanılmalıdır. O(1)
+///
+/// # Parametreler
+/// - `arr`: Elemanın alınacağı `Array<T, N>`'nin mutable referansı.
+/// - `index`: Erişilecek elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `&mut T` elemanın mutable referansı.
+pub fn unchecked_get_mut<T, N: int>(arr: &mut Array<T, N>, index: int) -> &mut T {
+    raw_ptr_offset_mut(arr.data, index)
+}
+
+
+// --- 3. Bilgi ve Durum Sorgulama ---
+
+/// Dizinin boyutunu döndürür. O(1)
+pub fn len<T, N: int>(arr: &Array<T, N>) -> int {
+    arr.len
+}
+
+/// Dizinin boş olup olmadığını kontrol eder. O(1)
+pub fn is_empty<T, N: int>(arr: &Array<T, N>) -> bool {
+    arr.len == 0
+}
+
+// --- 4. Diğer Yardımcı Fonksiyonlar ---
+
+/// Dizinin ilk elemanına bir referans döndürür.
+/// Dizi boşsa hata döndürür. O(1)
+pub fn first<T, N: int>(arr: &Array<T, N>) -> Result<&T, Error> {
+    if arr.len == 0 {
+        return Result::Err(Error::Other("Array is empty, cannot get first element".to_string()));
+    }
+    Result::Ok(raw_ptr_offset(arr.data, 0))
+}
+
+/// Dizinin ilk elemanına mutable bir referans döndürür.
+/// Dizi boşsa hata döndürür. O(1)
+pub fn first_mut<T, N: int>(arr: &mut Array<T, N>) -> Result<&mut T, Error> {
+    if arr.len == 0 {
+        return Result::Err(Error::Other("Array is empty, cannot get first element".to_string()));
+    }
+    Result::Ok(raw_ptr_offset_mut(arr.data, 0))
+}
+
+/// Dizinin son elemanına bir referans döndürür.
+/// Dizi boşsa hata döndürür. O(1)
+pub fn last<T, N: int>(arr: &Array<T, N>) -> Result<&T, Error> {
+    if arr.len == 0 {
+        return Result::Err(Error::Other("Array is empty, cannot get last element".to_string()));
+    }
+    Result::Ok(raw_ptr_offset(arr.data, N - 1))
+}
+
+/// Dizinin son elemanına mutable bir referans döndürür.
+/// Dizi boşsa hata döndürür. O(1)
+pub fn last_mut<T, N: int>(arr: &mut Array<T, N>) -> Result<&mut T, Error> {
+    if arr.len == 0 {
+        return Result::Err(Error::Other("Array is empty, cannot get last element".to_string()));
+    }
+    Result::Ok(raw_ptr_offset_mut(arr.data, N - 1))
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// Iterator implementasyonu, elemanlar üzerinde sıralı bir şekilde gezinmeyi sağlar.
+ pub fn iter<T, N: int>(arr: &Array<T, N>) -> Iterator<T> { ... }
+ pub fn iter_mut<T, N: int>(arr: &mut Array<T, N>) -> MutableIterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
