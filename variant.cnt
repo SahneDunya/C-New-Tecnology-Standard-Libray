@@ -1,0 +1,245 @@
+// variant.cnt
+// Standart Variant Modülü
+// Bir dizi olası tipten herhangi birini (aynı anda yalnızca birini) tip-güvenli bir şekilde depolar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::optional;   // Dahili olarak veya yardımcı fonksiyonlarda kullanılabilir.
+import std::utility;    // std::utility::swap kullanabiliriz
+
+/// `Error` Enum'u: Variant işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Variant'ın yanlış tipte değeri etkinleştirildiğinde erişim hatası.
+    BadVariantAccess(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: Variant'ın implementasyonu genellikle bir union (bellek paylaşımı için) ve
+// aktif tipi gösteren bir discriminator (etiket/tag) alanından oluşur.
+// CNT'nin dil düzeyinde etiketli union veya enum desteği varsa, bu çok daha doğal olacaktır.
+// Aksi takdirde, manuel olarak bir union ve bir enum bayrağı yönetilmelidir.
+
+// Bu taslak, CNT'nin Rust tarzı "enum" veya C++ tarzı "tagged union" yeteneklerine sahip olduğunu varsayacaktır.
+// Basitlik adına, burada iki veya üç elemanlı bir `Variant` için örnek göstereceğiz.
+// Tam bir `std::variant`, variadic generics ve derleyici intrinsics'leri gerektirir.
+
+/// `Variant<T1, T2>`: İki olası tipten birini tutabilen bir varyant.
+///
+/// # Tip Parametreleri
+/// - `T1`: İlk olası tip.
+/// - `T2`: İkinci olası tip.
+///
+/// **NOT**: CNT'nin etiketli union (tagged union) veya gelişmiş enum sözdizimini kullanır.
+/// Eğer bu yoksa, manuel olarak bir `union` ve `enum Tag` alanı tanımlanmalıdır.
+pub enum Variant2<T1, T2> {
+    Value0(T1);
+    Value1(T2);
+}
+
+/// `Variant3<T1, T2, T3>`: Üç olası tipten birini tutabilen bir varyant.
+pub enum Variant3<T1, T2, T3> {
+    Value0(T1);
+    Value1(T2);
+    Value2(T3);
+}
+
+// GELECEK: `Variant<Args...>` şeklinde variadic generics ile genelleştirme.
+// Bunun için CNT'nin `Args...` gibi bir variadic type parameter ve etiketli union/enum desteği olması gerekir.
+
+pub enum Variant<Args...> {
+    // Dahili olarak derleyici tarafından yönetilir.
+    // Örneğin, rust'taki enum'lar gibi:
+    // Var0(T0), Var1(T1), ...
+}
+
+
+// --- 1. Variant Nesnesi Oluşturma ---
+
+/// `make_variant_0<T1, T2>(val: T1)`: Birinci tipi aktif olarak tutan bir `Variant2` oluşturur.
+pub fn make_variant_0<T1, T2>(val: T1) -> Variant2<T1, T2> {
+    Variant2::Value0(val)
+}
+
+/// `make_variant_1<T1, T2>(val: T2)`: İkinci tipi aktif olarak tutan bir `Variant2` oluşturur.
+pub fn make_variant_1<T1, T2>(val: T2) -> Variant2<T1, T2> {
+    Variant2::Value1(val)
+}
+
+// --- 2. Variant İçeriğini Sorgulama ---
+
+/// `holds_alternative<Index, VariantType>(var)`: Variant'ın belirli bir indeksteki tipi aktif olarak tuttuğunu kontrol eder.
+///
+/// # Parametreler
+/// - `var`: Kontrol edilecek Variant nesnesi.
+///
+/// # Tip Parametreleri
+/// - `Index`: Kontrol edilecek tipin derleme zamanı indeksi.
+/// - `V`: Variant tipi.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer belirtilen tip aktifse, `false` değilse.
+///
+/// **NOT**: Bu fonksiyon, CNT'nin derleyici düzeyinde `Index`'e göre tip kontrolü yapabildiğini varsayar.
+/// `match` ifadesi veya bir `is_` metodu ile daha doğal bir şekilde ele alınabilir.
+pub fn holds_alternative_0<T1, T2>(var: &Variant2<T1, T2>) -> bool {
+    match var {
+        Variant2::Value0(_) => true,
+        _ => false,
+    }
+}
+
+pub fn holds_alternative_1<T1, T2>(var: &Variant2<T1, T2>) -> bool {
+    match var {
+        Variant2::Value1(_) => true,
+        _ => false,
+    }
+}
+
+/// `index<VariantType>(var)`: Variant'ın aktif olarak tuttuğu tipin indeksini döndürür.
+///
+/// # Parametreler
+/// - `var`: İndeksi alınacak Variant nesnesi.
+///
+/// # Tip Parametreleri
+/// - `V`: Variant tipi.
+///
+/// # Dönüş Değeri
+/// `int`: Aktif tipin sıfır tabanlı indeksi.
+pub fn index<T1, T2>(var: &Variant2<T1, T2>) -> int {
+    match var {
+        Variant2::Value0(_) => 0,
+        Variant2::Value1(_) => 1,
+    }
+}
+
+// --- 3. Variant İçeriğine Erişim ---
+
+/// `get<Index, VariantType>(var)`: Variant'ın içindeki değeri belirli bir indeksteki tip olarak döndürür.
+/// Eğer aktif tip beklenen tip değilse, `BadVariantAccess` hatası verir.
+///
+/// # Parametreler
+/// - `var`: Değerine erişilecek Variant nesnesi.
+///
+/// # Tip Parametreleri
+/// - `Index`: Erişilmek istenen tipin derleme zamanı indeksi.
+/// - `V`: Variant tipi.
+///
+/// # Dönüş Değeri
+/// `Result<&Type, Error>`: Değerin referansı (`Ok(&value)`) veya hata.
+///
+/// **NOT**: Bu, derleyici tarafından sağlanan bir intrinsics veya `match` ifadeleriyle doğrudan ele alınabilir.
+/// Kısmi uygulama örneği:
+pub fn get_0<T1, T2>(var: &Variant2<T1, T2>) -> Result<&T1, Error> {
+    match var {
+        Variant2::Value0(val) => Result::Ok(val),
+        _ => Result::Err(Error::BadVariantAccess("Attempted to get wrong variant type at index 0".to_string())),
+    }
+}
+
+pub fn get_1<T1, T2>(var: &Variant2<T1, T2>) -> Result<&T2, Error> {
+    match var {
+        Variant2::Value1(val) => Result::Ok(val),
+        _ => Result::Err(Error::BadVariantAccess("Attempted to get wrong variant type at index 1".to_string())),
+    }
+}
+
+// Optional olarak `get_if` fonksiyonu: Eğer doğru tip değilse null_ptr döndürür.
+/// `get_if<Index, VariantType>(var)`: Variant'ın içindeki değeri belirli bir indeksteki tip olarak döndürür.
+/// Eğer aktif tip beklenen tip değilse, boş bir `Optional` döndürür.
+///
+/// # Parametreler
+/// - `var`: Değerine erişilecek Variant nesnesi.
+///
+/// # Tip Parametreleri
+/// - `Index`: Erişilmek istenen tipin derleme zamanı indeksi.
+/// - `V`: Variant tipi.
+/// - `T`: Beklenen değer tipi.
+///
+/// # Dönüş Değeri
+/// `Optional<&T>`: Değerin referansını içeren bir `Optional` veya boş bir `Optional`.
+pub fn get_if_0<T1, T2>(var: &Variant2<T1, T2>) -> optional::Optional<&T1> {
+    match var {
+        Variant2::Value0(val) => optional::some(val),
+        _ => optional::none(),
+    }
+}
+
+pub fn get_if_1<T1, T2>(var: &Variant2<T1, T2>) -> optional::Optional<&T2> {
+    match var {
+        Variant2::Value1(val) => optional::some(val),
+        _ => optional::none(),
+    }
+}
+
+// --- 4. Ziyaretçi Desenini Uygulama (`visit` - Gelişmiş) ---
+
+// `visit` fonksiyonu, variant'ın aktif olarak tuttuğu türe göre farklı bir işlemi dinamik olarak dispatch etmek için kullanılır.
+// Bu, fonksiyonel programlamada "pattern matching" veya "sum type" işlemleri için kritik bir araçtır.
+// Genellikle derleyici düzeyinde bir "match" ifadesi veya recursive generic/metaprogramlama gerektirir.
+
+/// `visit<Visitor, VariantType>(visitor, var)`: Variant'ın aktif olan elemanını ziyaretçi (visitor) fonksiyonuna geçirir.
+///
+/// # Parametreler
+/// - `visitor`: Her olası tip için aşırı yüklenmiş bir `operator()` (veya ayrı fonksiyonlar) içeren bir nesne/closure.
+/// - `var`: Ziyaret edilecek Variant nesnesi.
+///
+/// # Tip Parametreleri
+/// - `V`: Variant tipi.
+/// - `Visitor`: Ziyaretçi tipi.
+///
+/// # Dönüş Değeri
+/// `R`: Ziyaretçi fonksiyonunun döndürdüğü sonuç tipi.
+///
+/// **NOT**: Bu, CNT'nin closure/lambda, pattern matching ve/veya çoklu dispatch yeteneklerine derinden bağlıdır.
+
+pub fn visit<R, V, Visitor>(visitor: &Visitor, var: &V) -> R
+where V: VariantTrait, Visitor: OverloadedCallable<R> { // `OverloadedCallable` bir trait varsayılmıştır.
+    match var {
+        V::Value0(val) => visitor.call(val),
+        V::Value1(val) => visitor.call(val),
+        // ... diğer değerler
+    }
+}
+
+
+// --- 5. Helper Türler ve Fonksiyonlar ---
+
+/// `variant_size<T>`: Bir variant tipindeki olası tip sayısını derleme zamanında verir.
+///
+/// # Tip Parametreleri
+/// - `T`: Variant tipi.
+///
+/// # Dönüş Değeri
+/// `int`: Variant'taki olası tip sayısı.
+pub fn variant_size<T1, T2>() -> int {
+    2 // `Variant2` için
+}
+pub fn variant_size_3<T1, T2, T3>() -> int {
+    3 // `Variant3` için
+}
+// Genelleştirilmiş `variant_size<V>()` için derleyici intrinsics'i gerekebilir.
+
+
+/// `variant_alternative_t<Index, T>`: Bir variant tipindeki belirli bir indeksteki alternatif tipini verir.
+///
+/// # Tip Parametreleri
+/// - `Index`: Alternatif indeks (derleme zamanı sabiti).
+/// - `T`: Variant tipi.
+///
+/// # Dönüş Değeri
+/// `Type`: Belirtilen indeksteki alternatifin tipi.
+pub type variant_alternative_t_0<T1, T2> = T1;
+pub type variant_alternative_t_1<T1, T2> = T2;
+// Genelleştirilmiş `variant_alternative_t<Index, V>` için derleyici intrinsics'i gerekebilir.
+
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// CNT'nin enum/tagged union yapısını ve pattern matching'i doğrudan desteklediği varsayılmıştır.
+// Eğer desteklemiyorsa, `union` ve manuel `tag` yönetimi gerekecektir.
