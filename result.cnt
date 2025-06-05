@@ -1,0 +1,387 @@
+// result.cnt
+// Standart Result Modülü
+// Güvenli ve açık hata yönetimi için Result enum'ı.
+
+import std::string;     // Hata mesajları için
+import std::option;     // `Ok` değeri yoksa (void dönüşler için) veya bazı map işlemleri için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Result<T, E>` Enum'ı: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+///
+/// # Şablon Parametreleri
+/// - `T`: Başarılı durumda döndürülecek değerin tipi.
+/// - `E`: Hata durumunda döndürülecek değerin (hata nesnesinin) tipi.
+pub enum Result<T, E> {
+    /// İşlem başarılı oldu ve `T` tipinde bir değer içeriyor.
+    Ok(T);
+    /// İşlem başarısız oldu ve `E` tipinde bir hata değeri içeriyor.
+    Err(E);
+}
+
+// --- 1. Result Üzerindeki Metotlar ---
+
+impl<T, E> Result<T, E> {
+    /// `is_ok()`: Sonucun `Ok` olup olmadığını kontrol eder.
+    ///
+    /// # Dönüş Değeri
+    /// `bool`: Sonuç `Ok` ise `true`, aksi halde `false`.
+    pub fn is_ok(&self) -> bool {
+        match self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    /// `is_err()`: Sonucun `Err` olup olmadığını kontrol eder.
+    ///
+    /// # Dönüş Değeri
+    /// `bool`: Sonuç `Err` ise `true`, aksi halde `false`.
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    /// `ok()`: Sonuç `Ok(T)` ise `Option::Some(T)` döndürür, aksi halde `Option::None` döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Option<T>`: `Ok` değeri veya `None`.
+    pub fn ok(&self) -> std::option::Option<T> {
+        match self {
+            Result::Ok(val) => std::option::Option::Some(val.clone()), // Klonlama gerekli olabilir
+            Result::Err(_) => std::option::Option::None,
+        }
+    }
+
+    /// `err()`: Sonuç `Err(E)` ise `Option::Some(E)` döndürür, aksi halde `Option::None` döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Option<E>`: `Err` değeri veya `None`.
+    pub fn err(&self) -> std::option::Option<E> {
+        match self {
+            Result::Ok(_) => std::option::Option::None,
+            Result::Err(err) => std::option::Option::Some(err.clone()), // Klonlama gerekli olabilir
+        }
+    }
+
+    /// `unwrap()`: Sonuç `Ok(T)` ise `T` değerini döndürür.
+    /// Eğer sonuç `Err(E)` ise, programı panikletir (crash eder) ve hata mesajını gösterir.
+    /// Hızlı prototipleme veya hata olmaması beklenen durumlarda kullanılır.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Ok` değeri.
+    ///
+    /// # Panik
+    /// Sonuç `Err` ise panikletir.
+    pub fn unwrap(&self) -> T {
+        match self {
+            Result::Ok(val) => val.clone(), // Klonlama gerekli olabilir
+            Result::Err(err) => {
+                // CNT'nin panic/assertion mekanizması
+                std::assert::panic("called `Result::unwrap()` on an `Err` value: ".to_string() + err.to_string());
+            }
+        }
+    }
+
+    /// `expect()`: `unwrap()` ile aynıdır ancak panik mesajını özelleştirmenize olanak tanır.
+    ///
+    /// # Parametreler
+    /// - `msg`: `Err` durumunda panikleyecek özel mesaj.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Ok` değeri.
+    ///
+    /// # Panik
+    /// Sonuç `Err` ise belirtilen mesajla panikletir.
+    pub fn expect(&self, msg: string) -> T {
+        match self {
+            Result::Ok(val) => val.clone(), // Klonlama gerekli olabilir
+            Result::Err(err) => {
+                std::assert::panic(msg + ": ".to_string() + err.to_string());
+            }
+        }
+    }
+
+    /// `unwrap_err()`: Sonuç `Err(E)` ise `E` değerini döndürür.
+    /// Eğer sonuç `Ok(T)` ise, programı panikletir.
+    ///
+    /// # Dönüş Değeri
+    /// `E`: `Err` değeri.
+    ///
+    /// # Panik
+    /// Sonuç `Ok` ise panikletir.
+    pub fn unwrap_err(&self) -> E {
+        match self {
+            Result::Ok(val) => {
+                std::assert::panic("called `Result::unwrap_err()` on an `Ok` value: ".to_string() + val.to_string());
+            }
+            Result::Err(err) => err.clone(), // Klonlama gerekli olabilir
+        }
+    }
+
+    /// `expect_err()`: `unwrap_err()` ile aynıdır ancak panik mesajını özelleştirmenize olanak tanır.
+    ///
+    /// # Parametreler
+    /// - `msg`: `Ok` durumunda panikleyecek özel mesaj.
+    ///
+    /// # Dönüş Değeri
+    /// `E`: `Err` değeri.
+    ///
+    /// # Panik
+    /// Sonuç `Ok` ise belirtilen mesajla panikletir.
+    pub fn expect_err(&self, msg: string) -> E {
+        match self {
+            Result::Ok(val) => {
+                std::assert::panic(msg + ": ".to_string() + val.to_string());
+            }
+            Result::Err(err) => err.clone(), // Klonlama gerekli olabilir
+        }
+    }
+
+    /// `map()`: Eğer sonuç `Ok(T)` ise, verilen closure'ı `T` değerine uygular ve `Ok(U)` döndürür.
+    /// Eğer sonuç `Err(E)` ise, `Err(E)`'yi olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `T` tipinden `U` tipine dönüşen bir closure (`Fn(T) -> U`).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<U, E>`: Dönüştürülmüş `Ok` değeri veya orijinal `Err`.
+    pub fn map<U, F: FnOnce(T) -> U>(&self, f: F) -> Result<U, E> {
+        match self {
+            Result::Ok(val) => Result::Ok(f(val.clone())),
+            Result::Err(err) => Result::Err(err.clone()),
+        }
+    }
+
+    /// `map_err()`: Eğer sonuç `Err(E)` ise, verilen closure'ı `E` değerine uygular ve `Err(F)` döndürür.
+    /// Eğer sonuç `Ok(T)` ise, `Ok(T)`'yi olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `E` tipinden `F` tipine dönüşen bir closure (`Fn(E) -> F`).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<T, F>`: Orijinal `Ok` değeri veya dönüştürülmüş `Err`.
+    pub fn map_err<F_new, G: FnOnce(E) -> F_new>(&self, g: G) -> Result<T, F_new> {
+        match self {
+            Result::Ok(val) => Result::Ok(val.clone()),
+            Result::Err(err) => Result::Err(g(err.clone())),
+        }
+    }
+
+    /// `and_then()`: Monadik bağlama. Eğer sonuç `Ok(T)` ise, verilen closure'ı `T` değerine uygular
+    /// ve yeni bir `Result<U, E>` döndürür. Bu, bir `Result` içinde başka bir `Result` döndürmek için kullanışlıdır.
+    /// Eğer sonuç `Err(E)` ise, `Err(E)`'yi olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `T` tipinden `Result<U, E>` tipine dönüşen bir closure (`Fn(T) -> Result<U, E>`).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<U, E>`: Closure'dan dönen `Result` veya orijinal `Err`.
+    pub fn and_then<U, F_closure: FnOnce(T) -> Result<U, E>>(&self, f: F_closure) -> Result<U, E> {
+        match self {
+            Result::Ok(val) => f(val.clone()),
+            Result::Err(err) => Result::Err(err.clone()),
+        }
+    }
+
+    /// `or_else()`: Eğer sonuç `Err(E)` ise, verilen closure'ı `E` değerine uygular
+    /// ve yeni bir `Result<T, F>` döndürür. Bu, hata durumunda kurtarma (recovery) yapmak için kullanışlıdır.
+    /// Eğer sonuç `Ok(T)` ise, `Ok(T)`'yi olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `E` tipinden `Result<T, F>` tipine dönüşen bir closure (`Fn(E) -> Result<T, F>`).
+    ///
+    /// # Dönüş Değeri
+    /// `Result<T, F>`: Orijinal `Ok` değeri veya closure'dan dönen `Result`.
+    pub fn or_else<F_new, F_closure: FnOnce(E) -> Result<T, F_new>>(&self, f: F_closure) -> Result<T, F_new> {
+        match self {
+            Result::Ok(val) => Result::Ok(val.clone()),
+            Result::Err(err) => f(err.clone()),
+        }
+    }
+
+    /// `unwrap_or()`: Eğer sonuç `Ok(T)` ise `T` değerini döndürür.
+    /// Eğer sonuç `Err(E)` ise, verilen varsayılan değeri döndürür.
+    ///
+    /// # Parametreler
+    /// - `default_value`: `Err` durumunda döndürülecek varsayılan `T` değeri.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Ok` değeri veya varsayılan değer.
+    pub fn unwrap_or(&self, default_value: T) -> T {
+        match self {
+            Result::Ok(val) => val.clone(),
+            Result::Err(_) => default_value,
+        }
+    }
+
+    /// `unwrap_or_else()`: Eğer sonuç `Ok(T)` ise `T` değerini döndürür.
+    /// Eğer sonuç `Err(E)` ise, verilen closure'ın sonucunu döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `E` tipinden `T` tipine dönüşen bir closure (`FnOnce(E) -> T`).
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Ok` değeri veya closure'dan dönen değer.
+    pub fn unwrap_or_else<F_closure: FnOnce(E) -> T>(&self, f: F_closure) -> T {
+        match self {
+            Result::Ok(val) => val.clone(),
+            Result::Err(err) => f(err.clone()),
+        }
+    }
+}
+
+// --- 2. Hata Yayılımı Yardımcı Fonksiyonu / Makro ---
+// Rust'taki `?` operatörüne benzer bir mekanizma.
+// CNT'nin sözdizimi varsayımıyla.
+
+// Bu, bir makro olarak daha iyi çalışır.
+// `try_or_return!(expr)` veya `propagate_error!(expr)`
+// `expr` `Result<T, E>` döndürüyorsa:
+//   - Eğer `Ok(val)` ise `val` döndürülür.
+//   - Eğer `Err(err)` ise, geçerli fonksiyonun `Err(err)` ile dönmesini sağlar.
+
+
+// Varsayımsal `try!` makro tanımı
+macro try(expr: Result<T, E>) -> T {
+    match expr {
+        Result::Ok(val) => val,
+        Result::Err(err) => return Result::Err(err),
+    }
+}
+
+
+// --- Örnek Kullanım ---
+// Örnek kullanım için basit hata tipleri tanımlayalım.
+pub enum MyError {
+    ParseError(string);
+    IoError(string);
+    NetworkError(string);
+}
+
+// Hata enum'ını string'e dönüştürmek için bir yardımcı fonksiyon (veya trait)
+impl MyError {
+    pub fn to_string(&self) -> string {
+        match self {
+            MyError::ParseError(msg) => "Parse Error: ".to_string() + msg,
+            MyError::IoError(msg) => "IO Error: ".to_string() + msg,
+            MyError::NetworkError(msg) => "Network Error: ".to_string() + msg,
+        }
+    }
+}
+
+
+// Bazı örnek fonksiyonlar
+fn divide(a: i64, b: i64) -> Result<i64, MyError> {
+    if b == 0 {
+        Result::Err(MyError::ParseError("Division by zero!".to_string()))
+    } else {
+        Result::Ok(a / b)
+    }
+}
+
+fn parse_string_to_int(s: string) -> Result<i64, MyError> {
+    // Gerçek bir parse işlemi burada olurdu. Basitlik için sadece kontrol edelim.
+    if s.is_empty() || s.len() > 10 { // Çok basit bir kontrol
+        Result::Err(MyError::ParseError("Invalid string format.".to_string()))
+    } else {
+        // Varsayımsal string to int dönüşümü
+        Result::Ok(s.parse_int().expect("Internal parse error"))
+    }
+}
+
+// `try!` makrosu varsayılarak zincirleme bir fonksiyon
+fn process_and_divide(text_num: string, divisor: i64) -> Result<i64, MyError> {
+    // try! makrosu: eğer parse_string_to_int Err dönerse, process_and_divide de Err döner.
+    let num = try!(parse_string_to_int(text_num)); // Varsayımsal `try!` kullanımı
+
+    // try! makrosu: eğer divide Err dönerse, process_and_divide de Err döner.
+    let result = try!(divide(num, divisor)); // Varsayımsal `try!` kullanımı
+    
+    Result::Ok(result)
+}
+
+
+
+fn main() {
+    println("Starting Result example...".to_string());
+
+    // Başarılı durumlar
+    let res1 = divide(10, 2);
+    if res1.is_ok() {
+        println("10 / 2 = ".to_string() + res1.unwrap().to_string()); // unwrap güvenli
+    } else {
+        println("Error: ".to_string() + res1.unwrap_err().to_string());
+    }
+    assert!(res1.is_ok(), "res1 should be Ok");
+
+    let res2 = divide(5, 0);
+    if res2.is_err() {
+        println("5 / 0 = ".to_string() + res2.unwrap_err().to_string());
+    } else {
+        println("Result: ".to_string() + res2.unwrap().to_string());
+    }
+    assert!(res2.is_err(), "res2 should be Err");
+
+    // `map` ve `map_err` kullanımı
+    let length_res = parse_string_to_int("123".to_string())
+                        .map(|val| val.to_string().len() as i64) // i64 -> i64 dönüştür
+                        .map_err(|e| MyError::Other("Failed to get length.".to_string() + e.to_string()));
+    println("Length of '123' as int: ".to_string() + length_res.unwrap().to_string());
+    assert!(length_res.is_ok(), "Length should be Ok");
+
+    let failed_parse_res = parse_string_to_int("".to_string())
+                              .map(|val| val * 2)
+                              .map_err(|e| MyError::IoError("Cannot process empty string.".to_string() + e.to_string()));
+    println("Failed parse result: ".to_string() + failed_parse_res.unwrap_err().to_string());
+    assert!(failed_parse_res.is_err(), "Failed parse should be Err");
+
+
+    // `and_then` kullanımı (zincirleme)
+    let chain_res1 = process_and_divide("100".to_string(), 10);
+    if chain_res1.is_ok() {
+        println("100 / 10 (chained) = ".to_string() + chain_res1.unwrap().to_string());
+    } else {
+        println("Chained error: ".to_string() + chain_res1.unwrap_err().to_string());
+    }
+    assert!(chain_res1.is_ok(), "Chained res1 should be Ok");
+
+    let chain_res2 = process_and_divide("abc".to_string(), 5); // parse hatası
+    if chain_res2.is_err() {
+        println("Chained error ('abc'): ".to_string() + chain_res2.unwrap_err().to_string());
+    } else {
+        println("Chained result ('abc'): ".to_string() + chain_res2.unwrap().to_string());
+    }
+    assert!(chain_res2.is_err(), "Chained res2 should be Err");
+
+    let chain_res3 = process_and_divide("20".to_string(), 0); // bölme hatası
+    if chain_res3.is_err() {
+        println("Chained error (div by 0): ".to_string() + chain_res3.unwrap_err().to_string());
+    } else {
+        println("Chained result (div by 0): ".to_string() + chain_res3.unwrap().to_string());
+    }
+    assert!(chain_res3.is_err(), "Chained res3 should be Err");
+
+
+    // `unwrap_or` ve `unwrap_or_else`
+    let val_or_default = divide(7, 2).unwrap_or(0); // 7/2 = 3
+    println("7 / 2 or 0 = ".to_string() + val_or_default.to_string());
+    assert!(val_or_default == 3, "Unwrap_or incorrect");
+
+    let val_or_default_err = divide(7, 0).unwrap_or(99); // Hata, 99 döner
+    println("7 / 0 or 99 = ".to_string() + val_or_default_err.to_string());
+    assert!(val_or_default_err == 99, "Unwrap_or_err incorrect");
+
+    let val_or_else = parse_string_to_int("invalid".to_string()).unwrap_or_else(|err| {
+        println("Recovering from error: ".to_string() + err.to_string());
+        -1 // Hata durumunda -1 döndür
+    });
+    println("Parse 'invalid' or else = ".to_string() + val_or_else.to_string());
+    assert!(val_or_else == -1, "Unwrap_or_else incorrect");
+
+
+    // `expect` ile panikleme örneği (yorum satırına alınmıştır, çünkü programı durdurur)
+    // println("Trying to unwrap a failing result with expect (will panic)...".to_string());
+    // let dangerous_result = divide(10, 0).expect("Division by zero should not happen here!");
+    // println("This line will not be reached: ".to_string() + dangerous_result.to_string());
+
+    println("Result example finished.".to_string());
+}
