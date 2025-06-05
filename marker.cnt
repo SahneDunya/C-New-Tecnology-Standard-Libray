@@ -1,0 +1,183 @@
+// marker.cnt
+// Standart İşaretleyici Trait'ler Modülü
+// Tür sistemine ve derleyiciye ek bilgi sağlayan trait'ler.
+
+// Not: Bu trait'lerin CNT derleyicisi tarafından özel olarak tanındığı ve işlendiği varsayılmıştır.
+// Rust'taki karşılıkları gibi, bu trait'ler herhangi bir metot tanımlamazlar.
+
+/// `Send` Trait'i: Bir tipin, bir iş parçacığından diğerine güvenli bir şekilde gönderilebileceğini (taşınabileceğini) işaretler.
+///
+/// Eğer bir `T` tipi `Send` ise, o tipin bir değeri veya referansı,
+/// herhangi bir iş parçacığı güvenliği ihlali olmadan bir iş parçacığından diğerine geçirilebilir.
+///
+/// Varsayılan olarak, çoğu basit tip (tamsayılar, boolean'lar, struct'lar) `Send`'dir.
+/// `unsafe` ham işaretçiler gibi bazı istisnalar `Send` değildir.
+/// `Send` olmayan bir tip, iş parçacıkları arasında doğrudan taşınamaz.
+pub trait Send {}
+
+/// `Sync` Trait'i: Bir tipin, birden fazla iş parçacığı arasında güvenli bir şekilde paylaşılabileceğini (referans ile erişilebileceğini) işaretler.
+///
+/// Eğer bir `T` tipi `Sync` ise, `&T` referansına sahip olan birden fazla iş parçacığı
+/// aynı anda bu referansa güvenli bir şekilde erişebilir.
+/// Bu, tipin dahili olarak iş parçacığı güvenli senkronizasyon mekanizmalarına sahip olduğu anlamına gelir.
+///
+/// `Sync` olmak, genellikle dahili değişebilirliğin (interior mutability) iş parçacığı güvenli olması demektir.
+/// Örneğin, bir atomik sayaç içeren bir struct `Sync` olabilirken,
+/// `std::cell::RefCell` gibi eşzamanlı erişime izin vermeyen bir yapı `Sync` değildir.
+///
+/// Not: `Sync` olan her tip genellikle `Send`'dir, ancak tersi doğru değildir.
+pub trait Sync {}
+
+/// `Sized` Trait'i: Bir tipin derleme zamanında bilinen sabit bir boyuta sahip olduğunu işaretler.
+///
+/// CNT'deki jenerik parametreler için varsayılan kısıtlamadır.
+/// Örneğin, `fn foo<T>(val: T)` aslında `fn foo<T: Sized>(val: T)` anlamına gelir.
+///
+/// `Sized` olmayan tiplere "dinamik boyutlu tipler" (DSTs) denir.
+/// Örnekler: `[T]`, `str` (string dilimleri), `dyn Trait` (trait object'ler).
+/// DST'ler doğrudan yığında depolanamaz veya fonksiyon parametresi olarak doğrudan geçirilemez;
+/// genellikle işaretçiler (örneğin, `&[T]`, `&str`, `Box<dyn Trait>`) aracılığıyla kullanılırlar.
+pub trait Sized {}
+
+/// `Unsized` Trait'i: Bir tipin derleme zamanında bilinen sabit bir boyuta sahip olmadığını işaretler.
+///
+/// `Sized`'ın tam tersidir. Bu trait genellikle manuel olarak implemente edilmez,
+/// ancak derleyici tarafından dinamik boyutlu tipler (DSTs) için otomatik olarak eklenir.
+///
+/// Örneğin, `[T]` ve `str` tipleri `Unsized`'dır.
+pub trait Unsized {} // Derleyici tarafından özel olarak işlenir.
+
+/// `PhantomData<T>` Struct'ı: T tipini sanki içeriyormuş gibi davranış sergilemek için kullanılır,
+/// ancak gerçekte bellekte yer kaplamaz.
+///
+/// # Kullanım Alanları:
+/// * **Ömür Kısıtlamaları:** Bir struct, T tipinde bir referans tutmuyorsa bile, o referansın ömrüne bağlıymış gibi davranmasını sağlamak.
+///   Örneğin, `struct MyRef<'a, T> { data: *mut T, _phantom: PhantomData<&'a T> }`
+///   `_phantom` alanı, MyRef'in ömrünü `'a` ömrüne bağlar.
+/// * **Sahip Olunmayan Tipler İçin İşaretleme:** Bir struct, T tipini doğrudan içermese de, T tipine sahipmiş gibi (örneğin, Drop impl'i için) derleyiciye bilgi vermek.
+///   `struct MyIterator<T> { ptr: *mut T, _phantom: PhantomData<T> }`
+///   Bu, MyIterator'ın T'yi attığında T'nin destructor'ını çağırma ihtiyacını belirtir.
+/// * **Jenerik Parametrelerin Kullanımı:** Bazen bir jenerik parametre, struct'ın kendisinde doğrudan kullanılmaz,
+///   ancak trait implementasyonları veya diğer jenerik kısıtlamalar için gereklidir.
+///   `PhantomData` bu parametrenin "kullanıldığını" derleyiciye bildirir.
+///
+/// Bellekte sıfır boyuta sahiptir.
+pub struct PhantomData<T: ?Sized>; // T, Sized olmayabilir.
+
+impl<T: ?Sized> PhantomData<T> {
+    pub const fn new() -> PhantomData<T> {
+        PhantomData
+    }
+}
+
+
+// --- Örnek Kullanım ---
+/*
+import std::string;
+import std::io; // println için
+import std::marker; // İşaretleyici trait'ler için
+
+// A. Send ve Sync Örnekleri
+
+// Send ve Sync olan basit bir struct
+pub struct MyData {
+    value: i32,
+    name: string,
+}
+// Bu struct, tüm alanları `Send` ve `Sync` olduğundan, derleyici tarafından otomatik olarak `Send` ve `Sync` kabul edilir.
+ impl Send for MyData {} // Derleyici tarafından otomatik olarak türetilir
+ impl Sync for MyData {} // Derleyici tarafından otomatik olarak türetilir
+
+// Send ama Sync olmayan bir struct (örneğin, dahili değişebilirlik ama iş parçacığı güvenli değil)
+// Eğer CNT'nin `RefCell` gibi bir yapısı olsaydı:
+ pub struct NotSync<T> {
+     inner: std::cell::RefCell<T>,
+ }
+// Bu durumda `NotSync` tipi `Send` olabilir (taşınabilir), ancak `Sync` olamaz (paylaşılamaz).
+
+// Sync olan ama Send olmayan bir örnek (çok nadir)
+// Genellikle böyle bir durum pratik değildir, çünkü Sync olan her şey genellikle Send'dir.
+
+// Fonksiyon: Send türü gerektiren bir iş parçacığına veri gönderme
+// `spawn_thread` fonksiyonunun `Send` türü gerektirdiği varsayılmıştır.
+// pub fn process_on_another_thread<T: marker::Send>(data: T) {
+//    // Yeni bir iş parçacığı başlat ve veriyi oraya taşı.
+     std::thread::spawn(move || {
+         io::println("Processing data in new thread.".to_string());
+//    //     // ... data üzerinde işlem yap ...
+     });
+ }
+
+// Fonksiyon: Sync türü gerektiren birden fazla iş parçacığında veri paylaşma
+ pub fn share_across_threads<T: marker::Sync>(data_ref: &T) {
+//     // Birden fazla iş parçacığı başlat ve `data_ref`'e erişmelerine izin ver.
+      std::thread::spawn(move || {
+          io::println("Accessing shared data from thread 1.".to_string());
+//     //     // ... data_ref üzerinde sadece okuma veya iş parçacığı güvenli değişiklikler yap ...
+      });
+      std::thread::spawn(move || {
+          io::println("Accessing shared data from thread 2.".to_string());
+      });
+ }
+
+
+// B. Sized ve Unsized Örnekleri
+
+// Sized bir fonksiyona geçirilebilir
+fn take_sized<T: marker::Sized>(val: T) {
+    io::println("Value is Sized.".to_string());
+}
+
+// Sized olmayan bir fonksiyona geçirilemez (işaretçi ile geçirilmelidir)
+ fn take_unsized<T: marker::Unsized>(val: T) {
+//    // Hata: Unsized tipler doğrudan değer olarak alınamaz.
+ }
+
+// Bir dilim (`slice`), dinamik boyutlu bir tiptir (Unsized)
+ let my_slice: &[i32] = &[1, 2, 3];
+ take_sized(my_slice); // Hata: `&[i32]` Sized değildir, `Sized` bir `T` bekler.
+ take_sized(*my_slice); // Hata: Dereference bir slice'ı Sized yapmaz.
+
+// Ancak referansı Sized olabilir
+fn take_sized_ref<T: marker::Sized>(val: &T) {
+    io::println("Reference to Sized value.".to_string());
+}
+fn take_sized_ref_to_slice<T: marker::Sized>(val: &[T]) { // &[T] kendisi Unsized, ancak referansı Sized
+    io::println("Reference to slice (slice itself is Unsized, but the reference is Sized).".to_string());
+}
+
+fn main() {
+    io::println("Starting Marker example...".to_string());
+
+    let my_data = MyData { value: 42, name: "Test Data".to_string() };
+
+    // Eğer `Send` ve `Sync` olsalardı, bu fonksiyonları çağırabilirdik.
+     process_on_another_thread(my_data); // `my_data` moved
+     share_across_threads(&my_data); // `my_data` borrowed
+
+    let num = 123i32;
+    take_sized(num); // i32, Sized'dır.
+
+     let my_str_slice: &str = "hello world";
+     take_sized_ref_to_slice(my_str_slice.as_bytes()); // &str.as_bytes() -> &[u8]
+
+
+    // C. PhantomData Örnekleri
+
+    // PhantomData'nın kendisi bellekte yer kaplamaz
+    let phantom_inst: marker::PhantomData<i32> = marker::PhantomData::new();
+     io::println("Size of PhantomData<i32>: ".to_string() + __builtin_sizeof::<marker::PhantomData<i32>>().to_string()); // Çıktı: 0
+
+    // Jenerik ömür kısıtlamaları için kullanım
+    // Örneğin, bir iterator veya bir FFI bağlama yapısı oluştururken.
+     struct MyFFIStruct<'a> {
+         raw_ptr: *mut u8,
+         _lifetime: marker::PhantomData<&'a u8>, // 'a ömrüne bağlıymış gibi davranır
+     }
+     let some_data = [1, 2, 3];
+     let ffi_obj = MyFFIStruct { raw_ptr: some_data.as_ptr() as *mut u8, _lifetime: marker::PhantomData::new() };
+    // // ffi_obj'nin ömrü, some_data'nın ömrünü aşamazdı.
+
+
+    io::println("Marker example finished.".to_string());
+}
