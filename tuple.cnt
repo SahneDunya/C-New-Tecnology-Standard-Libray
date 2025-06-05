@@ -1,0 +1,204 @@
+// tuple.cnt
+// Standart Tuple Modülü
+// Sabit sayıda, farklı tiplerdeki değerleri bir araya getiren tip-güvenli yapılar sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::utility;    // std::utility::swap kullanabiliriz
+
+/// `Error` Enum'u: Tuple işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz argüman hatası (örn. dizin dışı erişim).
+    InvalidArgument(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: CNT'nin variadic generics'i ve tuple elemanlarına derleme zamanı erişim mekanizması
+// bu implementasyon için kritiktir.
+// Bu taslakta, variadic generics'i destekleyen bir dil yapısı varsayıyoruz.
+
+// --- 1. Tuple Yapıları (Örnek: 0, 1, 2, 3 elemanlı tuple'lar) ---
+
+/// `Tuple0`: Boş bir tuple.
+pub struct Tuple0 {
+    // İçinde veri yok
+}
+
+/// Yeni bir boş `Tuple0` oluşturur.
+pub fn make_tuple0() -> Tuple0 {
+    Tuple0 {}
+}
+
+/// `Tuple1<T1>`: Tek elemanlı bir tuple.
+pub struct Tuple1<T1> {
+    pub item0: T1;
+}
+
+/// Yeni bir `Tuple1` oluşturur.
+pub fn make_tuple1<T1>(val0: T1) -> Tuple1<T1> {
+    Tuple1 { item0: val0 }
+}
+
+/// `Tuple2<T1, T2>`: İki elemanlı bir tuple.
+pub struct Tuple2<T1, T2> {
+    pub item0: T1;
+    pub item1: T2;
+}
+
+/// Yeni bir `Tuple2` oluşturur.
+pub fn make_tuple2<T1, T2>(val0: T1, val1: T2) -> Tuple2<T1, T2> {
+    Tuple2 { item0: val0, item1: val1 }
+}
+
+/// `Tuple3<T1, T2, T3>`: Üç elemanlı bir tuple.
+pub struct Tuple3<T1, T2, T3> {
+    pub item0: T1;
+    pub item1: T2;
+    pub item2: T3;
+}
+
+/// Yeni bir `Tuple3` oluşturur.
+pub fn make_tuple3<T1, T2, T3>(val0: T1, val1: T2, val2: T3) -> Tuple3<T1, T2, T3> {
+    Tuple3 { item0: val0, item1: val1, item2: val2 }
+}
+
+// GELECEK: `Tuple<Args...>` şeklinde variadic generics ile genelleştirme.
+// Bunun için CNT'nin `Args...` gibi bir variadic type parameter desteği olması gerekir.
+
+pub struct Tuple<Args...> {
+    // Dahili olarak recursive bir yapı veya compiler intrinsics ile implemente edilir.
+    // Örneğin, rust'taki gibi "tuple struct" desenleri:
+    // pub struct Tuple<T1, T2>(pub T1, pub T2);
+    // Veya C++'taki gibi, recursive inheritance/composition.
+}
+
+pub fn make_tuple<Args...>(vals: Args...) -> Tuple<Args...> {
+    // ...
+}
+
+
+// --- 2. Tuple Elemanlarına Erişim ---
+
+// Tuple elemanlarına derleme zamanı indeksi ile erişim.
+// Bu genellikle bir derleyici intrinsics'i (`get_tuple_element<Index>(tuple_instance)`) veya
+// bir recursive template/generic yapısı (`get_tuple_element_recursive<Index, CurrentIndex, Head, Tail>`)
+// ile yapılır.
+// Doğrudan struct alanlarına erişim (`tuple.item0`) tercih edilir.
+
+/// `get<Index, TupleType>(tuple_instance)`: Belirli bir indekste tuple elemanına erişir.
+/// Bu fonksiyon, CNT'nin derleyici düzeyinde `Index`'e göre alan seçimi yapabildiğini varsayar.
+///
+/// # Parametreler
+/// - `t`: Tuple instance'ı.
+///
+/// # Tip Parametreleri
+/// - `Index`: Erişim yapılacak elemanın derleme zamanı indeksi (sabit bir literal olmalı).
+/// - `T`: Tuple tipi.
+///
+/// # Dönüş Değeri
+/// `Type`: Belirtilen indeksteki elemanın tipi (bir referans döndürebilir).
+///
+/// **ÖNEMLİ NOT**: Bu fonksiyonun gerçek implementasyonu CNT'nin derleyici tarafından sağlanmalıdır.
+/// Basit bir örnek için, `Tuple2` üzerinden gösterebiliriz.
+pub fn get_tuple_element_0<T1, T2>(t: &Tuple2<T1, T2>) -> &T1 {
+    &t.item0
+}
+pub fn get_tuple_element_1<T1, T2>(t: &Tuple2<T1, T2>) -> &T2 {
+    &t.item1
+}
+
+// Genel `get` fonksiyonu (derleyici tarafından sağlanan intrinsics gibi):
+// pub fn get<const Index: int, Args...>(t: &Tuple<Args...>) -> &tuple_element_t<Index, Tuple<Args...>> {
+//    // pseudo-kod: compiler_get_tuple_element<Index>(t)
+//    unreachable!() // Bu fonksiyonun asla çalıştırılmaması gerekir, derleme zamanında çözülmeli.
+// }
+
+// --- 3. Tuple Manipülasyonları ---
+
+/// İki tuple'ı birleştirerek yeni bir tuple oluşturur (concat).
+///
+/// # Parametreler
+/// - `t1`: Birinci tuple.
+/// - `t2`: İkinci tuple.
+///
+/// # Tip Parametreleri
+/// - `Args1...`: Birinci tuple'ın eleman tipleri.
+/// - `Args2...`: İkinci tuple'ın eleman tipleri.
+///
+/// # Dönüş Değeri
+/// `Tuple<Args1..., Args2...>`: Birleştirilmiş yeni tuple.
+///
+/// **NOT**: Bu fonksiyon variadic generics olmadan pratik olarak implemente edilemez.
+
+pub fn tuple_cat<Args1..., Args2...>(t1: Tuple<Args1...>, t2: Tuple<Args2...>) -> Tuple<Args1..., Args2...> {
+    // ...
+    // pseudo-kod: compiler_tuple_concat(t1, t2)
+    unreachable!()
+}
+
+
+/// İki tuple'ın elemanlarını karşılıklı olarak takas eder (eleman sayıları ve tipleri aynı olmalı).
+///
+/// # Parametreler
+/// - `t1`: Takas edilecek birinci tuple.
+/// - `t2`: Takas edilecek ikinci tuple.
+///
+/// # Tip Parametreleri
+/// - `Args...`: Tuple'ların eleman tipleri.
+///
+/// **NOT**: Basit bir örnek için `Tuple2` üzerinde gösterebiliriz.
+pub fn tuple_swap<T1, T2>(t1: &mut Tuple2<T1, T2>, t2: &mut Tuple2<T1, T2>) -> void {
+    utility::swap(&mut t1.item0, &mut t2.item0);
+    utility::swap(&mut t1.item1, &mut t2.item1);
+}
+
+// --- 4. Helper Türler ve Fonksiyonlar ---
+
+/// `tuple_size<T>`: Bir tuple tipindeki eleman sayısını derleme zamanında verir.
+///
+/// # Tip Parametreleri
+/// - `T`: Tuple tipi.
+///
+/// # Dönüş Değeri
+/// `int`: Tuple'daki eleman sayısı.
+pub fn tuple_size<T>() -> int {
+    // pseudo-kod: compiler_tuple_size<T>()
+    0 // Geçici placeholder
+}
+
+/// `tuple_element_t<Index, T>`: Bir tuple tipindeki belirli bir indeksteki elemanın tipini verir.
+///
+/// # Tip Parametreleri
+/// - `Index`: Eleman indeksi (derleme zamanı sabiti).
+/// - `T`: Tuple tipi.
+///
+/// # Dönüş Değeri
+/// `Type`: Belirtilen indeksteki elemanın tipi.
+pub type tuple_element_t<const Index: int, T> = T; // pseudo-kod: compiler_tuple_element_type<Index, T>
+
+// --- 5. Tuple ile İlgili İteratör Benzeri Fonksiyonlar (Gelişmiş) ---
+
+// Tuple'lar üzerinde döngü yapmak veya belirli bir operasyonu uygulamak,
+// derleme zamanı rekürsiyonu veya özel bir derleyici intrinsics'i gerektirir.
+// Örneğin, bir tuple'daki her elemana bir lambda uygulamak.
+
+/// Bir tuple'daki her eleman üzerinde bir fonksiyon uygular.
+///
+/// # Parametreler
+/// - `t`: Tuple instance'ı.
+/// - `func`: Her elemana uygulanacak fonksiyon (lambda/closure).
+///
+/// # Tip Parametreleri
+/// - `Args...`: Tuple'ın eleman tipleri.
+/// - `F`: Uygulanacak fonksiyonun tipi.
+pub fn for_each_tuple_element<Args..., F>(t: &Tuple<Args...>, func: &F) -> void {
+    // Recursive bir yapı veya derleyici intrinsics'i.
+    // Örneğin, func(get<0>(t)); func(get<1>(t)); ...
+}
