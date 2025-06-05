@@ -1,0 +1,428 @@
+// filesystem.cnt
+// Standart Filesystem Modülü
+// Dosya sistemi üzerinde taşınabilir operasyonlar için.
+
+import std::string;     // Yol ve hata mesajları için
+import std::vector;     // Dizin içeriklerini listelemek için
+import std::time;       // Dosya zaman damgaları için (varsayılan std::time modülü)
+import std::result;     // Operasyon sonuçları için (Ok/Err)
+import std::io;         // Temel IO işlemleri için (varsayılan std::io modülü)
+
+// Not: Bu modülün, CNT'nin altında yatan işletim sistemi API'lerine erişim yeteneğine sahip olduğu varsayılmaktadır.
+// `external "syscall"` veya benzeri bir mekanizma ile OS fonksiyonları çağrılacaktır.
+
+/// `Error` Enum'u: Dosya sistemi işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Yol geçerli değil (örn. var olmayan yol, geçersiz karakterler).
+    InvalidPath(string);
+    /// Dosya veya dizin bulunamadı.
+    NotFound(string);
+    /// Erişim izni reddedildi.
+    PermissionDenied(string);
+    /// Dosya veya dizin zaten mevcut.
+    AlreadyExists(string);
+    /// Dizin boş değil.
+    DirectoryNotEmpty(string);
+    /// Geçersiz işlem (örn. dosya olmayan bir şeye dizin işlemi).
+    InvalidArgument(string);
+    /// Genel bir işletim sistemi hatası.
+    OsError(string);
+    /// Bilinmeyen bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Tip Alias'ı: `std::result::Result` ile Filesystem modülünün hatalarını birleştirir.
+pub type Result<T> = std::result::Result<T, Error>;
+
+// --- 1. Path (Yol) Yapısı ---
+
+/// `Path` Struct'ı: Bir dosya veya dizin yolunu temsil eder.
+/// Yolu dahili olarak string olarak saklar ve taşınabilir manipülasyonlar sağlar.
+pub struct Path {
+    inner_path: string;
+}
+
+/// `new_path()`: Bir string'den yeni bir `Path` nesnesi oluşturur.
+pub fn new_path(path_str: string) -> Path {
+    Path { inner_path: path_str }
+}
+
+/// `to_string()`: `Path` nesnesini string olarak döndürür.
+pub fn to_string(p: &Path) -> string {
+    p.inner_path.clone()
+}
+
+/// `parent_path()`: Yolun ana dizinini (parent directory) döndürür.
+/// Eğer yolun ana dizini yoksa (örn. kök dizin veya sadece dosya adı), boş bir Path döndürebilir.
+pub fn parent_path(p: &Path) -> Path {
+    let s = p.inner_path.clone();
+    let sep = get_preferred_separator(); // İşletim sistemine özgü ayırıcı
+    
+    // Basit bir implementasyon: Son ayırıcıya kadar olan kısmı al
+    if let Some(last_sep_idx) = s.rfind(sep) {
+        if last_sep_idx == 0 { // Kök dizinse (örn. "/"), "/"" döndür.
+            return new_path(sep.to_string());
+        }
+        return new_path(s.substring(0, last_sep_idx).expect("Substring error"));
+    }
+    // Eğer ayırıcı yoksa (örn. "dosya.txt"), boş Path veya "." döndür.
+    new_path("".to_string()) // "file.txt" için "" dönecek
+}
+
+/// `filename()`: Yolun dosya veya dizin adını (uzantısıyla birlikte) döndürür.
+pub fn filename(p: &Path) -> Path {
+    let s = p.inner_path.clone();
+    let sep = get_preferred_separator();
+    if let Some(last_sep_idx) = s.rfind(sep) {
+        return new_path(s.substring(last_sep_idx + 1, s.len()).expect("Substring error"));
+    }
+    new_path(s) // Ayırıcı yoksa, tüm string dosya adıdır
+}
+
+/// `stem()`: Dosya adının uzantısız kısmını döndürür.
+pub fn stem(p: &Path) -> Path {
+    let fname = filename(p).inner_path;
+    if let Some(dot_idx) = fname.rfind('.') {
+        if dot_idx > 0 { // Nokta dosya adının başında değilse
+            return new_path(fname.substring(0, dot_idx).expect("Substring error"));
+        }
+    }
+    new_path(fname) // Uzantı yoksa veya nokta başta ise tüm dosya adını döndür
+}
+
+/// `extension()`: Dosya adının uzantısını (nokta dahil) döndürür.
+pub fn extension(p: &Path) -> Path {
+    let fname = filename(p).inner_path;
+    if let Some(dot_idx) = fname.rfind('.') {
+        if dot_idx > 0 {
+            return new_path(fname.substring(dot_idx, fname.len()).expect("Substring error"));
+        }
+    }
+    new_path("".to_string()) // Uzantı yoksa veya nokta başta ise boş Path döndür
+}
+
+/// `concat()`: İki yolu birleştirerek yeni bir Path oluşturur.
+pub fn concat(p1: &Path, p2: &Path) -> Path {
+    let mut combined_path = p1.inner_path.clone();
+    let sep = get_preferred_separator();
+
+    if !combined_path.is_empty() && !combined_path.ends_with(sep) && !p2.inner_path.starts_with(sep) {
+        combined_path.push_char(sep);
+    }
+    combined_path.push_str(&p2.inner_path);
+    new_path(combined_path)
+}
+
+/// `is_absolute()`: Yolun mutlak bir yol olup olmadığını kontrol eder.
+pub fn is_absolute(p: &Path) -> bool {
+    // İşletim sistemine özgü bir kontrol.
+    // Linux/macOS: '/' ile başlar.
+    // Windows: 'C:\' veya '\\' ile başlar.
+    let s = p.inner_path.clone();
+    let sep = get_preferred_separator();
+    if s.starts_with(sep) {
+        return true;
+    }
+    #[cfg(target_os = "windows")] // Varsayımsal platforma özgü kod bloğu
+    {
+        if s.len() >= 3 && s.char_at(1) == ':' && (s.char_at(2) == '\\' || s.char_at(2) == '/') {
+            return true; // "C:\" gibi
+        }
+        if s.starts_with("\\\\") || s.starts_with("//") {
+            return true; // UNC yolu
+        }
+    }
+    false
+}
+
+/// `get_preferred_separator()`: İşletim sisteminin tercih ettiği yol ayırıcı karakteri döndürür.
+pub fn get_preferred_separator() -> char {
+    #[cfg(target_os = "windows")]
+    { '\\' }
+    #[cfg(not(target_os = "windows"))]
+    { '/' }
+}
+
+
+// --- 2. Dosya ve Dizin Operasyonları ---
+
+/// `exists()`: Belirtilen yolun mevcut olup olmadığını kontrol eder.
+pub fn exists(p: &Path) -> Result<bool> {
+    // OS'e özel sistem çağrısı ile kontrol
+    match std::io::file_exists(p.inner_path.clone()) { // Varsayılan IO modülü
+        std::result::Ok(b) => Result::Ok(b),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `is_file()`: Yolun normal bir dosyaya işaret edip etmediğini kontrol eder.
+pub fn is_file(p: &Path) -> Result<bool> {
+    match std::io::is_regular_file(p.inner_path.clone()) {
+        std::result::Ok(b) => Result::Ok(b),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `is_directory()`: Yolun bir dizine işaret edip etmediğini kontrol eder.
+pub fn is_directory(p: &Path) -> Result<bool> {
+    match std::io::is_directory(p.inner_path.clone()) {
+        std::result::Ok(b) => Result::Ok(b),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `create_directory()`: Belirtilen dizini oluşturur.
+/// Sadece tek bir dizin oluşturur, üst dizinler zaten var olmalıdır.
+pub fn create_directory(p: &Path) -> Result<void> {
+    match std::io::create_directory(p.inner_path.clone()) {
+        std::result::Ok(_) => Result::Ok(()),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `create_directories()`: Belirtilen dizini ve gerekli tüm üst dizinleri oluşturur.
+pub fn create_directories(p: &Path) -> Result<void> {
+    // Recursive mantık veya OS API'ye dayanır
+    let mut current_path = new_path("".to_string());
+    let components = p.inner_path.split(get_preferred_separator()); // Yolu parçalara ayır
+    for component in components {
+        if component.is_empty() { // Kök dizin veya çift ayırıcı durumları
+            if current_path.inner_path.is_empty() { // Eğer boşsa ve kök dizinle başlıyorsa
+                current_path = new_path(get_preferred_separator().to_string());
+            }
+            continue;
+        }
+        current_path = concat(&current_path, &new_path(component.to_string()));
+        if !exists(&current_path)? {
+            create_directory(&current_path)?;
+        }
+    }
+    Result::Ok(())
+}
+
+
+/// `remove()`: Dosya veya boş bir dizini siler.
+pub fn remove(p: &Path) -> Result<bool> { // C++'daki gibi, silindi mi diye bool dönebilir
+    match std::io::remove_file_or_empty_dir(p.inner_path.clone()) {
+        std::result::Ok(b) => Result::Ok(b),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `remove_all()`: Dosya veya dizini ve altındaki tüm içerikleri (recursive) siler.
+pub fn remove_all(p: &Path) -> Result<u64> { // C++'daki gibi, silinen eleman sayısını dönebilir
+    if !exists(p)? {
+        return Result::Ok(0); // Yoksa bir şey silinmez
+    }
+
+    let mut count = 0u64;
+    if is_directory(p)? {
+        for entry_res in read_directory(p) { // Dizin içeriğini yinele
+            let entry_path = entry_res?;
+            count += remove_all(&entry_path)?; // Alt elemanları recursive sil
+        }
+        remove(p)?; // Dizin boşalınca dizini sil
+        count += 1;
+    } else {
+        remove(p)?; // Dosyayı sil
+        count += 1;
+    }
+    Result::Ok(count)
+}
+
+
+/// `rename()`: Bir dosyayı veya dizini yeniden adlandırır/taşır.
+pub fn rename(old_path: &Path, new_path: &Path) -> Result<void> {
+    match std::io::rename(old_path.inner_path.clone(), new_path.inner_path.clone()) {
+        std::result::Ok(_) => Result::Ok(()),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `copy()`: Bir dosyayı veya dizini kopyalar.
+/// Dizin kopyalama için recursive kopyalama içermez, sadece tek dosyadır.
+/// Recursive kopyalama için `copy_recursive` fonksiyonu gerekebilir.
+pub fn copy(from: &Path, to: &Path) -> Result<void> {
+    match std::io::copy_file(from.inner_path.clone(), to.inner_path.clone()) {
+        std::result::Ok(_) => Result::Ok(()),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `file_size()`: Bir dosyanın boyutunu bayt cinsinden döndürür.
+pub fn file_size(p: &Path) -> Result<u64> {
+    match std::io::get_file_size(p.inner_path.clone()) {
+        std::result::Ok(s) => Result::Ok(s),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `last_write_time()`: Bir dosya veya dizinin son yazma zamanını döndürür.
+/// Dönüş tipi `std::time::SystemTime` gibi bir zaman nesnesi olabilir.
+pub fn last_write_time(p: &Path) -> Result<std::time::SystemTime> {
+    match std::io::get_last_write_time(p.inner_path.clone()) {
+        std::result::Ok(t) => Result::Ok(t),
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+// --- 3. Dizin Yineleyicisi ---
+
+/// `DirectoryEntry` Struct'ı: Bir dizin girdisini (dosya veya alt dizin) temsil eder.
+pub struct DirectoryEntry {
+    path: Path,
+    // Diğer meta veriler eklenebilir (is_directory, is_file, file_size vb.)
+    // Örneğin, pub is_dir: bool, pub is_file: bool, ...
+}
+
+/// `path()`: Dizin girdisinin yolunu döndürür.
+pub fn path(entry: &DirectoryEntry) -> &Path {
+    &entry.path
+}
+
+/// `DirectoryIterator` Struct'ı: Bir dizinin içeriğini yinelemek için kullanılır.
+/// Dahili olarak işletim sisteminin dizin okuma API'lerini kullanır.
+pub struct DirectoryIterator {
+    // OS'ye özgü dizin tanıtıcısı/handle'ı
+    // current_path: Path, // Hangi dizini iterasyon yaptığı
+    // entries: std::vector::Vector<string>, // Okunan girdilerin listesi
+    // current_entry_idx: u64,
+    // Veya OS'ye özgü bir durum makinesi/iterator handle'ı olabilir.
+    os_dir_handle: i64, // Varsayımsal OS handle'ı
+    base_path: Path, // Iterasyon yapılan dizinin temel yolu
+    current_entry_name: string, // Geçerli okunan girdinin adı
+    is_done: bool, // Iterasyonun bittiğini gösterir
+}
+
+/// `read_directory()`: Bir dizinin içeriğini yineleyen bir `DirectoryIterator` döndürür.
+pub fn read_directory(p: &Path) -> Result<DirectoryIterator> {
+    if !is_directory(p)? {
+        return Result::Err(Error::InvalidArgument("Path is not a directory.".to_string()));
+    }
+
+    match std::io::open_directory_stream(p.inner_path.clone()) {
+        std::result::Ok(handle) => {
+            let mut iter = DirectoryIterator {
+                os_dir_handle: handle,
+                base_path: p.clone(), // Path'in clone() fonksiyonuna sahip olduğu varsayılır
+                current_entry_name: "".to_string(),
+                is_done: false,
+            };
+            // İlk girdiyi hemen okumayı dene
+            let _ = next_directory_entry(&mut iter)?; // Hata kontrolü önemli
+            Result::Ok(iter)
+        },
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+/// `next_directory_entry()`: `DirectoryIterator`'dan bir sonraki `DirectoryEntry`'yi döndürür.
+/// Eğer başka girdi yoksa `None` döndürür (veya bir özel `Result` durumu).
+pub fn next_directory_entry(iter: &mut DirectoryIterator) -> Result<std::result::Option<DirectoryEntry>> {
+    if iter.is_done {
+        return Result::Ok(std::result::Option::None);
+    }
+
+    match std::io::read_directory_entry(iter.os_dir_handle) {
+        std::result::Ok(entry_name_opt) => {
+            if let Some(entry_name) = entry_name_opt {
+                iter.current_entry_name = entry_name.clone();
+                let full_path = concat(&iter.base_path, &new_path(entry_name));
+                Result::Ok(std::result::Option::Some(DirectoryEntry { path: full_path }))
+            } else {
+                iter.is_done = true;
+                std::io::close_directory_stream(iter.os_dir_handle).expect("Failed to close directory stream");
+                Result::Ok(std::result::Option::None)
+            }
+        },
+        std::result::Err(e) => Result::Err(map_io_error(e)),
+    }
+}
+
+// OS'den gelen genel IO hatalarını Filesystem modülünün özel hatalarına çevirir.
+fn map_io_error(io_err: std::io::IoError) -> Error {
+    match io_err.kind() { // Varsayımsal io::ErrorKind enum'ı
+        std::io::ErrorKind::NotFound => Error::NotFound(io_err.message()),
+        std::io::ErrorKind::PermissionDenied => Error::PermissionDenied(io_err.message()),
+        std::io::ErrorKind::AlreadyExists => Error::AlreadyExists(io_err.message()),
+        std::io::ErrorKind::DirectoryNotEmpty => Error::DirectoryNotEmpty(io_err.message()),
+        std::io::ErrorKind::InvalidArgument => Error::InvalidArgument(io_err.message()),
+        _ => Error::OsError(io_err.message()),
+    }
+}
+
+// --- Örnek Kullanım ---
+
+fn main() {
+    println("Starting Filesystem example...".to_string());
+
+    let current_dir = new_path("."); // Mevcut dizin
+    println("Current directory: ".to_string() + to_string(&current_dir));
+    assert!(exists(&current_dir).expect("Current dir should exist"), "Current directory does not exist!");
+    assert!(is_directory(&current_dir).expect("Current dir should be a directory"), "Current directory is not a directory!");
+
+    // Dizin oluşturma
+    let test_dir = new_path("test_dir");
+    if exists(&test_dir).expect("Check test_dir exists") {
+        remove_all(&test_dir).expect("Failed to clean up test_dir");
+        println("Cleaned up existing test_dir.".to_string());
+    }
+    create_directory(&test_dir).expect("Failed to create test_dir");
+    println("Created test_dir: ".to_string() + to_string(&test_dir));
+    assert!(is_directory(&test_dir).expect("test_dir should be a directory"), "test_dir was not created!");
+
+    // İç içe dizin oluşturma
+    let nested_dir = concat(&test_dir, &new_path("nested/sub_nested"));
+    create_directories(&nested_dir).expect("Failed to create nested directories");
+    println("Created nested directories: ".to_string() + to_string(&nested_dir));
+    assert!(is_directory(&nested_dir).expect("nested_dir should be a directory"), "Nested directories not created!");
+
+    // Dosya oluşturma ve yazma (std::io'ya bağımlı)
+    let file_path = concat(&test_dir, &new_path("test_file.txt"));
+    std::io::write_string_to_file(to_string(&file_path), "Hello Filesystem!").expect("Failed to write to file");
+    println("Created file: ".to_string() + to_string(&file_path));
+    assert!(is_file(&file_path).expect("test_file.txt should be a file"), "test_file.txt was not created!");
+    let file_size = file_size(&file_path).expect("Failed to get file size");
+    println("File size: ".to_string() + file_size.to_string() + " bytes");
+    assert!(file_size > 0, "File size should be greater than 0");
+
+    // Dosya kopyalama
+    let copied_file_path = concat(&test_dir, &new_path("copied_file.txt"));
+    copy(&file_path, &copied_file_path).expect("Failed to copy file");
+    println("Copied file to: ".to_string() + to_string(&copied_file_path));
+    assert!(exists(&copied_file_path).expect("Copied file should exist"), "Copied file does not exist!");
+
+    // Dosya yeniden adlandırma
+    let renamed_file_path = concat(&test_dir, &new_path("renamed_file.log"));
+    rename(&copied_file_path, &renamed_file_path).expect("Failed to rename file");
+    println("Renamed file to: ".to_string() + to_string(&renamed_file_path));
+    assert!(exists(&renamed_file_path).expect("Renamed file should exist"), "Renamed file does not exist!");
+    assert!(exists(&copied_file_path).expect("Original copied file should not exist") == false, "Original copied file still exists!");
+
+    // Dizin içeriğini listeleme
+    println("\nContents of test_dir:".to_string());
+    let dir_iter_res = read_directory(&test_dir);
+    if let Ok(mut iter) = dir_iter_res {
+        loop {
+            match next_directory_entry(&mut iter) {
+                Ok(Some(entry)) => {
+                    println("  - ".to_string() + to_string(path(&entry)));
+                },
+                Ok(None) => break, // Iterasyon bitti
+                Err(e) => {
+                    println("Error reading directory entry: ".to_string() + e.to_string());
+                    break;
+                }
+            }
+        }
+    } else if let Err(e) = dir_iter_res {
+        println("Error opening directory for reading: ".to_string() + e.to_string());
+    }
+
+    // Temizleme (remove_all)
+    remove_all(&test_dir).expect("Failed to remove test_dir recursively");
+    println("\nRemoved test_dir and its contents.".to_string());
+    assert!(exists(&test_dir).expect("test_dir should be removed") == false, "test_dir still exists!");
+
+    println("Filesystem example finished.".to_string());
+}
