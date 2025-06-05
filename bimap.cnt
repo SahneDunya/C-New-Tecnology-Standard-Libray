@@ -1,0 +1,266 @@
+// bimap.cnt
+// Standart Çift Yönlü Harita (Bimap) Modülü
+// Anahtardan değere ve değerden anahtara hızlı arama sağlar.
+
+import std::collections::HashMap; // Dahili HashMap kullanımı için
+import std::string;                // Hata mesajları için
+import std::option;                // Option<T> dönüş tipleri için
+import std::ops;                   // Gerekli trait'ler için (Eq, Hash, Clone)
+import std::io;                    // println için
+import std::assert;                // Hata ayıklama için
+
+// Not: Bu implementasyon, `std::collections::HashMap`'in zaten var olduğu ve
+// gerekli trait'leri (`Eq`, `Hash`, `Clone`) düzgün bir şekilde desteklediği varsayılmıştır.
+
+/// `Bimap<K, V>`: Hem `K`'den `V`'ye hem de `V`'den `K`'ye hızlı arama yapılabilen çift yönlü bir harita.
+///
+/// `K` (Key) ve `V` (Value) tiplerinin her ikisi de `Eq`, `Hash` ve `Clone` trait'lerini
+/// implemente etmelidir.
+pub struct Bimap<K, V> {
+    // Anahtardan değere harita
+    key_to_value: HashMap<K, V>,
+    // Değerden anahtara harita
+    value_to_key: HashMap<V, K>,
+}
+
+impl<K, V> Bimap<K, V>
+where
+    K: ops::Eq + ops::Hash + ops::Clone,
+    V: ops::Eq + ops::Hash + ops::Clone,
+{
+    /// `new()`: Yeni, boş bir `Bimap` oluşturur.
+    pub fn new() -> Bimap<K, V> {
+        Bimap {
+            key_to_value: HashMap::new(),
+            value_to_key: HashMap::new(),
+        }
+    }
+
+    /// `insert(&mut self, key: K, value: V)`: Haritaya yeni bir anahtar-değer eşleşmesi ekler.
+    ///
+    /// Eğer `key` zaten varsa, eski anahtar-değer eşleşmesi kaldırılır ve yeni eşleşme eklenir.
+    /// Eğer `value` zaten varsa (başka bir anahtarla eşleşmişse), eski değer-anahtar eşleşmesi kaldırılır
+    /// ve yeni eşleşme eklenir.
+    ///
+    /// Geriye, varsa, eski anahtar-değer çiftini döndürür.
+    pub fn insert(&mut self, key: K, value: V) -> option::Option<(K, V)> {
+        let mut old_pair: option::Option<(K, V)> = option::Option::None;
+
+        // Key zaten varsa, eski key-value çiftini kaldır.
+        if let option::Option::Some(old_value) = self.key_to_value.remove(&key) {
+            self.value_to_key.remove(&old_value);
+            old_pair = option::Option::Some((key.clone(), old_value)); // Eski çifti sakla
+        }
+
+        // Value zaten varsa, eski value-key çiftini kaldır.
+        if let option::Option::Some(old_key) = self.value_to_key.remove(&value) {
+            self.key_to_value.remove(&old_key);
+            // Eğer hem anahtar hem de değer zaten varsa, bu yeni bir çift olarak ele alınır.
+            // Bu durumda, old_pair'ın ilk değeri (key'den bulunan) üzerine yazılmaz.
+            // Bu, `HashMap`'in `insert` davranışına daha yakın olmak içindir.
+            // Eğer istenirse, bu kısım farklı bir davranış için ayarlanabilir.
+            if old_pair.is_none() { // Eğer key'den bir eski eşleşme bulamadıysak
+                old_pair = option::Option::Some((old_key, value.clone()));
+            }
+        }
+
+        // Yeni eşleşmeyi ekle
+        self.key_to_value.insert(key.clone(), value.clone());
+        self.value_to_key.insert(value, key);
+
+        old_pair
+    }
+
+    /// `get_by_key(&self, key: &K) -> Option<&V>`: Belirli bir anahtara karşılık gelen değeri döndürür.
+    pub fn get_by_key(&self, key: &K) -> option::Option<&V> {
+        self.key_to_value.get(key)
+    }
+
+    /// `get_by_value(&self, value: &V) -> Option<&K>`: Belirli bir değere karşılık gelen anahtarı döndürür.
+    pub fn get_by_value(&self, value: &V) -> option::Option<&K> {
+        self.value_to_key.get(value)
+    }
+
+    /// `remove_by_key(&mut self, key: &K) -> Option<(K, V)>`: Belirli bir anahtara ait eşleşmeyi kaldırır.
+    ///
+    /// Geriye, varsa, kaldırılan anahtar-değer çiftini döndürür.
+    pub fn remove_by_key(&mut self, key: &K) -> option::Option<(K, V)> {
+        if let option::Option::Some(value) = self.key_to_value.remove(key) {
+            let removed_key = self.value_to_key.remove(&value).expect("Bimap internal consistency error: value not found in value_to_key map after key_to_value removal!");
+            return option::Option::Some((removed_key, value));
+        }
+        option::Option::None
+    }
+
+    /// `remove_by_value(&mut self, value: &V) -> Option<(K, V)>`: Belirli bir değere ait eşleşmeyi kaldırır.
+    ///
+    /// Geriye, varsa, kaldırılan anahtar-değer çiftini döndürür.
+    pub fn remove_by_value(&mut self, value: &V) -> option::Option<(K, V)> {
+        if let option::Option::Some(key) = self.value_to_key.remove(value) {
+            let removed_value = self.key_to_value.remove(&key).expect("Bimap internal consistency error: key not found in key_to_value map after value_to_key removal!");
+            return option::Option::Some((key, removed_value));
+        }
+        option::Option::None
+    }
+
+    /// `len(&self) -> u64`: Haritadaki eşleşme sayısını döndürür.
+    pub fn len(&self) -> u64 {
+        std::assert::assert_eq(self.key_to_value.len(), self.value_to_key.len(), "Bimap internal consistency error: map lengths differ!".to_string());
+        self.key_to_value.len()
+    }
+
+    /// `is_empty(&self) -> bool`: Haritanın boş olup olmadığını kontrol eder.
+    pub fn is_empty(&self) -> bool {
+        self.key_to_value.is_empty()
+    }
+
+    /// `contains_key(&self, key: &K) -> bool`: Haritanın belirli bir anahtarı içerip içermediğini kontrol eder.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.key_to_value.contains_key(key)
+    }
+
+    /// `contains_value(&self, value: &V) -> bool`: Haritanın belirli bir değeri içerip içermediğini kontrol eder.
+    pub fn contains_value(&self, value: &V) -> bool {
+        self.value_to_key.contains_key(value)
+    }
+
+    /// `clear(&mut self)`: Haritadaki tüm eşleşmeleri kaldırır.
+    pub fn clear(&mut self) {
+        self.key_to_value.clear();
+        self.value_to_key.clear();
+    }
+
+    // İteratörler (daha karmaşık olabilir, basit bir model için başlangıç)
+    // Gerçek bir implementasyonda, HashMap'in iteratörleri üzerinden iterator adaptörleri yazılırdı.
+
+    /// `keys(&self) -> std::collections::hash_map::Keys<K, V>`: Haritadaki tüm anahtarların bir iteratörünü döndürür.
+    pub fn keys(&self) -> std::collections::hash_map::Keys<K, V> {
+        self.key_to_value.keys()
+    }
+
+    /// `values(&self) -> std::collections::hash_map::Values<K, V>`: Haritadaki tüm değerlerin bir iteratörünü döndürür.
+    pub fn values(&self) -> std::collections::hash_map::Values<K, V> {
+        self.key_to_value.values() // Veya value_to_key.keys()
+    }
+
+    /// `iter(&self) -> std::collections::hash_map::Iter<K, V>`: Haritadaki tüm anahtar-değer çiftlerinin bir iteratörünü döndürür.
+    pub fn iter(&self) -> std::collections::hash_map::Iter<K, V> {
+        self.key_to_value.iter()
+    }
+}
+
+// Varsayılan boş Bimap oluşturucu
+impl<K, V> Default for Bimap<K, V>
+where
+    K: ops::Eq + ops::Hash + ops::Clone,
+    V: ops::Eq + ops::Hash + ops::Clone,
+{
+    fn default() -> Bimap<K, V> {
+        Bimap::new()
+    }
+}
+
+
+// --- Örnek Kullanım ---
+/*
+import std::collections::bimap;
+import std::io;
+import std::string;
+import std::option; // Option enum'u için
+
+fn main() {
+    io::println("Starting Bimap example...".to_string());
+
+    let mut my_bimap: bimap::Bimap<i32, string> = bimap::Bimap::new();
+
+    // 1. Ekleme (insert)
+    io::println("\n--- Insertion ---".to_string());
+    io::println("Inserting 1 -> \"One\"".to_string());
+    my_bimap.insert(1, "One".to_string());
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // 1
+
+    io::println("Inserting 2 -> \"Two\"".to_string());
+    my_bimap.insert(2, "Two".to_string());
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // 2
+
+    io::println("Inserting 3 -> \"Three\"".to_string());
+    my_bimap.insert(3, "Three".to_string());
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // 3
+
+    // Mevcut anahtarı yeniden ekleme (değeri günceller)
+    io::println("Inserting 1 -> \"Uno\" (update key 1)".to_string());
+    let old = my_bimap.insert(1, "Uno".to_string());
+    match old {
+        option::Option::Some((k, v)) => io::println("Replaced old pair: ".to_string() + k.to_string() + " -> " + v), // Output: 1 -> "One"
+        option::Option::None => io::println("No old pair replaced.".to_string()),
+    }
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // Hala 3
+
+    // Mevcut değeri yeniden ekleme (anahtarı günceller)
+    io::println("Inserting 4 -> \"Two\" (update value \"Two\")".to_string());
+    let old_value_key = my_bimap.insert(4, "Two".to_string());
+    match old_value_key {
+        option::Option::Some((k, v)) => io::println("Replaced old pair by value: ".to_string() + k.to_string() + " -> " + v), // Output: 2 -> "Two"
+        option::Option::None => io::println("No old pair replaced by value.".to_string()),
+    }
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // Hala 3
+
+    // Haritanın içeriği: {1: "Uno", 3: "Three", 4: "Two"}
+
+    // 2. Arama (get_by_key, get_by_value)
+    io::println("\n--- Lookup ---".to_string());
+    io::println("Get by key 1: ".to_string() + my_bimap.get_by_key(&1).unwrap_or(&"Not Found".to_string())); // Output: Uno
+    io::println("Get by key 3: ".to_string() + my_bimap.get_by_key(&3).unwrap_or(&"Not Found".to_string())); // Output: Three
+    io::println("Get by key 2 (should be gone): ".to_string() + my_bimap.get_by_key(&2).unwrap_or(&"Not Found".to_string())); // Output: Not Found
+
+    io::println("Get by value \"Uno\": ".to_string() + my_bimap.get_by_value(&"Uno".to_string()).unwrap_or(&0).to_string()); // Output: 1
+    io::println("Get by value \"Three\": ".to_string() + my_bimap.get_by_value(&"Three".to_string()).unwrap_or(&0).to_string()); // Output: 3
+    io::println("Get by value \"Two\": ".to_string() + my_bimap.get_by_value(&"Two".to_string()).unwrap_or(&0).to_string()); // Output: 4 (eski 2 yerine 4 oldu)
+
+    // 3. Kontrol (contains_key, contains_value, is_empty)
+    io::println("\n--- Check ---".to_string());
+    io::println("Contains key 1? ".to_string() + my_bimap.contains_key(&1).to_string()); // true
+    io::println("Contains key 2? ".to_string() + my_bimap.contains_key(&2).to_string()); // false
+    io::println("Contains value \"Uno\"? ".to_string() + my_bimap.contains_value(&"Uno".to_string()).to_string()); // true
+    io::println("Contains value \"One\"? ".to_string() + my_bimap.contains_value(&"One".to_string()).to_string()); // false
+
+    io::println("Is empty? ".to_string() + my_bimap.is_empty().to_string()); // false
+
+    // 4. Kaldırma (remove_by_key, remove_by_value)
+    io::println("\n--- Removal ---".to_string());
+    io::println("Removing by key 1...".to_string());
+    let removed_pair = my_bimap.remove_by_key(&1);
+    match removed_pair {
+        option::Option::Some((k, v)) => io::println("Removed: ".to_string() + k.to_string() + " -> " + v), // Output: 1 -> Uno
+        option::Option::None => io::println("Key 1 not found.".to_string()),
+    }
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // 2
+
+    io::println("Removing by value \"Three\"...".to_string());
+    let removed_pair_by_val = my_bimap.remove_by_value(&"Three".to_string());
+    match removed_pair_by_val {
+        option::Option::Some((k, v)) => io::println("Removed: ".to_string() + k.to_string() + " -> " + v), // Output: 3 -> Three
+        option::Option::None => io::println("Value \"Three\" not found.".to_string()),
+    }
+    io::println("Size: ".to_string() + my_bimap.len().to_string()); // 1
+
+    // 5. İteratörler (basit bir örnek)
+    io::println("\n--- Iterators ---".to_string());
+    io::println("Keys in bimap: ".to_string());
+    for key in my_bimap.keys() {
+        io::println("- ".to_string() + (*key).to_string()); // Kalan anahtar: 4
+    }
+    io::println("Values in bimap: ".to_string());
+    for value in my_bimap.values() {
+        io::println("- ".to_string() + (*value).to_string()); // Kalan değer: Two
+    }
+
+    // 6. Temizleme (clear)
+    io::println("\n--- Clearing ---".to_string());
+    my_bimap.clear();
+    io::println("Size after clear: ".to_string() + my_bimap.len().to_string()); // 0
+    io::println("Is empty after clear? ".to_string() + my_bimap.is_empty().to_string()); // true
+
+
+    io::println("Bimap example finished.".to_string());
+}
