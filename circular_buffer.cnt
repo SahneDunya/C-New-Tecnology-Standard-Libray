@@ -1,0 +1,270 @@
+// circular_buffer.cnt
+// Standart Dairesel Tampon (CircularBuffer) Modülü
+// Sabit boyutlu, FIFO prensibine uygun, dairesel bir veri yapısı.
+
+import std::vec::Vec;       // Dahili depolama için Vec
+import std::option::Option;  // Dönüş tipleri için
+import std::string::String;  // Hata mesajları için
+import std::assert;        // Hata ayıklama için
+import std::ops;           // Deref, DerefMut, Index trait'leri için
+
+/// `CircularBuffer<T>`: Sabit boyutlu, dairesel bir tampon.
+///
+/// Tampon dolduğunda, yeni elemanlar en eski elemanların üzerine yazar.
+/// FIFO (İlk Giren İlk Çıkar) prensibiyle çalışır.
+pub struct CircularBuffer<T> {
+    buffer: Vec<Option<T>>, // Elemanları depolayan Vec. Option<T> boş slotları belirtir.
+    capacity: u64,           // Tamponun maksimum kapasitesi
+    head: u64,               // Tamponun başındaki elemanın indeksi (en eski eleman)
+    tail: u64,               // Tamponun sonundaki elemanın indeksi (bir sonraki boş slot)
+    len: u64,                // Tampondaki mevcut eleman sayısı
+}
+
+impl<T> CircularBuffer<T> {
+    /// `new(capacity: u64)`: Belirtilen kapasite ile yeni, boş bir `CircularBuffer` oluşturur.
+    ///
+    /// # Panics:
+    /// Eğer kapasite 0 ise panic oluşur.
+    pub fn new(capacity: u64) -> CircularBuffer<T> {
+        std::assert::assert!(capacity > 0, "CircularBuffer capacity cannot be zero!".to_string());
+
+        // buffer'ı None ile doldurarak başlat.
+        let mut buffer_vec = Vec::with_capacity(capacity);
+        for _i in 0..capacity {
+            buffer_vec.push(Option::None);
+        }
+
+        CircularBuffer {
+            buffer: buffer_vec,
+            capacity: capacity,
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    /// `capacity(&self) -> u64`: Tamponun maksimum kapasitesini döndürür.
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    /// `len(&self) -> u64`: Tampondaki mevcut eleman sayısını döndürür.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// `is_empty(&self) -> bool`: Tamponun boş olup olmadığını kontrol eder.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// `is_full(&self) -> bool`: Tamponun dolu olup olmadığını kontrol eder.
+    pub fn is_full(&self) -> bool {
+        self.len == self.capacity
+    }
+
+    /// `push_back(&mut self, item: T)`: Bir elemanı tamponun sonuna ekler.
+    ///
+    /// Eğer tampon doluysa, en eski elemanın üzerine yazar ve onu düşürür.
+    pub fn push_back(&mut self, item: T) {
+        if self.is_full() {
+            // Tampon dolu, en eski elemanın (head'deki) üzerine yazılacak.
+            // Eski elemanı düşür (varsa).
+            if let Option::Some(old_item) = self.buffer[self.head].take() {
+                // old_item burada kapsam dışına çıktığında düşürülür.
+                // Rust'ta bu otomatik olur, CNT'de de varsayımsal Drop çağrısı.
+            }
+            // Head'i bir sonraki pozisyona ilerlet
+            self.head = (self.head + 1) % self.capacity;
+        } else {
+            // Tampon dolu değilse, uzunluğu artır.
+            self.len += 1;
+        }
+
+        // Yeni elemanı tail'e yaz
+        self.buffer[self.tail] = Option::Some(item);
+        // Tail'i bir sonraki boş pozisyona ilerlet
+        self.tail = (self.tail + 1) % self.capacity;
+    }
+
+    /// `pop_front(&mut self) -> Option<T>`: Tamponun başındaki en eski elemanı kaldırır ve döndürür.
+    ///
+    /// Eğer tampon boşsa `Option::None` döndürür.
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return Option::None;
+        }
+
+        // Head'deki elemanı al
+        let item = self.buffer[self.head].take(); // Elemanı al ve slotu None yap
+
+        // Head'i bir sonraki pozisyona ilerlet
+        self.head = (self.head + 1) % self.capacity;
+        self.len -= 1;
+
+        item
+    }
+
+    /// `front(&self) -> Option<&T>`: Tamponun başındaki en eski elemanın referansını döndürür.
+    ///
+    /// Eğer tampon boşsa `Option::None` döndürür.
+    pub fn front(&self) -> Option<&T> {
+        if self.is_empty() {
+            return Option::None;
+        }
+        self.buffer[self.head].as_ref()
+    }
+
+    /// `back(&self) -> Option<&T>`: Tamponun sonundaki en yeni elemanın referansını döndürür.
+    ///
+    /// Eğer tampon boşsa `Option::None` döndürür.
+    pub fn back(&self) -> Option<&T> {
+        if self.is_empty() {
+            return Option::None;
+        }
+        // Tail bir sonraki boş slotu gösterdiğinden, son eleman tail-1 pozisyonundadır.
+        // Eğer tail 0 ise, son eleman capacity-1'dedir.
+        let actual_tail_idx = (self.tail + self.capacity - 1) % self.capacity;
+        self.buffer[actual_tail_idx].as_ref()
+    }
+
+    /// `clear(&mut self)`: Tampondaki tüm elemanları kaldırır.
+    ///
+    /// Kapasiteyi korur. Elemanların destructor'ları çağrılır.
+    pub fn clear(&mut self) {
+        // Tüm elemanları drop et ve slotları None yap
+        // len'den head'e doğru döngü yapmak yerine, aktif slotları gez.
+        for i in 0..self.len {
+            let actual_idx = (self.head + i) % self.capacity;
+            if let Option::Some(item) = self.buffer[actual_idx].take() {
+                // item burada kapsam dışına çıktığında düşürülür.
+            }
+        }
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+    }
+
+    /// `get(&self, index: u64) -> Option<&T>`: Mantıksal indekse göre bir elemanın referansını döndürür.
+    ///
+    /// Mantıksal indeks, tamponun başından (front) itibaren sayılır.
+    /// Örneğin, `get(0)` `front()` ile aynıdır.
+    pub fn get(&self, index: u64) -> Option<&T> {
+        if index >= self.len {
+            return Option::None; // İndeks aralık dışında
+        }
+        let actual_idx = (self.head + index) % self.capacity;
+        self.buffer[actual_idx].as_ref()
+    }
+
+    /// `get_mut(&mut self, index: u64) -> Option<&mut T>`: Mantıksal indekse göre bir elemanın değişebilir referansını döndürür.
+    ///
+    /// Mantıksal indeks, tamponun başından (front) itibaren sayılır.
+    pub fn get_mut(&mut self, index: u64) -> Option<&mut T> {
+        if index >= self.len {
+            return Option::None; // İndeks aralık dışında
+        }
+        let actual_idx = (self.head + index) % self.capacity;
+        self.buffer[actual_idx].as_mut()
+    }
+}
+
+// `CircularBuffer` düşürüldüğünde tüm elemanları düşürür.
+// Vec'in kendi Drop'u zaten Option::Some içindeki T'yi düşürecektir.
+// Bu yüzden ekstra bir Drop implementasyonuna gerek yoktur.
+// Ancak `clear` metodunun çağrılması, elemanların daha erken düşürülmesini sağlar.
+impl<T> Drop for CircularBuffer<T> {
+    fn drop(&mut self) {
+        self.clear(); // Tüm elemanları düşür
+        // `self.buffer` kendisi düşürüldüğünde ayrılan belleği serbest bırakacaktır.
+    }
+}
+
+// `CircularBuffer` için `Index` implementasyonu, `buffer[index]` ile elemanlara erişim sağlar.
+// Mantıksal indeksleme (0'dan itibaren)
+impl<T> ops::Index<u64> for CircularBuffer<T> {
+    type Output = T;
+
+    fn index(&self, index: u64) -> &T {
+        // Hata durumunu get() fonksiyonuna bırakıyoruz, burada unwrap() ile panik oluşturuyoruz.
+        self.get(index).expect("CircularBuffer: index out of bounds or buffer empty".to_string())
+    }
+}
+
+// `CircularBuffer` için `IndexMut` implementasyonu, `buffer[index] = value` ile elemanlara değişebilir erişim sağlar.
+// Mantıksal indeksleme (0'dan itibaren)
+impl<T> ops::IndexMut<u64> for CircularBuffer<T> {
+    fn index_mut(&mut self, index: u64) -> &mut T {
+        // Hata durumunu get_mut() fonksiyonuna bırakıyoruz, burada unwrap() ile panik oluşturuyoruz.
+        self.get_mut(index).expect("CircularBuffer: index out of bounds or buffer empty".to_string())
+    }
+}
+
+// --- Örnek Kullanım ---
+
+import std::collections::circular_buffer;
+import std::io;
+import std::string::String;
+import std::option::Option;
+
+fn main() {
+    io::println("Starting CircularBuffer example...".to_string());
+
+    // 1. Oluşturma
+    let mut cb: circular_buffer::CircularBuffer<String> = circular_buffer::CircularBuffer::new(3);
+    io::println("Initial buffer - Length: ".to_string() + cb.len().to_string() + ", Capacity: ".to_string() + cb.capacity().to_string()); // L:0, C:3
+    io::println("Is empty: ".to_string() + cb.is_empty().to_string()); // true
+    io::println("Is full: ".to_string() + cb.is_full().to_string());   // false
+
+    // 2. Eleman Ekleme (push_back)
+    io::println("\n--- Pushing Elements ---".to_string());
+    cb.push_back("Apple".to_string());
+    io::println("Pushed 'Apple'. Length: ".to_string() + cb.len().to_string()); // L:1
+    cb.push_back("Banana".to_string());
+    io::println("Pushed 'Banana'. Length: ".to_string() + cb.len().to_string()); // L:2
+    cb.push_back("Cherry".to_string());
+    io::println("Pushed 'Cherry'. Length: ".to_string() + cb.len().to_string()); // L:3
+    io::println("Is full: ".to_string() + cb.is_full().to_string()); // true
+
+    // Tampon dolduğunda üzerine yazma
+    io::println("Pushed 'Date' (overwrites 'Apple')".to_string());
+    cb.push_back("Date".to_string()); // "Apple" düşürülür.
+    io::println("Length: ".to_string() + cb.len().to_string()); // L:3 (hala)
+
+    // 3. Elemanlara Erişim (front, back, get, Index)
+    io::println("\n--- Accessing Elements ---".to_string());
+    io::println("Front: ".to_string() + cb.front().unwrap().clone()); // Banana (eski Apple yerine)
+    io::println("Back: ".to_string() + cb.back().unwrap().clone());   // Date
+
+    io::println("Element at index 0 (front): ".to_string() + cb[0].clone()); // Banana
+    io::println("Element at index 1: ".to_string() + cb[1].clone());         // Cherry
+    io::println("Element at index 2 (back): ".to_string() + cb[2].clone());  // Date
+
+    // 4. Eleman Kaldırma (pop_front)
+    io::println("\n--- Popping Elements ---".to_string());
+    let popped_item = cb.pop_front();
+    match popped_item {
+        Option::Some(item) => io::println("Popped: ".to_string() + item), // Banana
+        Option::None => io::println("Buffer was empty.".to_string()),
+    }
+    io::println("Length: ".to_string() + cb.len().to_string()); // L:2
+    io::println("Front after pop: ".to_string() + cb.front().unwrap().clone()); // Cherry
+
+    cb.push_back("Elderberry".to_string()); // Tampon şimdi: Cherry, Date, Elderberry
+    io::println("Pushed 'Elderberry'. Length: ".to_string() + cb.len().to_string()); // L:3
+
+    // 5. Değişken Erişim (IndexMut)
+    io::println("\n--- Mutating Elements ---".to_string());
+    io::println("Before mutation: ".to_string() + cb[0].clone()); // Cherry
+    cb[0] = "Fig".to_string(); // Cherry'yi 'Fig' ile değiştir
+    io::println("After mutation: ".to_string() + cb[0].clone());  // Fig
+
+    // 6. Temizleme (clear)
+    io::println("\n--- Clearing Buffer ---".to_string());
+    cb.clear();
+    io::println("After clear - Length: ".to_string() + cb.len().to_string()); // L:0
+    io::println("Is empty: ".to_string() + cb.is_empty().to_string()); // true
+    io::println("Front after clear: ".to_string() + cb.front().map_or("None".to_string(), |s| s.clone())); // None
+
+    io::println("CircularBuffer example finished.".to_string());
+}
