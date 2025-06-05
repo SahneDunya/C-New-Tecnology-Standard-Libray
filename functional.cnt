@@ -1,0 +1,185 @@
+// functional.cnt
+// Standart Fonksiyonel Programlama Modülü
+// Fonksiyonel nesneler, bağlayıcılar ve diğer fonksiyonel yardımcılar sağlar.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için (varsa)
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Fonksiyonel işlemler sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Fonksiyonel nesne boş veya çağrılabilir değil.
+    BadFunctionCall(string);
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 1. Fonksiyon Nesnesi (std::function benzeri) ---
+
+// CNT'nin "fonksiyon pointer" veya "closure" mekanizması yoksa,
+// bir "fonksiyon nesnesi" (function object) veya "sanal metot" (virtual method) benzeri bir yaklaşım
+// gerekecektir. Bu, oldukça karmaşık olabilir.
+// Basit bir başlangıç olarak, argüman almayan ve bir değer döndüren bir "Callable" arayüzü tanımlayalım.
+// Bu, dinamik dispatch gerektirebilir (eğer CNT destekliyorsa).
+
+// Eğer CNT'de bir `interface` veya `trait` sistemi varsa, bu daha şık çözülebilir.
+// Örneğin:
+// pub trait Callable0<R> {
+//    fn call(&self) -> R;
+// }
+// pub trait Callable1<R, A1> {
+//    fn call(&self, arg1: A1) -> R;
+// }
+// Ve bu trait'leri uygulayan struct'lar.
+
+// Şimdilik, CNT'nin "fonksiyon pointer" benzeri bir mekanizmayı `raw_ptr` ile desteklediğini varsayacağız.
+// Yani `fn_ptr<Args..., ReturnType>` gibi bir tür varsayıyoruz.
+
+/// `Function<R, Args...>` Struct'ı: Herhangi bir çağrılabilir nesneyi (fonksiyon pointer'ı, lambda, closure)
+/// tutabilen ve belirli bir imza ile çağrılabilen bir tip-silici sarmalayıcı.
+/// Bu taslak, temel bir fonksiyon pointer'ı sarmalayıcı olarak hizmet eder.
+/// Gerçek `std::function` çok daha karmaşıktır.
+///
+/// # Tip Parametreleri
+/// - `R`: Fonksiyonun dönüş tipi.
+/// - `Args...`: Fonksiyonun argüman tipleri (variadic generics varsayılmıştır).
+///
+/// **NOT**: CNT'nin variadic generics'i ve fonksiyon pointer'ları desteği bu kısım için kritiktir.
+/// Basitlik adına, şimdilik sadece tek bir argüman ve dönüş tipi olan bir `Function` türü tanımlayacağız.
+/// Daha fazla esneklik için, farklı argüman sayıları için farklı `Function` türleri gerekebilir.
+pub struct Function<R, A1> {
+    // Fonksiyon pointer'ı (veya closure'ın dahili işaretçisi)
+    // Bu, CNT'nin fonksiyon pointer'larını nasıl temsil ettiğine bağlı olacaktır.
+    // 'raw_ptr<void>' generic bir gösterimdir.
+    // Asıl fonksiyon çağrısı `invoke` metodu içinde gerçekleştirilecektir.
+    // Bu, `raw_ptr<fn(A1) -> R>` şeklinde olmalıydı.
+    // CNT'nin fonksiyon pointer'ı tipi varsayılmaktadır.
+    fn_ptr: raw_ptr<void>; // Pointer to the underlying callable
+    // Context pointer for closures/captures (eğer closure destekleniyorsa)
+    context_ptr: raw_ptr<void>; // Pointer to captured variables
+}
+
+/// Yeni bir `Function` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `func_ptr`: Çağrılabilir bir fonksiyonun pointer'ı.
+///
+/// # Dönüş Değeri
+/// `Function<R, A1>`: Oluşturulan fonksiyon nesnesi.
+pub fn new_function<R, A1>(func_ptr: raw_ptr<fn(A1) -> R>) -> Function<R, A1> {
+    Function {
+        fn_ptr: func_ptr as raw_ptr<void>, // Fonksiyon pointer'ını generic'e cast et
+        context_ptr: null_ptr::<void>(),   // Şimdilik bağlama/context yok
+    }
+}
+
+/// `Function` nesnesini çağırır.
+///
+/// # Parametreler
+/// - `func`: Çağrılacak `Function` nesnesi.
+/// - `arg1`: Fonksiyona iletilecek argüman.
+///
+/// # Dönüş Değeri
+/// `Result<R, Error>`: Fonksiyonun dönüş değeri veya hata.
+pub fn invoke<R, A1>(func: &Function<R, A1>, arg1: A1) -> Result<R, Error> {
+    if func.fn_ptr == null_ptr() {
+        return Result::Err(Error::BadFunctionCall("Attempted to call an empty or null function object".to_string()));
+    }
+    // Bu kısım, CNT'nin `raw_ptr<void>`'den fonksiyon pointer'ına nasıl güvenli bir şekilde dönüştürülüp
+    // çağrılabileceğine bağlıdır. Bu, genellikle güvensiz (unsafe) bir işlem olacaktır.
+    // Varsayalım ki, `cast_and_call_fn_ptr` gibi bir dahili mekanizma var.
+    // let real_func_ptr = func.fn_ptr as raw_ptr<fn(A1) -> R>;
+    // return Result::Ok(real_func_ptr(arg1)); // Doğrudan çağrı
+
+    // Placeholder for actual function pointer invocation
+    // Bu, CNT'nin FFI (Foreign Function Interface) veya doğrudan fonksiyon pointer'ı desteğine bağlı.
+    // Şimdilik, sadece konsepti gösteriyoruz.
+    // Bu kısım, derleyicinin veya runtime'ın bu tür bir dinamik çağrıyı nasıl gerçekleştireceğini gerektirir.
+    // Örneğin, belirli bir imza için özel bir `call_fn_ptr` intrinsics'i.
+    Result::Err(Error::Other("Function invocation not fully implemented in current CNT model".to_string()))
+}
+
+
+// --- 2. Bağlayıcılar (Bind benzeri) ---
+
+// `bind` fonksiyonları, belirli argümanları bir fonksiyona "bağlayarak" (currying) yeni bir fonksiyon oluşturur.
+// Bu, genellikle closure'lar veya lambda'lar ile daha kolay yapılır.
+// CNT'de bunlar yoksa, karmaşık bir adaptör yapısı gerekecektir.
+
+/// Bir fonksiyonu belirli bir argümanla bağlayarak yeni bir argümansız fonksiyon döndürür.
+///
+/// # Parametreler
+/// - `func_ptr`: Bağlanacak fonksiyonun pointer'ı.
+/// - `bound_arg`: Fonksiyona bağlanacak argüman değeri (kopyalanır).
+///
+/// # Tip Parametreleri
+/// - `R`: Orijinal fonksiyonun dönüş tipi.
+/// - `A1`: Orijinal fonksiyonun argüman tipi.
+///
+/// # Dönüş Değeri
+/// `Result<Function<R, void>, Error>`: Bağlanmış argümanla yeni bir `Function` nesnesi.
+/// (Burada `void` argüman yokluğunu temsil ediyor).
+///
+/// **NOT**: Bu implementasyon oldukça basitleştirilmiştir. Gerçek bir `bind`,
+/// birden fazla argümanı, yer tutucuları vb. destekler ve karmaşık bir dahili duruma ihtiyaç duyar.
+pub fn bind<R, A1>(func_ptr: raw_ptr<fn(A1) -> R>, bound_arg: A1) -> Result<Function<R, void>, Error> {
+    // Bu noktada, bu "bağlanmış" fonksiyonu oluşturmak için bir "closure" veya "lambda"ya ihtiyacımız var.
+    // CNT'nin doğrudan closure desteği yoksa, dinamik olarak bellek tahsis edip
+    // bu state'i (`bound_arg`) tutan bir "thunk" veya "trampoline" fonksiyonu oluşturmak gerekir.
+    // Bu, düşük seviyeli ve karmaşık bir operasyondur.
+
+    // Basit bir simülasyon: Bağlanmış argümanı tutan bir struct oluşturup,
+    // bu struct'ın bir metodunu `Function` nesnesi olarak sarmalamak.
+    // Ancak `Function` yapısı sadece fonksiyon pointer'larını destekliyor.
+
+    // Eğer CNT'de closure'lar yoksa, bu fonksiyonun pratik bir implementasyonu oldukça zor olacaktır.
+    // Bu nedenle, bu kısmı kavramsal olarak bırakıyoruz.
+    // Bu işlevsellik, CNT'nin dil düzeyinde closure'ları veya dinamik kod oluşturmayı desteklemesini gerektirir.
+    Result::Err(Error::Other("`bind` requires advanced language features (e.g., closures) not fully modeled in this simple CNT template".to_string()))
+}
+
+// --- 3. Genel Fonksiyonel Yardımcılar ---
+
+// `compose` ve `pipe` gibi fonksiyonlar, fonksiyonları birbirine zincirlemek için kullanılır.
+// Bunlar da genellikle closure veya lambda desteğiyle daha kolay implemente edilir.
+
+/// İki fonksiyonu birleştirir: `compose(f, g)` = `f(g(x))`
+///
+/// # Parametreler
+/// - `f`: İlk çağrılacak fonksiyon (g'nin sonucunu alır).
+/// - `g`: İkinci çağrılacak fonksiyon (giriş argümanını alır).
+///
+/// # Dönüş Değeri
+/// `Result<Function<R_out, A_in>, Error>`: Birleştirilmiş yeni bir `Function` nesnesi.
+///
+/// # Tip Parametreleri
+/// - `R_out`: `f`'nin dönüş tipi.
+/// - `R_mid`: `g`'nin dönüş tipi ve `f`'nin argüman tipi.
+/// - `A_in`: `g`'nin argüman tipi.
+pub fn compose<R_out, R_mid, A_in>(
+    f: raw_ptr<fn(R_mid) -> R_out>,
+    g: raw_ptr<fn(A_in) -> R_mid>
+) -> Result<Function<R_out, A_in>, Error> {
+    // Bu da bir closure veya dinamik fonksiyon oluşturma gerektirir.
+    // Yeni bir fonksiyon oluşturmalıyız ki o da `g`'yi çağırıp sonucunu `f`'ye versin.
+    // CNT'nin "anonim fonksiyonlar" veya "lambda" desteği yoksa, bu mümkün değil.
+    Result::Err(Error::Other("`compose` requires advanced language features (e.g., closures) not fully modeled in this simple CNT template".to_string()))
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
