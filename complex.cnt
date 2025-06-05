@@ -1,0 +1,196 @@
+// complex.cnt
+// Standart Karmaşık Sayı Modülü
+// Karmaşık sayılarla çalışmak için yapı ve fonksiyonlar sağlar.
+
+import std::math;   // cos, sin, atan2, sqrt, exp, log gibi matematiksel fonksiyonlar için
+import std::float;  // NaN, Infinity kontrolü, epsilon karşılaştırmaları için
+
+/// `Complex` Struct'ı: Bir karmaşık sayıyı temsil eder.
+/// Gerçek ve sanal kısımları `double` tipiyle saklar.
+pub struct Complex {
+    /// Karmaşık sayının gerçek kısmı.
+    re: double;
+    /// Karmaşık sayının sanal kısmı.
+    im: double;
+}
+
+/// Yeni bir karmaşık sayı oluşturur.
+///
+/// # Parametreler
+/// - `real`: Karmaşık sayının gerçek kısmı.
+/// - `imag`: Karmaşık sayının sanal kısmı.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `Complex` nesnesi.
+pub fn new(real: double, imag: double) -> Complex {
+    Complex {
+        re: real,
+        im: imag,
+    }
+}
+
+/// Sadece gerçek kısmı olan bir karmaşık sayı oluşturur (sanal kısmı 0).
+pub fn from_real(real: double) -> Complex {
+    Complex {
+        re: real,
+        im: 0.0,
+    }
+}
+
+/// Sadece sanal kısmı olan bir karmaşık sayı oluşturur (gerçek kısmı 0).
+pub fn from_imag(imag: double) -> Complex {
+    Complex {
+        re: 0.0,
+        im: imag,
+    }
+}
+
+// --- 1. Temel Aritmetik İşlemler ---
+
+/// İki karmaşık sayıyı toplar.
+/// (a + bi) + (c + di) = (a + c) + (b + d)i
+pub fn add(z1: Complex, z2: Complex) -> Complex {
+    new(z1.re + z2.re, z1.im + z2.im)
+}
+
+/// Bir karmaşık sayıdan diğerini çıkarır.
+/// (a + bi) - (c + di) = (a - c) + (b - d)i
+pub fn sub(z1: Complex, z2: Complex) -> Complex {
+    new(z1.re - z2.re, z1.im - z2.im)
+}
+
+/// İki karmaşık sayıyı çarpar.
+/// (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+pub fn mul(z1: Complex, z2: Complex) -> Complex {
+    let real_part = z1.re * z2.re - z1.im * z2.im;
+    let imag_part = z1.re * z2.im + z1.im * z2.re;
+    new(real_part, imag_part)
+}
+
+/// Bir karmaşık sayıyı bir skaler (`double`) ile çarpar.
+pub fn mul_scalar(z: Complex, s: double) -> Complex {
+    new(z.re * s, z.im * s)
+}
+
+/// İki karmaşık sayıyı böler.
+/// (a + bi) / (c + di) = [(ac + bd) + (bc - ad)i] / (c^2 + d^2)
+/// Bölme işleminde paydanın sıfır olup olmadığı kontrol edilmelidir.
+pub fn div(z1: Complex, z2: Complex) -> Complex {
+    let denominator = z2.re * z2.re + z2.im * z2.im;
+
+    // Sıfıra bölme kontrolü
+    if float::almost_equal_d(denominator, 0.0, limits::DOUBLE_EPSILON) {
+        // Hata durumunu veya özel bir değeri (NaN/Infinity) döndür
+        // CNT'de hata işleme mekanizmasına göre Result<Complex, Error> döndürülebilir.
+        // Şimdilik NaN/Infinity birleşimi döndürüyoruz.
+        return new(float::NAN_D, float::NAN_D);
+    }
+
+    let real_part = (z1.re * z2.re + z1.im * z2.im) / denominator;
+    let imag_part = (z1.im * z2.re - z1.re * z2.im) / denominator;
+    new(real_part, imag_part)
+}
+
+/// Bir karmaşık sayıyı bir skaler (`double`) ile böler.
+pub fn div_scalar(z: Complex, s: double) -> Complex {
+    if float::almost_equal_d(s, 0.0, limits::DOUBLE_EPSILON) {
+        return new(float::NAN_D, float::NAN_D);
+    }
+    new(z.re / s, z.im / s)
+}
+
+/// Bir karmaşık sayının negatifini döndürür.
+pub fn negate(z: Complex) -> Complex {
+    new(-z.re, -z.im)
+}
+
+// --- 2. Karmaşık Sayı Özellikleri ---
+
+/// Bir karmaşık sayının eşleniğini (conjugate) döndürür.
+/// (a + bi)'nin eşleniği (a - bi)'dir.
+pub fn conjugate(z: Complex) -> Complex {
+    new(z.re, -z.im)
+}
+
+/// Bir karmaşık sayının mutlak değerini (magnitude veya modül) döndürür.
+/// |z| = sqrt(re^2 + im^2)
+pub fn abs(z: Complex) -> double {
+    // Aşırı akmayı önlemek için hipotenüs algoritmasını kullanabiliriz.
+    // Ancak basitleştirilmiş formül kullanılmıştır. math::hypot varsa daha iyidir.
+    math::sqrt(z.re * z.re + z.im * z.im)
+}
+
+/// Bir karmaşık sayının argümanını (açısını) döndürür (radyan cinsinden).
+/// Arg(z) = atan2(im, re)
+pub fn arg(z: Complex) -> double {
+    math::atan2(z.im, z.re)
+}
+
+/// Bir karmaşık sayının karekökünü döndürür.
+/// Birden fazla karekök vardır, genellikle ana değer döndürülür.
+pub fn sqrt(z: Complex) -> Complex {
+    if z.re == 0.0 && z.im == 0.0 {
+        return new(0.0, 0.0);
+    }
+
+    let magnitude = abs(z);
+    let real_part = math::sqrt((magnitude + z.re) / 2.0);
+    let imag_part = math::sqrt((magnitude - z.re) / 2.0);
+
+    // İşarete dikkat et
+    if z.im < 0.0 {
+        new(real_part, -imag_part)
+    } else {
+        new(real_part, imag_part)
+    }
+}
+
+// --- 3. Üstel ve Logaritmik Fonksiyonlar ---
+
+/// Karmaşık bir sayının üstelini (e^z) hesaplar.
+/// e^(x+yi) = e^x * (cos y + i sin y)
+pub fn exp(z: Complex) -> Complex {
+    let r = math::exp(z.re);
+    new(r * math::cos(z.im), r * math::sin(z.im))
+}
+
+/// Karmaşık bir sayının doğal logaritmasını (ln z) hesaplar.
+/// ln z = ln |z| + i Arg(z)
+pub fn log(z: Complex) -> Complex {
+    new(math::log(abs(z)), arg(z))
+}
+
+// --- 4. Trigonometrik Fonksiyonlar ---
+// Not: Karmaşık trigonometrik fonksiyonlar genellikle daha karmaşıktır.
+// Basitlik adına burada sadece birkaç örnek verilmiştir.
+
+/// Bir karmaşık sayının sinüsünü hesaplar.
+/// sin(z) = sin(re)cosh(im) + i cos(re)sinh(im)
+pub fn sin(z: Complex) -> Complex {
+    new(math::sin(z.re) * math::cosh(z.im), math::cos(z.re) * math::sinh(z.im))
+}
+
+/// Bir karmaşık sayının kosinüsünü hesaplar.
+/// cos(z) = cos(re)cosh(im) - i sin(re)sinh(im)
+pub fn cos(z: Complex) -> Complex {
+    new(math::cos(z.re) * math::cosh(z.im), -math::sin(z.re) * math::sinh(z.im))
+}
+
+
+// --- 5. Karşılaştırmalar ---
+
+/// İki karmaşık sayının eşit olup olmadığını kontrol eder.
+/// Kayan nokta hassasiyeti nedeniyle doğrudan eşitlik kontrolü yerine bir tolerans kullanılır.
+pub fn equals(z1: Complex, z2: Complex) -> bool {
+    float::almost_equal_d(z1.re, z2.re, limits::DOUBLE_EPSILON) &&
+    float::almost_equal_d(z1.im, z2.im, limits::DOUBLE_EPSILON)
+}
+
+// --- 6. Sabitler ---
+
+/// Sanal birim `i` (0 + 1i).
+pub const I: Complex = Complex { re: 0.0, im: 1.0 };
+/// Sıfır karmaşık sayısı (0 + 0i).
+pub const ZERO: Complex = Complex { re: 0.0, im: 0.0 };
+/// Bir karmaşık sayısı (1 + 0i).
+pub const ONE: Complex = Complex { re: 1.0, im: 0.0 };
