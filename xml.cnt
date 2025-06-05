@@ -1,0 +1,225 @@
+// xml.cnt
+// Standart XML Ayrıştırma ve Oluşturma modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<XmlNode>, Map<string, string> (öznitelikler için)
+
+// Harici C veya optimize edilmiş XML ayrıştırma/oluşturma kütüphanelerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, ham XML string'lerini dahili XmlNode temsilimize dönüştürür ve tersini yapar.
+extern fn _cnt_xml_parse(xml_string: &string) -> _cnt_Result_XmlNode_xml_Error; // Kök düğümü döndürür
+extern fn _cnt_xml_serialize(xml_node: &XmlNode) -> _cnt_Result_string_xml_Error;
+
+
+/// `XmlNodeType` Enum'u: Bir XML düğümünün tipini temsil eder.
+pub enum XmlNodeType {
+    /// Bir XML öğe düğümü (örn. <element>).
+    Element;
+    /// Bir metin düğümü (öğeler arasındaki metin).
+    Text;
+    /// Bir yorum düğümü (örn. ).
+    Comment;
+    /// Bir CDATA bölümü (örn. <![CDATA[ content ]]>).
+    CData;
+    /// Bir belge türü bildirimi (örn. <!DOCTYPE ...>).
+    DocType;
+    /// Bir işlem talimatı (örn. <?php ... ?>).
+    ProcessingInstruction;
+    /// Bir XML bildirimi (örn. <?xml version="1.0"?>).
+    Declaration;
+}
+
+/// `XmlNode` Struct'ı: Bir XML ağacındaki tek bir düğümü temsil eder.
+pub struct XmlNode {
+    /// Düğümün tipi.
+    node_type: XmlNodeType;
+    /// Düğümün adı (Element'ler için etiket adı).
+    name: string;
+    /// Düğümün değeri (Text, Comment, CData için içerik).
+    value: string;
+    /// Element'ler için öznitelikler (ad-değer çiftleri).
+    attributes: collections::Map<string, string>;
+    /// Düğümün alt düğümleri (Element'ler için geçerlidir).
+    children: collections::List<XmlNode>;
+    /// Kök düğümün belge bildirimi (yalnızca Declaration düğümü için kullanılır).
+    // declaration: Option<Declaration>; // Eğer Declaration ayrı bir struct ise
+}
+
+/// `Error` Enum'u: XML ayrıştırma veya oluşturma sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz XML formatı.
+    ParseError(string);
+    /// Geçersiz veri tipi veya dönüştürme hatası.
+    TypeError(string);
+    /// Düğüm bulunamadı veya geçersiz yol.
+    NodeNotFoundError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+/// Bir XML string'ini ayrıştırır ve bir `XmlNode` ağacının kökünü döndürür.
+///
+/// # Parametreler
+/// - `xml_string`: Ayrıştırılacak XML verisini içeren string referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa XML ağacının kök `XmlNode`'u içeren `Result::Ok(XmlNode)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn parse(xml_string: &string) -> Result<XmlNode, Error> {
+    _cnt_xml_parse(xml_string)
+}
+
+/// Bir `XmlNode` ağacını XML formatında bir string'e dönüştürür (serileştirir).
+///
+/// # Parametreler
+/// - `xml_node`: Serileştirilecek `XmlNode` nesnesinin referansı (kök düğüm).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa XML string'ini içeren `Result::Ok(string)`,
+/// serileştirme hatası oluşursa `Result::Err(Error)`.
+pub fn serialize(xml_node: &XmlNode) -> Result<string, Error> {
+    _cnt_xml_serialize(xml_node)
+}
+
+// --- XmlNode Oluşturma Yardımcıları ---
+
+/// Yeni bir Element `XmlNode` oluşturur.
+pub fn new_element(name: string) -> XmlNode {
+    XmlNode {
+        node_type: XmlNodeType::Element,
+        name: name,
+        value: "".to_string(),
+        attributes: collections::Map::new(),
+        children: collections::List::new(),
+    }
+}
+
+/// Yeni bir Text `XmlNode` oluşturur.
+pub fn new_text(value: string) -> XmlNode {
+    XmlNode {
+        node_type: XmlNodeType::Text,
+        name: "".to_string(), // Metin düğümleri için isim yok
+        value: value,
+        attributes: collections::Map::new(),
+        children: collections::List::new(),
+    }
+}
+
+/// Yeni bir Comment `XmlNode` oluşturur.
+pub fn new_comment(value: string) -> XmlNode {
+    XmlNode {
+        node_type: XmlNodeType::Comment,
+        name: "".to_string(),
+        value: value,
+        attributes: collections::Map::new(),
+        children: collections::List::new(),
+    }
+}
+
+// Diğer düğüm tipleri için new_cdata, new_doctype vb. eklenebilir.
+
+
+// --- XmlNode Üzerinde İşlemler ---
+
+/// Bir Element düğümüne öznitelik ekler veya günceller.
+///
+/// # Parametreler
+/// - `element_node`: Özniteliğin ekleneceği mutable Element düğüm referansı.
+/// - `attr_name`: Özniteliğin adı.
+/// - `attr_value`: Özniteliğin değeri.
+pub fn add_attribute(element_node: &mut XmlNode, attr_name: string, attr_value: string) -> Result<void, Error> {
+    if element_node.node_type != XmlNodeType::Element {
+        return Result::Err(Error::TypeError("Cannot add attribute to non-Element node".to_string()));
+    }
+    collections::insert(&mut element_node.attributes, attr_name, attr_value);
+    Result::Ok(())
+}
+
+/// Bir Element düğümüne alt düğüm ekler.
+///
+/// # Parametreler
+/// - `parent_node`: Alt düğümün ekleneceği mutable Element düğüm referansı.
+/// - `child_node`: Eklenecek alt düğüm (sahipliği parent_node'a taşınır).
+pub fn add_child(parent_node: &mut XmlNode, child_node: XmlNode) -> Result<void, Error> {
+    if parent_node.node_type != XmlNodeType::Element {
+        return Result::Err(Error::TypeError("Cannot add child to non-Element node".to_string()));
+    }
+    collections::push(&mut parent_node.children, child_node);
+    Result::Ok(())
+}
+
+/// Bir düğümün öznitelik değerini döndürür.
+///
+/// # Parametreler
+/// - `element_node`: Özniteliğin aranacağı Element düğüm referansı.
+/// - `attr_name`: Özniteliğin adı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa öznitelik değeri içeren `Result::Ok(&string)`,
+/// düğüm Element değilse veya öznitelik yoksa `Result::Err(Error::NodeNotFoundError)`.
+pub fn get_attribute(element_node: &XmlNode, attr_name: &string) -> Result<&string, Error> {
+    if element_node.node_type != XmlNodeType::Element {
+        return Result::Err(Error::TypeError("Cannot get attribute from non-Element node".to_string()));
+    }
+    collections::get(&element_node.attributes, attr_name)
+        .map_or(Result::Err(Error::NodeNotFoundError("Attribute not found".to_string())), |s| Result::Ok(s))
+}
+
+/// Bir düğümün doğrudan alt düğümlerini döndürür.
+///
+/// # Parametreler
+/// - `node`: Alt düğümleri alınacak düğüm referansı.
+///
+/// # Dönüş Değeri
+/// Alt düğümlerin bir listesi içeren `Result::Ok(&List<XmlNode>)`.
+pub fn get_children(node: &XmlNode) -> &collections::List<XmlNode> {
+    &node.children
+}
+
+/// Bir Element düğümünün alt düğümlerini belirli bir isme göre filtreler.
+///
+/// # Parametreler
+/// - `element_node`: Alt düğümlerin filtreleneceği Element düğüm referansı.
+/// - `child_name`: Aranacak alt düğümün ismi.
+///
+/// # Dönüş Değeri
+/// İsme uyan alt düğümlerin bir listesi (referansları) içeren `List<&XmlNode>`.
+pub fn find_children_by_name(element_node: &XmlNode, child_name: &string) -> collections::List<&XmlNode> {
+    let mut matching_children = collections::List::new();
+    for child in collections::iter(&element_node.children) {
+        if child.node_type == XmlNodeType::Element && &child.name == child_name {
+            collections::push(&mut matching_children, child);
+        }
+    }
+    matching_children
+}
+
+/// Bir düğümün metin içeriğini (Text düğümlerini birleştirerek) döndürür.
+///
+/// # Parametreler
+/// - `node`: Metin içeriği alınacak düğüm referansı.
+///
+/// # Dönüş Değeri
+/// Metin içeriği içeren `string`.
+pub fn get_text_content(node: &XmlNode) -> string {
+    let mut content = "".to_string();
+    if node.node_type == XmlNodeType::Text || node.node_type == XmlNodeType::CData || node.node_type == XmlNodeType::Comment {
+        content = node.value.to_string();
+    } else if node.node_type == XmlNodeType::Element {
+        for child in collections::iter(&node.children) {
+            content = content + &get_text_content(child);
+        }
+    }
+    content
+}
+
+// --- XPath veya CSS Seçici Benzeri İşlevler (Gelecekteki Eklentiler) ---
+// Daha karmaşık XML sorguları için Xpath benzeri bir dil veya DOM navigasyon yardımcıları.
+// pub fn select_nodes(root: &XmlNode, xpath_expression: &string) -> Result<collections::List<&XmlNode>, Error>;
