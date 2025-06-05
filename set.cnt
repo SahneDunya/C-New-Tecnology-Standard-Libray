@@ -1,0 +1,404 @@
+// set.cnt
+// Standart Sıralı Küme (Set) Modülü
+// Benzersiz elemanları sıralı bir şekilde saklar (genellikle Dengeleyici İkili Arama Ağacı ile).
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// Eleman karşılaştırma için bir 'Compare' trait'i veya callback fonksiyonu gereklidir.
+// Varsayılan olarak, temel tipler için '<' operatörünün kullanıldığı varsayılmıştır.
+// Kullanıcı tanımlı tipler için bir 'compare' fonksiyonu sağlanmalıdır.
+
+/// `Error` Enum'u: Set işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Eleman bulunamadı.
+    ElementNotFound(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// Düğümün rengi (Kırmızı-Siyah Ağaç için).
+pub enum Color {
+    Red;
+    Black;
+}
+
+/// `Node<T>` Struct'ı: Set'teki bir düğümü temsil eder.
+pub struct Node<T> {
+    value: T;
+    color: Color;
+    parent: raw_ptr<Node<T>>;
+    left: raw_ptr<Node<T>>;
+    right: raw_ptr<Node<T>>;
+}
+
+/// `Set<T>` Struct'ı: Benzersiz elemanları sıralı olarak saklayan bir küme.
+/// Kırmızı-Siyah Ağaç (Red-Black Tree) prensiplerine göre tasarlanmıştır.
+///
+/// # Tip Parametreleri
+/// - `T`: Set'te saklanacak elemanların tipi (sıralanabilir ve eşitlik kontrolü yapılabilir olmalı).
+pub struct Set<T> {
+    /// Ağacın köküne işaretçi.
+    root: raw_ptr<Node<T>>;
+    /// Set'teki eleman sayısı.
+    len: int;
+    /// Sentinel düğüm (null düğümler yerine kullanılır, belleği azaltır ve kod karmaşıklığını düşürür).
+    nil: raw_ptr<Node<T>>;
+}
+
+// --- 1. Set Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `Set` oluşturur.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `Set<T>` nesnesi.
+pub fn new<T>() -> Result<Set<T>, Error> {
+    // Sentinel (nil) düğümü tahsis et. Bu düğüm her zaman siyahtır ve yaprakları temsil eder.
+    match alloc::allocate(size_of<Node<T>>()) {
+        Result::Ok(nil_ptr_u8) => {
+            let nil_node_ptr = nil_ptr_u8 as raw_ptr<Node<T>>;
+            // Sentinel düğümün değeri önemsizdir, sadece renk ve işaretçileri önemlidir.
+            raw_ptr_write(nil_node_ptr, 0, Node {
+                value: default_value::<T>(), // T için varsayılan değer sağlanmalı
+                color: Color::Black,
+                parent: null_ptr(),
+                left: null_ptr(),
+                right: null_ptr(),
+            });
+
+            Result::Ok(Set {
+                root: nil_node_ptr, // Başlangıçta kök nil'e işaret eder
+                len: 0,
+                nil: nil_node_ptr,
+            })
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate sentinel node for set: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Node<T>` düğümünü bellekte tahsis eder.
+fn allocate_node<T>(value: T, color: Color, nil_node: raw_ptr<Node<T>>) -> Result<raw_ptr<Node<T>>, Error> {
+    match alloc::allocate(size_of<Node<T>>()) {
+        Result::Ok(ptr_u8) => {
+            let node_ptr = ptr_u8 as raw_ptr<Node<T>>;
+            raw_ptr_write(node_ptr, 0, Node {
+                value: value,
+                color: color,
+                parent: nil_node, // Yeni düğümün ebeveyni başlangıçta nil
+                left: nil_node,   // Yaprakları başlangıçta nil
+                right: nil_node,
+            });
+            Result::Ok(node_ptr)
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate set node: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Node<T>` düğümünün belleğini serbest bırakır.
+fn deallocate_node<T>(node_ptr: raw_ptr<Node<T>>) -> void {
+    if node_ptr != null_ptr() {
+        // T için destructors çağrılmalı mı?
+        alloc::deallocate(node_ptr as raw_ptr<u8>, size_of<Node<T>>());
+    }
+}
+
+/// Bir `Set`'in tüm bellek kaynaklarını serbest bırakır.
+/// Tüm düğümleri (nil düğüm dahil) temizler.
+pub fn drop<T>(set: &mut Set<T>) -> void {
+    fn drop_recursive<T>(node_ptr: raw_ptr<Node<T>>, nil_node: raw_ptr<Node<T>>) -> void {
+        if node_ptr == nil_node { return; }
+        let node = raw_ptr_read(node_ptr, 0);
+        drop_recursive(node.left, nil_node);
+        drop_recursive(node.right, nil_node);
+        deallocate_node(node_ptr);
+    }
+
+    drop_recursive(set.root, set.nil); // Kökten başlayarak tüm ağacı sil
+    deallocate_node(set.nil); // Sentinel düğümü de sil
+    set.root = null_ptr();
+    set.nil = null_ptr();
+    set.len = 0;
+}
+
+// --- 2. Kırmızı-Siyah Ağaç Yardımcı Fonksiyonları (Dahili) ---
+
+// Sol Rotasyon (Left-Rotate)
+fn left_rotate<T>(set: &mut Set<T>, x_ptr: raw_ptr<Node<T>>) -> void {
+    let mut x = raw_ptr_read(x_ptr, 0);
+    let y_ptr = x.right;
+    let mut y = raw_ptr_read(y_ptr, 0);
+
+    x.right = y.left;
+    if y.left != set.nil {
+        let mut y_left = raw_ptr_read(y.left, 0);
+        y_left.parent = x_ptr;
+        raw_ptr_write(y.left, 0, y_left);
+    }
+    y.parent = x.parent;
+
+    if x.parent == set.nil {
+        set.root = y_ptr;
+    } else {
+        let mut x_parent = raw_ptr_read(x.parent, 0);
+        if x_ptr == x_parent.left {
+            x_parent.left = y_ptr;
+        } else {
+            x_parent.right = y_ptr;
+        }
+        raw_ptr_write(x.parent, 0, x_parent);
+    }
+    y.left = x_ptr;
+    x.parent = y_ptr;
+
+    raw_ptr_write(x_ptr, 0, x);
+    raw_ptr_write(y_ptr, 0, y);
+}
+
+// Sağ Rotasyon (Right-Rotate)
+fn right_rotate<T>(set: &mut Set<T>, x_ptr: raw_ptr<Node<T>>) -> void {
+    let mut x = raw_ptr_read(x_ptr, 0);
+    let y_ptr = x.left;
+    let mut y = raw_ptr_read(y_ptr, 0);
+
+    x.left = y.right;
+    if y.right != set.nil {
+        let mut y_right = raw_ptr_read(y.right, 0);
+        y_right.parent = x_ptr;
+        raw_ptr_write(y.right, 0, y_right);
+    }
+    y.parent = x.parent;
+
+    if x.parent == set.nil {
+        set.root = y_ptr;
+    } else {
+        let mut x_parent = raw_ptr_read(x.parent, 0);
+        if x_ptr == x_parent.right {
+            x_parent.right = y_ptr;
+        } else {
+            x_parent.left = y_ptr;
+        }
+        raw_ptr_write(x.parent, 0, x_parent);
+    }
+    y.right = x_ptr;
+    x.parent = y_ptr;
+
+    raw_ptr_write(x_ptr, 0, x);
+    raw_ptr_write(y_ptr, 0, y);
+}
+
+// Kırmızı-Siyah Ağaç Ekleme Düzeltme (RB-Insert-Fixup)
+fn rb_insert_fixup<T>(set: &mut Set<T>, z_ptr: raw_ptr<Node<T>>) -> void {
+    let mut z = raw_ptr_read(z_ptr, 0);
+    while raw_ptr_read(z.parent, 0).color == Color::Red {
+        let parent_ptr = z.parent;
+        let mut parent = raw_ptr_read(parent_ptr, 0);
+        let grandparent_ptr = parent.parent;
+        let mut grandparent = raw_ptr_read(grandparent_ptr, 0);
+
+        if parent_ptr == grandparent.left {
+            let uncle_ptr = grandparent.right;
+            let uncle = raw_ptr_read(uncle_ptr, 0);
+
+            if uncle.color == Color::Red {
+                // Case 1: Amca kırmızı
+                parent.color = Color::Black;
+                uncle.color = Color::Black;
+                grandparent.color = Color::Red;
+                raw_ptr_write(parent_ptr, 0, parent);
+                raw_ptr_write(uncle_ptr, 0, uncle);
+                raw_ptr_write(grandparent_ptr, 0, grandparent);
+                z_ptr = grandparent_ptr;
+                z = raw_ptr_read(z_ptr, 0);
+            } else {
+                if z_ptr == parent.right {
+                    // Case 2: Amca siyah ve z sağ çocuk
+                    z_ptr = parent_ptr;
+                    left_rotate(set, z_ptr);
+                    z = raw_ptr_read(z_ptr, 0);
+                    parent = raw_ptr_read(z.parent, 0);
+                }
+                // Case 3: Amca siyah ve z sol çocuk
+                parent.color = Color::Black;
+                grandparent.color = Color::Red;
+                raw_ptr_write(parent_ptr, 0, parent);
+                raw_ptr_write(grandparent_ptr, 0, grandparent);
+                right_rotate(set, grandparent_ptr);
+            }
+        } else { // Simetrik durum (parent grandparent'ın sağ çocuğu)
+            let uncle_ptr = grandparent.left;
+            let uncle = raw_ptr_read(uncle_ptr, 0);
+
+            if uncle.color == Color::Red {
+                // Case 1: Amca kırmızı
+                parent.color = Color::Black;
+                uncle.color = Color::Black;
+                grandparent.color = Color::Red;
+                raw_ptr_write(parent_ptr, 0, parent);
+                raw_ptr_write(uncle_ptr, 0, uncle);
+                raw_ptr_write(grandparent_ptr, 0, grandparent);
+                z_ptr = grandparent_ptr;
+                z = raw_ptr_read(z_ptr, 0);
+            } else {
+                if z_ptr == parent.left {
+                    // Case 2: Amca siyah ve z sol çocuk
+                    z_ptr = parent_ptr;
+                    right_rotate(set, z_ptr);
+                    z = raw_ptr_read(z_ptr, 0);
+                    parent = raw_ptr_read(z.parent, 0);
+                }
+                // Case 3: Amca siyah ve z sağ çocuk
+                parent.color = Color::Black;
+                grandparent.color = Color::Red;
+                raw_ptr_write(parent_ptr, 0, parent);
+                raw_ptr_write(grandparent_ptr, 0, grandparent);
+                left_rotate(set, grandparent_ptr);
+            }
+        }
+    }
+    // Kökü her zaman siyah yap
+    let mut root_node = raw_ptr_read(set.root, 0);
+    root_node.color = Color::Black;
+    raw_ptr_write(set.root, 0, root_node);
+}
+
+// --- 3. Set İşlemleri ---
+
+/// Bir elemanı Set'e ekler. O($\log N$)
+/// Eleman zaten varsa, hiçbir şey yapmaz.
+///
+/// # Parametreler
+/// - `set`: Elemanın ekleneceği `Set<T>`'nin mutable referansı.
+/// - `item`: Eklenecek eleman.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(bool)`: `true` yeni bir eleman eklendiyse, `false` eleman zaten varsa.
+/// `Result::Err(Error)` bellek tahsisi başarısız olursa.
+pub fn insert<T>(set: &mut Set<T>, item: T) -> Result<bool, Error> {
+    let mut y_ptr = set.nil;
+    let mut x_ptr = set.root;
+
+    // Eklenecek düğümün yerini bul
+    while x_ptr != set.nil {
+        y_ptr = x_ptr;
+        let x_node = raw_ptr_read(x_ptr, 0);
+        if item == x_node.value { // Eleman zaten var
+            return Result::Ok(false);
+        } else if item < x_node.value {
+            x_ptr = x_node.left;
+        } else {
+            x_ptr = x_node.right;
+        }
+    }
+
+    // Yeni düğümü tahsis et
+    match allocate_node(item, Color::Red, set.nil) {
+        Result::Ok(z_ptr) => {
+            let mut z_node = raw_ptr_read(z_ptr, 0);
+            z_node.parent = y_ptr;
+
+            if y_ptr == set.nil {
+                set.root = z_ptr; // Ağaç boştu, z kök oldu
+            } else {
+                let mut y_node = raw_ptr_read(y_ptr, 0);
+                if z_node.value < y_node.value {
+                    y_node.left = z_ptr;
+                } else {
+                    y_node.right = z_ptr;
+                }
+                raw_ptr_write(y_ptr, 0, y_node); // Güncellenmiş y'i belleğe yaz
+            }
+            raw_ptr_write(z_ptr, 0, z_node); // Güncellenmiş z'i belleğe yaz
+
+            set.len = set.len + 1;
+            rb_insert_fixup(set, z_ptr); // Kırmızı-Siyah özelliklerini koru
+            Result::Ok(true)
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Set'te belirli bir elemanın olup olmadığını kontrol eder. O($\log N$)
+///
+/// # Parametreler
+/// - `set`: Elemanın aranacağı `Set<T>`'nin referansı.
+/// - `item`: Aranacak eleman.
+///
+/// # Dönüş Değeri
+/// `true` eleman Set'te ise, `false` değilse.
+pub fn contains<T>(set: &Set<T>, item: &T) -> bool {
+    let mut current_ptr = set.root;
+    while current_ptr != set.nil {
+        let current_node = raw_ptr_read(current_ptr, 0);
+        if *item == current_node.value {
+            return true;
+        } else if *item < current_node.value {
+            current_ptr = current_node.left;
+        } else {
+            current_ptr = current_node.right;
+        }
+    }
+    false
+}
+
+/// Set'ten bir elemanı siler. O($\log N$)
+///
+/// # Parametreler
+/// - `set`: Elemanın silineceği `Set<T>`'nin mutable referansı.
+/// - `item`: Silinecek eleman.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(void)` eleman başarıyla silindiyse, `Result::Err(Error::ElementNotFound)` eleman bulunamazsa.
+pub fn remove<T>(set: &mut Set<T>, item: &T) -> Result<void, Error> {
+    // Bu, Kırmızı-Siyah Ağaç silme algoritmasını uygulamak için karmaşık bir fonksiyondur.
+    // Map'in remove fonksiyonuyla aynı karmaşıklığa sahiptir.
+    // Detaylı implementasyon, bu örnek taslağın kapsamını aşabilir.
+
+    // Basit bir placeholder olarak:
+    Result::Err(Error::Other("Remove operation not fully implemented for RB-Tree".to_string()))
+}
+
+/// Set'teki tüm elemanları temizler.
+pub fn clear<T>(set: &mut Set<T>) -> void {
+    drop(set); // `drop` fonksiyonu tüm ağacı ve sentinel düğümünü serbest bırakır.
+    // Yeniden başlatma:
+    match new() {
+        Result::Ok(new_set) => *set = new_set,
+        Result::Err(_) => assert!(false, "Failed to re-initialize set after clear!"), // Temizleme sonrası hata olmamalı
+    }
+}
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Set'teki eleman sayısını döndürür.
+pub fn len<T>(set: &Set<T>) -> int {
+    set.len
+}
+
+/// Set'in boş olup olmadığını kontrol eder.
+pub fn is_empty<T>(set: &Set<T>) -> bool {
+    set.len == 0
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// Kırmızı-Siyah Ağaçlar üzerinde sıralı iterasyon (in-order traversal) mümkündür.
+// Iterator impl'i, düğüm işaretçilerini izlemelidir.
+ pub fn iter<T>(set: &Set<T>) -> Iterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `default_value<T>()`: T tipi için varsayılan bir değer döndüren bir mekanizma (örneğin int için 0, bool için false).
