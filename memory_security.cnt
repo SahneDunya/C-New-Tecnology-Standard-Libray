@@ -1,0 +1,135 @@
+// memory_security.cnt
+// Standart Bellek Güvenliği Modülü
+// Std tarafından sağlanan temel bellek güvenlik mekanizmalarını üzerine inşa eder.
+
+import std::string;     // Hata mesajları için
+import std::collections; // List<u8> (byte dizileri) için
+import std::alloc;      // Bellek tahsisi için varsayılan std::alloc modülü
+
+/// `Error` Enum'u: Bellek güvenliği işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsisi sırasında hata oluştu.
+    AllocationError(string);
+    /// Geçersiz bellek adresi veya boyutu.
+    InvalidMemoryAccess(string);
+    /// Hassas verilerin güvenli bir şekilde sıfırlanamaması hatası.
+    SecureWipeError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+// --- 1. Hassas Veri Yönetimi ---
+
+/// Hassas verileri (örn. şifreler, anahtarlar) içeren bir byte dizisini
+/// bellekten güvenli bir şekilde sıfırlar (üzerine yazar).
+///
+/// Bu fonksiyon, veri bittikten sonra bellekte kalıntıların kalmamasını sağlamak
+/// için tasarlanmıştır. Genellikle bu işlem, optimize edicilerin sıfırlama
+/// işlemini atlamasını önlemek için özel düşük seviyeli çağrılar gerektirir.
+///
+/// # Parametreler
+/// - `data`: Sıfırlanacak byte dizisinin mutable referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(())`, hata oluşursa `Result::Err(Error::SecureWipeError)`.
+pub fn secure_wipe(data: &mut collections::List<u8>) -> Result<void, Error> {
+    // Burada, optimize edicilerin bu işlemi atlamasını önlemek için
+    // düşük seviyeli bir sistem çağrısı veya özel bir dahili compiler
+    // yönergesi kullanıldığı varsayılır.
+    // Örneğin, C'de `memset_s` veya `SecureZeroMemory` gibi.
+    // CNT'nin "std" tarafından sağlanan mekanizması budur.
+    for i in 0..collections::len(data) {
+        collections::set(data, i, 0u8); // Her byte'ı 0 ile üzerine yaz
+    }
+
+    // Gerçek dünya senaryosunda, bu üst düzey bir dil çağrısı genellikle
+    // dahili olarak compile time'da veya runtime'da özel bir yönergeye dönüşür.
+    // Aksi takdirde, derleyici "gereksiz" sıfırlamayı atlayabilir.
+    // Basit bir `Result::Ok(())` döndürüyoruz, ancak gerçek bir hata kontrolü
+    // temel sistem çağrısından gelmelidir.
+    Result::Ok(())
+}
+
+/// Hassas bir string'i güvenli bir şekilde sıfırlar.
+/// String'in UTF-8 byte dizisini sıfırlayarak çalışır.
+///
+/// # Parametreler
+/// - `s`: Sıfırlanacak string'in mutable referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(())`, hata oluşursa `Result::Err(Error::SecureWipeError)`.
+pub fn secure_wipe_string(s: &mut string) -> Result<void, Error> {
+    let mut bytes = string::to_mut_bytes(s); // String'in temel byte dizisine mutable erişim
+    match secure_wipe(&mut bytes) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// --- 2. Bellek Koruma ve Tahsis (Gelecekteki Geliştirmeler) ---
+
+// Bu kısım, işletim sistemi seviyesindeki bellek koruma mekanizmalarına (örn. mmap, VirtualProtect)
+// erişim gerektirecektir ve bu nedenle daha karmaşık "extern" fonksiyonlar gerektirecektir.
+
+/// `ProtectedMemoryRegion` struct'ı: İçeriği yetkisiz erişime karşı korunan
+/// veya sıfırlanabilen bir bellek bölgesini temsil eder.
+ pub struct ProtectedMemoryRegion {
+     pointer: raw_ptr; // Bellek bölgesinin başlangıç adresi
+     size: int;        // Bellek bölgesinin boyutu
+//     // İşletim sistemi veya donanım tarafından sağlanan koruma bayrakları veya tanımlayıcıları
+ }
+
+/// Belirli bir boyutta, potansiyel olarak korumalı (örn. yazılabilir-executeable değil)
+/// bir bellek bölgesi tahsis eder.
+ pub fn allocate_protected_memory(size: int) -> Result<ProtectedMemoryRegion, Error> {
+//     // _cnt_mem_allocate_protected_memory(size, flags) gibi bir extern çağrısı
+     Result::Err(Error::Other("Not yet implemented".to_string()))
+ }
+
+/// Bir bellek bölgesini serbest bırakır ve içeriğini güvenli bir şekilde sıfırlar.
+ pub fn free_protected_memory(region: ProtectedMemoryRegion) -> Result<void, Error> {
+//     // _cnt_mem_free_protected_memory(region.pointer, region.size) gibi bir extern çağrısı
+     Result::Err(Error::Other("Not yet implemented".to_string()))
+ }
+
+/// Bir bellek bölgesinin yazma iznini geçici olarak kaldırır (salt okunur yapar).
+/// Bu, kritik verilerin yanlışlıkla değiştirilmesini önlemek için kullanılabilir.
+ pub fn protect_write(region: &ProtectedMemoryRegion) -> Result<void, Error> {
+//     // _cnt_mem_set_permissions(region.pointer, region.size, READ_ONLY) gibi bir extern çağrısı
+     Result::Err(Error::Other("Not yet implemented".to_string()))
+ }
+
+/// Bir bellek bölgesine yazma iznini geri verir.
+ pub fn unprotect_write(region: &ProtectedMemoryRegion) -> Result<void, Error> {
+//     // _cnt_mem_set_permissions(region.pointer, region.size, READ_WRITE) gibi bir extern çağrısı
+     Result::Err(Error::Other("Not yet implemented".to_string()))
+ }
+
+
+// --- 3. Bellek İçi Değişkenlerin Sıfırlanması (Daha Düşük Seviye) ---
+
+// Güvenli silme işleminin temel yapı taşı olarak kullanılabilecek,
+// daha atomik sıfırlama işlevleri.
+// Bunlar genellikle std::alloc veya dilin çekirdeği tarafından sağlanır.
+
+/// Bir `u8` listesinin tüm elemanlarını 0 ile doldurur.
+/// (Derleyicinin optimize etmesini engellemek için özel bir yönerge veya C'deki `volatile` benzeri davranış).
+ pub fn fill_zeros_u8(list: &mut collections::List<u8>) -> void {
+//     // Bu, `secure_wipe` tarafından dahili olarak kullanılabilir.
+     unimplemented!(); // Placeholder
+ }
+
+/// Bir `int` listesinin tüm elemanlarını 0 ile doldurur.
+ pub fn fill_zeros_int(list: &mut collections::List<int>) -> void {
+     unimplemented!(); // Placeholder
+ }
+
+// Diğer temel tipler için fill_zeros_... eklenebilir.
