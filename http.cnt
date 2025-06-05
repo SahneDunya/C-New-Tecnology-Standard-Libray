@@ -1,0 +1,350 @@
+// http.cnt
+// Standart HTTP İstemcisi modülü
+
+import std::string;     // String işlemleri ve hata mesajları için
+import std::collections; // List<u8> (byte dizileri) ve List<string> için
+import std::net;        // TCP bağlantıları için
+
+// Harici C veya sistem HTTP/soket seviyesi fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, TCP üzerinden ham HTTP mesajlarını gönderme ve alma işini yapar.
+// Aslında, net.cnt modülündeki TcpStream'in üzerine inşa edilecektir.
+extern fn _cnt_http_send_request(
+    host: &string,
+    port: int,
+    request_bytes: &collections::List<u8>
+) -> net::Result<collections::List<u8>, net::Error>; // Tam yanıtı (başlıklar + body) byte olarak döndürür
+
+/// `Method` Enum'u: HTTP isteği metodlarını temsil eder.
+pub enum Method {
+    /// GET metodu: Belirtilen kaynaktan veri ister.
+    GET;
+    /// POST metodu: Belirtilen kaynağa veri gönderir.
+    POST;
+    /// PUT metodu: Belirtilen kaynakta bir veriyi oluşturur veya günceller.
+    PUT;
+    /// DELETE metodu: Belirtilen kaynağı siler.
+    DELETE;
+    /// HEAD metodu: GET isteğine benzer, ancak yanıt gövdesi döndürmez, sadece başlıklar.
+    HEAD;
+    /// OPTIONS metodu: Hedef kaynağın iletişim seçeneklerini tanımlar.
+    OPTIONS;
+    // Diğer metodlar gerektiğinde eklenebilir: PATCH, CONNECT, TRACE
+}
+
+/// `StatusCode` Enum'u: HTTP yanıt durum kodlarını temsil eder.
+/// Yaygın durum kodlarından bazıları.
+pub enum StatusCode {
+    // 1xx Bilgilendirici
+    Continue = 100;
+
+    // 2xx Başarılı
+    Ok = 200;
+    Created = 201;
+    Accepted = 202;
+    NoContent = 204;
+
+    // 3xx Yönlendirme
+    MultipleChoices = 300;
+    MovedPermanently = 301;
+    Found = 302;
+    SeeOther = 303;
+    NotModified = 304;
+    TemporaryRedirect = 307;
+    PermanentRedirect = 308;
+
+    // 4xx İstemci Hatası
+    BadRequest = 400;
+    Unauthorized = 401;
+    Forbidden = 403;
+    NotFound = 404;
+    MethodNotAllowed = 405;
+    Conflict = 409;
+    TooManyRequests = 429;
+
+    // 5xx Sunucu Hatası
+    InternalServerError = 500;
+    NotImplemented = 501;
+    BadGateway = 502;
+    ServiceUnavailable = 503;
+    GatewayTimeout = 504;
+
+    // Bilinmeyen veya özel kodlar için (integer değeri tutar)
+    Other(int);
+}
+
+/// `Header` struct'ı: Bir HTTP başlığını (isim ve değer) temsil eder.
+pub struct Header {
+    name: string;
+    value: string;
+}
+
+/// `Request` struct'ı: Giden bir HTTP isteğini temsil eder.
+pub struct Request {
+    method: Method;
+    url: string; // Tam URL (örn. "http://example.com/path?query=val")
+    headers: collections::List<Header>;
+    body: collections::List<u8>; // İstek gövdesi (örn. POST verisi)
+}
+
+/// `Response` struct'ı: Gelen bir HTTP yanıtını temsil eder.
+pub struct Response {
+    status: StatusCode;
+    headers: collections::List<Header>;
+    body: collections::List<u8>; // Yanıt gövdesi
+}
+
+/// `Error` Enum'u: HTTP işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// URL ayrıştırma hatası (geçersiz format).
+    UrlParseError(string);
+    /// Bir ağ hatası (net::Error'dan dönüştürülür).
+    NetworkError(net::Error);
+    /// Yanıt formatı hatası (HTTP mesajı bozuk veya eksik).
+    ResponseFormatError(string);
+    /// Yönlendirme döngüsü veya çok fazla yönlendirme.
+    TooManyRedirects;
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+/// Yeni bir HTTP isteği oluşturur.
+///
+/// # Parametreler
+/// - `method`: İstek metodu (GET, POST vb.).
+/// - `url`: İsteğin yapılacağı tam URL (örn. "http://example.com/path").
+///
+/// # Dönüş Değeri
+/// Yapılandırılmış `Request` nesnesi.
+pub fn new_request(method: Method, url: string) -> Request {
+    Request {
+        method: method,
+        url: url,
+        headers: collections::List::new(), // Boş bir başlık listesi ile başla
+        body: collections::List::new(),    // Boş bir gövde ile başla
+    }
+}
+
+/// Bir `Request`'e başlık ekler.
+///
+/// # Parametreler
+/// - `request`: Başlığın ekleneceği mutable istek referansı.
+/// - `name`: Başlığın adı (örn. "Content-Type").
+/// - `value`: Başlığın değeri (örn. "application/json").
+pub fn add_header(request: &mut Request, name: string, value: string) -> void {
+    collections::push(&mut request.headers, Header { name: name, value: value });
+}
+
+/// Bir `Request`'e istek gövdesini (body) ayarlar.
+///
+/// # Parametreler
+/// - `request`: Gövdesinin ayarlanacağı mutable istek referansı.
+/// - `body_bytes`: İstek gövdesi olarak kullanılacak byte dizisi. Sahipliği isteğe taşınır.
+pub fn set_body(request: &mut Request, body_bytes: collections::List<u8>) -> void {
+    request.body = body_bytes;
+}
+
+/// Bir `Request` nesnesini gönderir ve bir `Response` döndürür.
+///
+/// Bu fonksiyon, URL'yi ayrıştırır, TCP bağlantısı kurar, isteği biçimlendirir, gönderir
+/// ve yanıtı ayrıştırır.
+///
+/// # Parametreler
+/// - `request`: Gönderilecek `Request` nesnesi (referans).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Response` nesnesi içeren `Result::Ok(Response)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn send_request(request: &Request) -> Result<Response, Error> {
+    // 1. URL'yi ayrıştır: host, port, path
+    let parse_result = parse_url(&request.url);
+    match parse_result {
+        Result::Ok(url_parts) => {
+            let (host, port, path) = url_parts;
+
+            // 2. HTTP isteği string'ini oluştur (başlıklar dahil)
+            let mut request_line = method_to_string(&request.method) + " " + &path + " HTTP/1.1\r\n";
+            request_line = request_line + "Host: " + &host + "\r\n";
+            request_line = request_line + "Content-Length: " + &string::from_int(collections::len(&request.body)) + "\r\n";
+
+            for header in collections::iter(&request.headers) { // iter() fonksiyonu varsayılır
+                request_line = request_line + &header.name + ": " + &header.value + "\r\n";
+            }
+            request_line = request_line + "\r\n"; // Başlıkların sonu
+
+            let mut full_request_bytes = string_to_bytes(&request_line);
+            collections::extend(&mut full_request_bytes, &request.body); // Body'yi ekle
+
+            // 3. TCP bağlantısı kur ve isteği gönder
+            let send_result = _cnt_http_send_request(&host, port, &full_request_bytes);
+
+            match send_result {
+                net::Result::Ok(response_bytes) => {
+                    // 4. Yanıtı ayrıştır (durum kodu, başlıklar, gövde)
+                    parse_response(&response_bytes) // Yanıt ayrıştırma fonksiyonu
+                },
+                net::Result::Err(e) => Result::Err(Error::NetworkError(e)),
+            }
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// --- Dahili Yardımcı Fonksiyonlar ---
+
+// URL'yi host, port ve path'e ayrıştırır.
+// Basit bir ayrıştırma varsayılır, tam bir URL ayrıştırıcı daha karmaşıktır.
+fn parse_url(url: &string) -> Result<(string, int, string), Error> {
+    // Örn: "http://example.com:8080/path/to/resource?query=val"
+    // Bu fonksiyonun implementasyonu, string manipülasyonları gerektirir.
+    // Şimdilik sadece yer tutucu bir implementasyon.
+    let default_port = 80; // HTTP için varsayılan port
+
+    if string::starts_with(url, "http://") {
+        let trimmed_url = string::substring(url, 7); // "http://" kısmını at
+        let parts = string::split(trimmed_url, '/'); // İlk '/' kadar olan kısım host:port
+        if collections::len(&parts) == 0 {
+            return Result::Err(Error::UrlParseError("Invalid URL format: missing host".to_string()));
+        }
+
+        let host_port_str = collections::get(&parts, 0).unwrap(); // Unwrap, Option::Some olduğunu varsayarız
+        let host_port_parts = string::split(host_port_str, ':');
+        let host_name = collections::get(&host_port_parts, 0).unwrap();
+        let port_num = if collections::len(&host_port_parts) > 1 {
+            string::to_int(collections::get(&host_port_parts, 1).unwrap()) // to_int() hata dönebilir
+        } else {
+            default_port
+        };
+
+        let mut path_str = "/".to_string(); // Yol en azından "/" olmalı
+        if collections::len(&parts) > 1 {
+            // Geri kalan kısımları path olarak birleştir
+            for i in 1..collections::len(&parts) {
+                path_str = path_str + "/" + collections::get(&parts, i).unwrap();
+            }
+        }
+
+        return Result::Ok((host_name.to_string(), port_num, path_str));
+    }
+
+    Result::Err(Error::UrlParseError("Unsupported URL scheme or format".to_string()))
+}
+
+// Byte dizisini HTTP yanıtına ayrıştırır.
+fn parse_response(response_bytes: &collections::List<u8>) -> Result<Response, Error> {
+    let response_str = bytes_to_string(response_bytes);
+    let lines = string::split(&response_str, '\n');
+
+    if collections::len(&lines) < 1 {
+        return Result::Err(Error::ResponseFormatError("Empty response".to_string()));
+    }
+
+    let status_line = collections::get(&lines, 0).unwrap();
+    let status_parts = string::split(status_line, ' ');
+    if collections::len(&status_parts) < 3 {
+        return Result::Err(Error::ResponseFormatError("Invalid status line".to_string()));
+    }
+
+    let status_code_str = collections::get(&status_parts, 1).unwrap();
+    let status_code_int = string::to_int(status_code_str); // Hata kontrolü gerekir
+
+    let status = match status_code_int {
+        100 => StatusCode::Continue,
+        200 => StatusCode::Ok,
+        201 => StatusCode::Created,
+        202 => StatusCode::Accepted,
+        204 => StatusCode::NoContent,
+        300 => StatusCode::MultipleChoices,
+        301 => StatusCode::MovedPermanently,
+        302 => StatusCode::Found,
+        303 => StatusCode::SeeOther,
+        304 => StatusCode::NotModified,
+        307 => StatusCode::TemporaryRedirect,
+        308 => StatusCode::PermanentRedirect,
+        400 => StatusCode::BadRequest,
+        401 => StatusCode::Unauthorized,
+        403 => StatusCode::Forbidden,
+        404 => StatusCode::NotFound,
+        405 => StatusCode::MethodNotAllowed,
+        409 => StatusCode::Conflict,
+        429 => StatusCode::TooManyRequests,
+        500 => StatusCode::InternalServerError,
+        501 => StatusCode::NotImplemented,
+        502 => StatusCode::BadGateway,
+        503 => StatusCode::ServiceUnavailable,
+        504 => StatusCode::GatewayTimeout,
+        _   => StatusCode::Other(status_code_int),
+    };
+
+    let mut headers = collections::List::new();
+    let mut body_start_index = 0;
+    for i in 1..collections::len(&lines) {
+        let line = collections::get(&lines, i).unwrap();
+        if string::trim(line) == "" { // Boş satır, başlıkların sonu
+            body_start_index = i + 1;
+            break;
+        }
+        let header_parts = string::split(line, ':');
+        if collections::len(&header_parts) >= 2 {
+            let name = string::trim(collections::get(&header_parts, 0).unwrap());
+            let value = string::trim(collections::get(&header_parts, 1).unwrap()); // Değerde birden fazla ":" olabilir
+            collections::push(&mut headers, Header { name: name.to_string(), value: value.to_string() });
+        }
+    }
+
+    let mut body_bytes = collections::List::new();
+    // body_start_index'ten itibaren kalan satırları body olarak al
+    // Bu kısım daha karmaşık olabilir, özellikle Content-Length gibi başlıkları dikkate alarak.
+    // Şimdilik sadece kalan tüm baytları alıyoruz.
+    if collections::len(response_bytes) > 0 { // boş yanıt olmaması için
+        // Asıl body baytlarını bulmak için string'den baytlara geri dönmek gerekebilir
+        // veya _cnt_http_send_request'in ayrıştırma mantığına yanıt header'larını ayırmasını eklemek.
+        // Basitlik adına, şu an string'e çevirip sonra body'i ayırıp tekrar byte'a çeviriyoruz.
+        // Daha verimli bir implementasyon, _cnt_http_send_request'in doğrudan
+        // header ve body'yi ayrıştırmasını gerektirir.
+        let full_response_str = bytes_to_string(response_bytes);
+        let body_str_start_index = string::find(full_response_str, "\r\n\r\n").map_or(0, |idx| idx + 4);
+        let body_str = string::substring(full_response_str, body_str_start_index);
+        body_bytes = string_to_bytes(body_str);
+    }
+
+
+    Result::Ok(Response {
+        status: status,
+        headers: headers,
+        body: body_bytes,
+    })
+}
+
+// Yardımcı fonksiyonlar (string.cnt veya diğer kütüphanelerde bulunabilir)
+fn string_to_bytes(s: &string) -> collections::List<u8> {
+    // String'i UTF-8 byte dizisine dönüştürür.
+    // Bu, string.cnt'de yer alabilir.
+    unimplemented!(); // Placeholder
+}
+
+fn bytes_to_string(bytes: &collections::List<u8>) -> string {
+    // UTF-8 byte dizisini string'e dönüştürür.
+    // Bu, string.cnt'de yer alabilir.
+    unimplemented!(); // Placeholder
+}
+
+// HTTP Metodu'nu string'e dönüştürür.
+fn method_to_string(method: &Method) -> string {
+    match method {
+        Method::GET => "GET".to_string(),
+        Method::POST => "POST".to_string(),
+        Method::PUT => "PUT".to_string(),
+        Method::DELETE => "DELETE".to_string(),
+        Method::HEAD => "HEAD".to_string(),
+        Method::OPTIONS => "OPTIONS".to_string(),
+        // _ => "UNKNOWN".to_string(), // Bilinmeyen metodlar için
+    }
+}
