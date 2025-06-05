@@ -1,0 +1,304 @@
+// algorithm.cnt
+// Standart Algoritma Modülü
+// Çeşitli veri yapıları üzerinde çalışan genel amaçlı algoritmalar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::vector;     // Veya iteratörleri destekleyen diğer koleksiyonlar
+
+/// `Error` Enum'u: Algoritma işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz argüman hatası (örn. boş aralık).
+    InvalidArgument(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: Bu algoritmalar genellikle iteratörler (veya raw_ptr aralıkları) üzerinde çalışır.
+// CNT'de güçlü bir iteratör arayüzü varsayıyoruz.
+// Eğer iteratörler yoksa, fonksiyonlar (ptr start, ptr end) veya (ptr start, size) şeklinde parametre almalıdır.
+// Bu taslakta, basitlik adına `raw_ptr` ve `len` (uzunluk) kombinasyonunu kullanacağız.
+
+// --- 1. Sıralama Algoritmaları ---
+
+/// Dizinin (veya aralığın) elemanlarını küçükten büyüğe sıralar (artı yönde). O($N \log N$) (ortalama)
+/// Genellikle Quicksort veya Heapsort gibi algoritmalara dayanır.
+///
+/// # Parametreler
+/// - `data`: Sıralanacak elemanların başlangıç işaretçisi (mutable).
+/// - `len`: Sıralanacak elemanların sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (karşılaştırılabilir olmalı, yani `<` operatörü tanımlı olmalı).
+///
+/// # Not
+/// Bu fonksiyon, dahili olarak bir karşılaştırma operatörü (`<`) kullanır.
+/// Kullanıcı tanımlı tipler için bu operatörün tanımlanması veya bir `compare` fonksiyonu sağlanması gerekir.
+pub fn sort<T>(data: raw_ptr<T>, len: int) -> void {
+    if len <= 1 { return; } // Sıralanacak bir şey yok
+
+    // Hızlı sıralama (Quicksort) algoritmasının basit bir varyantı.
+    // Gerçek implementasyonlar, küçük diziler için Insertion Sort gibi optimizasyonlar içerebilir.
+    fn quicksort_recursive<T>(arr_ptr: raw_ptr<T>, low: int, high: int) -> void {
+        if low < high {
+            let pivot_idx = partition(arr_ptr, low, high);
+            quicksort_recursive(arr_ptr, low, pivot_idx - 1);
+            quicksort_recursive(arr_ptr, pivot_idx + 1, high);
+        }
+    }
+
+    fn partition<T>(arr_ptr: raw_ptr<T>, low: int, high: int) -> int {
+        let pivot_value = raw_ptr_read(arr_ptr, high); // Son elemanı pivot seçelim
+        let mut i = low - 1;
+
+        for j in low..high {
+            if raw_ptr_read(arr_ptr, j) < pivot_value {
+                i = i + 1;
+                swap(arr_ptr, i, j);
+            }
+        }
+        swap(arr_ptr, i + 1, high);
+        i + 1
+    }
+
+    // `raw_ptr_read` ve `raw_ptr_write` varsayılmıştır.
+    // `swap` yardımcı fonksiyonu:
+    fn swap<T>(arr_ptr: raw_ptr<T>, idx1: int, idx2: int) -> void {
+        let temp = raw_ptr_read(arr_ptr, idx1);
+        raw_ptr_write(arr_ptr, idx1, raw_ptr_read(arr_ptr, idx2));
+        raw_ptr_write(arr_ptr, idx2, temp);
+    }
+
+    quicksort_recursive(data, 0, len - 1);
+}
+
+
+// --- 2. Arama Algoritmaları ---
+
+/// Dizide belirli bir elemanın ilk geçtiği yeri bulur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Aranacak elemanların başlangıç işaretçisi.
+/// - `len`: Aranacak elemanların sayısı.
+/// - `value`: Aranacak eleman.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (eşitlik kontrolü yapılabilir olmalı, yani `==` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `Result<int, Error>`: Elemanın indeksi (`Ok(index)`) veya bulunamazsa `Err(ElementNotFound)` benzeri bir hata.
+/// (Burada `ElementNotFound` yerine `Other` kullanıldı).
+pub fn find<T>(data: raw_ptr<T>, len: int, value: &T) -> Result<int, Error> {
+    for i in 0..len {
+        if raw_ptr_read(data, i) == *value {
+            return Result::Ok(i);
+        }
+    }
+    Result::Err(Error::Other("Element not found".to_string()))
+}
+
+/// Sıralı bir dizide belirli bir elemanı ikili arama kullanarak bulur. O($\log N$)
+///
+/// # Parametreler
+/// - `data`: Aranacak elemanların başlangıç işaretçisi (sıralı olmalı!).
+/// - `len`: Aranacak elemanların sayısı.
+/// - `value`: Aranacak eleman.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (karşılaştırılabilir olmalı, yani `<` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `Result<int, Error>`: Elemanın indeksi (`Ok(index)`) veya bulunamazsa `Err(ElementNotFound)` benzeri bir hata.
+pub fn binary_search<T>(data: raw_ptr<T>, len: int, value: &T) -> Result<int, Error> {
+    if len == 0 { return Result::Err(Error::Other("Array is empty".to_string())); }
+
+    let mut low = 0;
+    let mut high = len - 1;
+
+    while low <= high {
+        let mid = low + (high - low) / 2; // Taşmayı önlemek için güvenli orta nokta hesaplaması
+        let mid_value = raw_ptr_read(data, mid);
+
+        if mid_value == *value {
+            return Result::Ok(mid);
+        } else if mid_value < *value {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Result::Err(Error::Other("Element not found".to_string()))
+}
+
+// --- 3. Değiştirme ve Kopyalama Algoritmaları ---
+
+/// İki elemanın değerlerini takas eder. O(1)
+pub fn swap_elements<T>(ptr1: raw_ptr<T>, idx1: int, ptr2: raw_ptr<T>, idx2: int) -> void {
+    let temp = raw_ptr_read(ptr1, idx1);
+    raw_ptr_write(ptr1, idx1, raw_ptr_read(ptr2, idx2));
+    raw_ptr_write(ptr2, idx2, temp);
+}
+
+/// Bir aralıktaki elemanları başka bir aralığa kopyalar. O($N$)
+/// Hedef aralığın yeterli boyutta olduğu varsayılır.
+///
+/// # Parametreler
+/// - `src_data`: Kaynak aralığın başlangıç işaretçisi.
+/// - `dest_data`: Hedef aralığın başlangıç işaretçisi (mutable).
+/// - `len`: Kopyalanacak eleman sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (kopyalanabilir olmalı).
+pub fn copy<T>(src_data: raw_ptr<T>, dest_data: raw_ptr<T>, len: int) -> void {
+    for i in 0..len {
+        raw_ptr_write(dest_data, i, raw_ptr_read(src_data, i));
+    }
+}
+
+/// Bir aralıktaki elemanları belirli bir değerle doldurur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Doldurulacak aralığın başlangıç işaretçisi (mutable).
+/// - `len`: Doldurulacak eleman sayısı.
+/// - `value`: Doldurulacak değer.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (kopyalanabilir olmalı).
+pub fn fill<T>(data: raw_ptr<T>, len: int, value: T) -> void {
+    for i in 0..len {
+        raw_ptr_write(data, i, value);
+    }
+}
+
+/// Bir aralıktaki elemanların sırasını tersine çevirir. O($N$)
+///
+/// # Parametreler
+/// - `data`: Tersine çevrilecek aralığın başlangıç işaretçisi (mutable).
+/// - `len`: Tersine çevrilecek eleman sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (değiştirilebilir olmalı).
+pub fn reverse<T>(data: raw_ptr<T>, len: int) -> void {
+    if len <= 1 { return; }
+    let mut left = 0;
+    let mut right = len - 1;
+    while left < right {
+        swap_elements(data, left, data, right);
+        left = left + 1;
+        right = right - 1;
+    }
+}
+
+// --- 4. Karşılaştırma Algoritmaları ---
+
+/// İki aralığın tamamen eşit olup olmadığını kontrol eder. O($N$)
+///
+/// # Parametreler
+/// - `data1`: Birinci aralığın başlangıç işaretçisi.
+/// - `len1`: Birinci aralığın uzunluğu.
+/// - `data2`: İkinci aralığın başlangıç işaretçisi.
+/// - `len2`: İkinci aralığın uzunluğu.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (eşitlik kontrolü yapılabilir olmalı).
+///
+/// # Dönüş Değeri
+/// `true` eğer aralıklar eşitse, `false` değilse.
+pub fn equals<T>(data1: raw_ptr<T>, len1: int, data2: raw_ptr<T>, len2: int) -> bool {
+    if len1 != len2 { return false; }
+    for i in 0..len1 {
+        if raw_ptr_read(data1, i) != raw_ptr_read(data2, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// --- 5. Minimum ve Maksimum Algoritmaları ---
+
+/// Bir aralıktaki en küçük elemanı bulur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Aranacak aralığın başlangıç işaretçisi.
+/// - `len`: Aranacak elemanların sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (karşılaştırılabilir olmalı).
+///
+/// # Dönüş Değeri
+/// `Result<&T, Error>`: En küçük elemanın referansı veya dizi boşsa hata.
+pub fn min_element<T>(data: raw_ptr<T>, len: int) -> Result<&T, Error> {
+    if len == 0 {
+        return Result::Err(Error::InvalidArgument("Cannot find min element in empty range".to_string()));
+    }
+    let mut min_val_ptr = data;
+    for i in 1..len {
+        if raw_ptr_read(data, i) < raw_ptr_read(min_val_ptr, 0) {
+            min_val_ptr = raw_ptr_offset(data, i);
+        }
+    }
+    Result::Ok(min_val_ptr)
+}
+
+/// Bir aralıktaki en büyük elemanı bulur. O($N$)
+///
+/// # Parametreler
+/// - `data`: Aranacak aralığın başlangıç işaretçisi.
+/// - `len`: Aranacak elemanların sayısı.
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (karşılaştırılabilir olmalı).
+///
+/// # Dönüş Değeri
+/// `Result<&T, Error>`: En büyük elemanın referansı veya dizi boşsa hata.
+pub fn max_element<T>(data: raw_ptr<T>, len: int) -> Result<&T, Error> {
+    if len == 0 {
+        return Result::Err(Error::InvalidArgument("Cannot find max element in empty range".to_string()));
+    }
+    let mut max_val_ptr = data;
+    for i in 1..len {
+        if raw_ptr_read(data, i) > raw_ptr_read(max_val_ptr, 0) {
+            max_val_ptr = raw_ptr_offset(data, i);
+        }
+    }
+    Result::Ok(max_val_ptr)
+}
+
+// --- 6. Hesaplama Algoritmaları ---
+
+/// Bir aralıktaki elemanların toplamını hesaplar. O($N$)
+///
+/// # Parametreler
+/// - `data`: Toplamı alınacak aralığın başlangıç işaretçisi.
+/// - `len`: Eleman sayısı.
+/// - `initial_value`: Başlangıç toplam değeri (örn. 0).
+///
+/// # Tip Parametreleri
+/// - `T`: Eleman tipi (toplanabilir olmalı, yani `+` operatörü tanımlı olmalı).
+/// - `U`: Toplamın tutulacağı tip (genellikle `T` ile aynı veya daha büyük bir sayısal tip).
+///
+/// # Dönüş Değeri
+/// `U`: Hesaplanan toplam.
+pub fn accumulate<T, U>(data: raw_ptr<T>, len: int, initial_value: U) -> U {
+    let mut sum = initial_value;
+    for i in 0..len {
+        sum = sum + (raw_ptr_read(data, i) as U); // Tip dönüşümü gerekebilir
+    }
+    sum
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
