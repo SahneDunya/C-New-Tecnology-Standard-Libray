@@ -1,0 +1,308 @@
+// semaphore.cnt
+// Standart Semafor Modülü
+// Sınırlı kaynaklara erişimi kontrol etmek için kullanılan bir senkronizasyon primitifi.
+
+import std::string;         // Hata mesajları için
+import std::assert;         // Geliştirme/hata ayıklama için
+import std::atomic;         // Atomik sayıcı için
+import std::mutex;          // Koşul değişkeni ile kullanım için
+import std::condition_variable; // İş parçacıklarını uyandırmak için
+import std::chrono;         // Süreli bekleme fonksiyonları için
+
+/// `Error` Enum'u: Semafor işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Başlatma değeri geçersiz (örn. negatif veya maksimumu aşan).
+    InvalidInitialValue(string);
+    /// Maksimum izin verilen değeri aşan bir miktar yayınlamaya çalışmak.
+    TooManyReleases(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Maksimum sayıcı değeri (genellikle platforma özgüdür, ancak bir üst sınır tanımlamalıyız).
+// C++'da `max()` statik bir fonksiyondur.
+pub const MAX_SEMAPHORE_VALUE: i64 = 1_000_000_000; // Örnek bir üst sınır
+
+// --- Dahili Paylaşılan Semafor Durumu ---
+// Bu, hem counting_semaphore hem de binary_semaphore tarafından kullanılan temel implementasyon.
+pub struct SharedSemaphoreState {
+    // Mevcut kaynak birimlerinin sayısını tutan atomik sayıcı.
+    count: atomic::Atomic<i64>;
+    // Bekleyen iş parçacıklarını korumak için mutex.
+    mutex: mutex::Mutex;
+    // Bekleyen iş parçacıklarını uyandırmak için koşul değişkeni.
+    condition_variable: condition_variable::ConditionVariable;
+    // Semaforun başlatılıp başlatılmadığını gösteren bayrak.
+    is_initialized: bool;
+    // Maksimum izin verilen sayıcı değeri (sadece counting_semaphore için kullanılır).
+    max_count: i64;
+}
+
+/// Yeni bir `SharedSemaphoreState` nesnesi oluşturur ve başlatır.
+pub fn new_shared_semaphore_state(initial_count: i64, max_val: i64) -> Result<SharedSemaphoreState, Error> {
+    if initial_count < 0 || initial_count > max_val {
+        return Result::Err(Error::InvalidInitialValue("Initial semaphore count is out of bounds.".to_string()));
+    }
+    if max_val <= 0 {
+        return Result::Err(Error::InvalidInitialValue("Maximum semaphore value must be positive.".to_string()));
+    }
+
+    match mutex::new_mutex() {
+        Result::Ok(m) => {
+            match condition_variable::new_condition_variable() {
+                Result::Ok(cv) => {
+                    Result::Ok(SharedSemaphoreState {
+                        count: atomic::new_atomic(initial_count),
+                        mutex: m,
+                        condition_variable: cv,
+                        is_initialized: true,
+                        max_count: max_val,
+                    })
+                },
+                Result::Err(e) => {
+                    mutex::destroy_mutex(m).expect("Failed to destroy mutex during semaphore state creation error.");
+                    Result::Err(Error::Other("Failed to initialize condition variable for semaphore: ".to_string() + e.to_string()))
+                }
+            }
+        },
+        Result::Err(e) => Result::Err(Error::Other("Failed to initialize mutex for semaphore: ".to_string() + e.to_string()))
+    }
+}
+
+/// `destroy_shared_semaphore_state`: SharedSemaphoreState kaynaklarını serbest bırakır.
+pub fn destroy_shared_semaphore_state(mut s: SharedSemaphoreState) -> Result<void, Error> {
+    if !s.is_initialized {
+        return Result::Err(Error::Other("Attempted to destroy uninitialized semaphore state.".to_string()));
+    }
+    mutex::destroy_mutex(s.mutex).expect("Failed to destroy mutex in SharedSemaphoreState destructor.");
+    condition_variable::destroy_condition_variable(s.condition_variable).expect("Failed to destroy condition variable in SharedSemaphoreState destructor.");
+    s.is_initialized = false;
+    Result::Ok(())
+}
+
+
+// --- 1. Counting Semaphore ---
+
+/// `counting_semaphore` Struct'ı: Belirli sayıda kaynak birimine erişimi kontrol eden bir semafor.
+/// `N` sayısı, izin verilen maksimum semafor sayısını temsil eder.
+pub struct counting_semaphore {
+    state: SharedSemaphoreState;
+}
+
+/// Yeni bir `counting_semaphore` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `initial_count`: Semaforun başlangıç değeri (0 ile `MAX_SEMAPHORE_VALUE` arasında).
+///
+/// # Dönüş Değeri
+/// `Result<counting_semaphore, Error>`: Başlatılan semafor nesnesi veya hata.
+pub fn new_counting_semaphore(initial_count: i64) -> Result<counting_semaphore, Error> {
+    match new_shared_semaphore_state(initial_count, MAX_SEMAPHORE_VALUE) {
+        Result::Ok(s) => Result::Ok(counting_semaphore { state: s }),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `destroy_counting_semaphore`: Bir `counting_semaphore` nesnesinin kaynaklarını serbest bırakır.
+pub fn destroy_counting_semaphore(mut cs: counting_semaphore) -> Result<void, Error> {
+    destroy_shared_semaphore_state(cs.state)
+}
+
+/// `acquire()`: Semaforu bekler (sayacı 1 azaltır). Eğer sayaç 0 ise bloke olur.
+///
+/// # Parametreler
+/// - `cs`: Üzerinde işlem yapılacak semafor (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn acquire(cs: &mut counting_semaphore) -> Result<void, Error> {
+    if !cs.state.is_initialized {
+        return Result::Err(Error::Other("Attempted to acquire on uninitialized semaphore.".to_string()));
+    }
+
+    let mut lk = mutex::make_lock_guard(&mut cs.state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for semaphore acquire: ".to_string() + e.to_string()))?;
+
+    // Sayaç 0 olduğu sürece bekle.
+    while atomic::load(&cs.state.count, atomic::MemoryOrder::Relaxed) <= 0 {
+        condition_variable::wait(&mut cs.state.condition_variable, &mut lk)
+            .map_err(|e| Error::Other("Failed to wait on condition variable for semaphore acquire: ".to_string() + e.to_string()))?;
+    }
+
+    // Atomik olarak sayacı azalt
+    atomic::fetch_sub(&mut cs.state.count, 1, atomic::MemoryOrder::AcqRel);
+    Result::Ok(())
+}
+
+/// `try_acquire()`: Semaforu bloke etmeden kazanmaya çalışır.
+///
+/// # Parametreler
+/// - `cs`: Üzerinde işlem yapılacak semafor (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<bool, Error>`: Başarılı olursa `Ok(true)`, değilse `Ok(false)`, hata olursa `Err`.
+pub fn try_acquire(cs: &mut counting_semaphore) -> Result<bool, Error> {
+    if !cs.state.is_initialized {
+        return Result::Err(Error::Other("Attempted to try_acquire on uninitialized semaphore.".to_string()));
+    }
+
+    let mut lk = mutex::make_lock_guard(&mut cs.state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for semaphore try_acquire: ".to_string() + e.to_string()))?;
+
+    let current_count = atomic::load(&cs.state.count, atomic::MemoryOrder::Relaxed);
+    if current_count > 0 {
+        // Yalnızca >= 1 ise azaltmaya çalış
+        let expected = current_count;
+        let desired = current_count - 1;
+        // Compare-exchange ile atomik olarak sayacı azalt
+        if atomic::compare_exchange_strong(&mut cs.state.count, &mut expected, desired, atomic::MemoryOrder::AcqRel, atomic::MemoryOrder::Relaxed) {
+             return Result::Ok(true); // Başarılı bir şekilde alındı
+        }
+    }
+    Result::Ok(false) // Alınamadı
+}
+
+/// `release()`: Semaforu serbest bırakır (sayacı 1 artırır). Bekleyen iş parçacıklarını uyandırır.
+///
+/// # Parametreler
+/// - `cs`: Üzerinde işlem yapılacak semafor (mutable).
+/// - `update`: Sayacın artırılacağı miktar (varsayılan olarak 1).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn release(cs: &mut counting_semaphore, update: i64) -> Result<void, Error> {
+    if !cs.state.is_initialized {
+        return Result::Err(Error::Other("Attempted to release on uninitialized semaphore.".to_string()));
+    }
+    if update <= 0 {
+        return Result::Err(Error::InvalidInitialValue("Release amount must be positive.".to_string()));
+    }
+
+    let mut lk = mutex::make_lock_guard(&mut cs.state.mutex)
+        .map_err(|e| Error::Other("Failed to acquire lock for semaphore release: ".to_string() + e.to_string()))?;
+
+    let old_count = atomic::fetch_add(&mut cs.state.count, update, atomic::MemoryOrder::AcqRel);
+    let new_count = old_count + update;
+
+    if new_count > cs.state.max_count {
+        // Bu durum programlama hatasıdır, semaforu aşırı serbest bırakmak.
+        // Hata ayıklama modunda assert veya runtime hatası verilebilir.
+        // C++ standardı bu durumu undefined behavior olarak kabul eder.
+        return Result::Err(Error::TooManyReleases("Semaphore count exceeds maximum allowed value.".to_string()));
+    }
+
+    // Sadece bir iş parçacığını uyandır (performans için, eğer diğerleri de bekliyorsa notify_all daha uygun olabilir)
+    // C++'daki std::semaphore::release default olarak `notify_one` kullanır.
+    // Ancak `update` > 1 ise, `update` kadar `notify_one` veya bir kez `notify_all` çağrılabilir.
+    // En güvenli yöntem, `notify_all` veya `update` kadar `notify_one` çağırmaktır.
+    // Basitlik için `notify_one` kullanalım.
+    condition_variable::notify_one(&mut cs.state.condition_variable)
+        .map_err(|e| Error::Other("Failed to notify_one in semaphore release: ".to_string() + e.to_string()))?;
+
+    Result::Ok(())
+}
+
+// --- 2. Binary Semaphore ---
+
+/// `binary_semaphore` Struct'ı: İkili bir semafor. Sayıcı yalnızca 0 veya 1 olabilir.
+pub struct binary_semaphore {
+    state: SharedSemaphoreState;
+}
+
+/// Yeni bir `binary_semaphore` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `initial_count`: Semaforun başlangıç değeri (0 veya 1).
+///
+/// # Dönüş Değeri
+/// `Result<binary_semaphore, Error>`: Başlatılan semafor nesnesi veya hata.
+pub fn new_binary_semaphore(initial_count: i64) -> Result<binary_semaphore, Error> {
+    if initial_count != 0 && initial_count != 1 {
+        return Result::Err(Error::InvalidInitialValue("Binary semaphore initial count must be 0 or 1.".to_string()));
+    }
+    match new_shared_semaphore_state(initial_count, 1) { // Maksimum değer 1
+        Result::Ok(s) => Result::Ok(binary_semaphore { state: s }),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// `destroy_binary_semaphore`: Bir `binary_semaphore` nesnesinin kaynaklarını serbest bırakır.
+pub fn destroy_binary_semaphore(mut bs: binary_semaphore) -> Result<void, Error> {
+    destroy_shared_semaphore_state(bs.state)
+}
+
+/// `acquire()`: Binary semaforu bekler. Eğer sayaç 0 ise bloke olur.
+pub fn acquire_binary(bs: &mut binary_semaphore) -> Result<void, Error> {
+    // counting_semaphore'ın acquire fonksiyonunu kullanabiliriz.
+    acquire(&mut counting_semaphore { state: bs.state }) // Geçici bir counting_semaphore oluşturup kullanıyoruz
+}
+
+/// `try_acquire()`: Binary semaforu bloke etmeden kazanmaya çalışır.
+pub fn try_acquire_binary(bs: &mut binary_semaphore) -> Result<bool, Error> {
+    // counting_semaphore'ın try_acquire fonksiyonunu kullanabiliriz.
+    try_acquire(&mut counting_semaphore { state: bs.state })
+}
+
+/// `release()`: Binary semaforu serbest bırakır.
+///
+/// # Parametreler
+/// - `bs`: Üzerinde işlem yapılacak semafor (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn release_binary(bs: &mut binary_semaphore) -> Result<void, Error> {
+    // Binary semaforlar için release her zaman 1 artırır.
+    release(&mut counting_semaphore { state: bs.state }, 1)
+}
+
+
+// --- Örnek Kullanım ---
+fn main() {
+    println("Starting Counting Semaphore example...".to_string());
+
+    let mut cs = new_counting_semaphore(2).expect("Failed to create counting semaphore"); // 2 kaynak slotu
+
+    // Üretici iş parçacıkları
+    for i in 0..5 {
+        thread::spawn(move || { // move closure required to capture `cs`
+            println("Producer thread ".to_string() + i.to_string() + " attempting to acquire resource...".to_string());
+            acquire(&mut cs).expect("Producer failed to acquire semaphore");
+            println("Producer thread ".to_string() + i.to_string() + " acquired resource. Working...".to_string());
+            thread::sleep_for_nanos(200_000_000); // İşini yap
+            println("Producer thread ".to_string() + i.to_string() + " releasing resource.".to_string());
+            release(&mut cs, 1).expect("Producer failed to release semaphore");
+        }).expect("Failed to spawn producer thread");
+    }
+
+    thread::sleep_for_nanos(1_500_000_000); // Ana iş parçacığının bitmesini bekle
+    println("Counting Semaphore example finished.".to_string());
+
+    println("\nStarting Binary Semaphore example...".to_string());
+
+    let mut bs = new_binary_semaphore(1).expect("Failed to create binary semaphore"); // 1 kaynak slotu
+
+    // İkili semafor mutex gibi kullanılabilir
+    for i in 0..5 {
+        thread::spawn(move || {
+            println("Thread ".to_string() + i.to_string() + " attempting to acquire binary resource...".to_string());
+            acquire_binary(&mut bs).expect("Thread failed to acquire binary semaphore");
+            println("Thread ".to_string() + i.to_string() + " acquired binary resource. Critical section...".to_string());
+            thread::sleep_for_nanos(100_000_000); // Kritik bölüm
+            println("Thread ".to_string() + i.to_string() + " releasing binary resource.".to_string());
+            release_binary(&mut bs).expect("Thread failed to release binary semaphore");
+        }).expect("Failed to spawn binary semaphore thread");
+    }
+
+    thread::sleep_for_nanos(1_000_000_000);
+    println("Binary Semaphore example finished.".to_string());
+
+    // Semaforları yok et
+    destroy_counting_semaphore(cs).expect("Failed to destroy counting semaphore.");
+    destroy_binary_semaphore(bs).expect("Failed to destroy binary semaphore.");
+}
