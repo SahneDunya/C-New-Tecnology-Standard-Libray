@@ -1,0 +1,297 @@
+// vector.cnt
+// Standart Dinamik Dizi (Vector) Modülü
+// Dinamik boyutlu, bitişik bellekte saklanan elemanları yönetir.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::memory;     // Bellek kopyalama ve taşıma için (varsa)
+import std::assert;     // Geliştirme/hata ayıklama için (güvenlik)
+
+/// `Error` Enum'u: Vector işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Vector kapasitesini aşan bir ekleme denemesi.
+    CapacityExceeded(string);
+    /// Geçersiz indeks erişimi.
+    IndexOutOfBounds(string);
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Vector boşken eleman çıkarmaya çalışma.
+    VectorEmpty(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Vector<T>` Struct'ı: Belirli bir T tipindeki elemanları saklayan dinamik bir dizi.
+///
+/// # Tip Parametreleri
+/// - `T`: Vector'da saklanacak elemanların tipi.
+pub struct Vector<T> {
+    /// Elemanların tutulduğu ham bellek işaretçisi (raw pointer).
+    /// `alloc` modülünden alınır ve manuel olarak yönetilir.
+    data: raw_ptr<T>;
+    /// Vector'daki geçerli eleman sayısı.
+    len: int;
+    /// Vector'ın tahsis edilmiş toplam kapasitesi (bellek yeniden tahsis edilmeden saklayabileceği eleman sayısı).
+    capacity: int;
+}
+
+// --- 1. Vector Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `Vector` oluşturur.
+///
+/// # Parametreler
+/// - `initial_capacity`: Vector için başlangıçta tahsis edilecek kapasite.
+///                       Bu, daha sonra yeniden tahsis ihtiyacını azaltabilir.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `Vector<T>` nesnesi.
+pub fn new<T>(initial_capacity: int) -> Result<Vector<T>, Error> {
+    if initial_capacity < 0 {
+        return Result::Err(Error::InvalidArgument("Initial capacity cannot be negative".to_string()));
+    }
+    if initial_capacity == 0 {
+        return Result::Ok(Vector { data: null_ptr(), len: 0, capacity: 0 });
+    }
+
+    match alloc::allocate(initial_capacity * size_of<T>()) {
+        Result::Ok(ptr) => Result::Ok(Vector {
+            data: ptr as raw_ptr<T>, // T tipine dönüştür
+            len: 0,
+            capacity: initial_capacity,
+        }),
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate initial vector memory".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Vector`'ın belleğini serbest bırakır.
+/// Bu fonksiyon, Vector'ın artık kullanılmadığı zaman çağrılmalıdır.
+pub fn drop<T>(vec: &mut Vector<T>) -> void {
+    if vec.data != null_ptr() {
+        alloc::deallocate(vec.data as raw_ptr<u8>, vec.capacity * size_of<T>());
+        vec.data = null_ptr();
+        vec.len = 0;
+        vec.capacity = 0;
+    }
+}
+
+/// Vector'ın kapasitesini artırır.
+/// İç mekanizma: genellikle mevcut kapasitenin iki katı kadar yeni bir blok tahsis eder,
+/// eski elemanları yeni bloka kopyalar ve eski bloğu serbest bırakır.
+fn grow_capacity<T>(vec: &mut Vector<T>, min_capacity: int) -> Result<void, Error> {
+    let new_capacity = if vec.capacity == 0 {
+        1
+    } else {
+        vec.capacity * 2
+    };
+    if new_capacity < min_capacity {
+        new_capacity = min_capacity;
+    }
+
+    match alloc::allocate(new_capacity * size_of<T>()) {
+        Result::Ok(new_ptr) => {
+            if vec.data != null_ptr() {
+                // Eski veriyi yeni yere kopyala
+                // std::memory::memcpy(new_ptr, vec.data, vec.len * size_of<T>()); // Eğer memcpy varsa
+                // Geçici olarak manuel kopyalama
+                for i in 0..vec.len {
+                    // Güvenli kopyalama için T'nin copy/clone özelliği olmalı.
+                    // CNT'nin tip sistemi kopyalamayı nasıl yönetiyor?
+                    // raw_ptr + offset kullanımı varsayılıyor.
+                    let old_val = raw_ptr_read(vec.data, i);
+                    raw_ptr_write(new_ptr as raw_ptr<T>, i, old_val);
+                }
+                alloc::deallocate(vec.data as raw_ptr<u8>, vec.capacity * size_of<T>());
+            }
+            vec.data = new_ptr as raw_ptr<T>;
+            vec.capacity = new_capacity;
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to reallocate vector memory".to_string() + e.to_string())),
+    }
+}
+
+/// Vector'ın kapasitesini belirtilen yeni kapasiteye ayarlar.
+/// Eğer yeni kapasite mevcut kapasiteden küçükse, bu bir hata olabilir
+/// veya elemanların kesilmesine yol açabilir (destructors çağrılmadan).
+/// Genellikle sadece büyütmek için kullanılır.
+pub fn reserve<T>(vec: &mut Vector<T>, new_capacity: int) -> Result<void, Error> {
+    if new_capacity <= vec.capacity {
+        return Result::Ok(()); // Zaten yeterli kapasite var
+    }
+    grow_capacity(vec, new_capacity)
+}
+
+
+// --- 2. Eleman Ekleme ve Çıkarma ---
+
+/// Vector'ın sonuna bir eleman ekler.
+/// Kapasite yetersizse otomatik olarak büyür.
+///
+/// # Parametreler
+/// - `vec`: Elemanın ekleneceği `Vector<T>`'nin mutable referansı.
+/// - `item`: Eklenecek eleman.
+pub fn push<T>(vec: &mut Vector<T>, item: T) -> Result<void, Error> {
+    if vec.len == vec.capacity {
+        match grow_capacity(vec, vec.len + 1) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+    // Elemanı mevcut boş yere yaz
+    raw_ptr_write(vec.data, vec.len, item);
+    vec.len = vec.len + 1;
+    Result::Ok(())
+}
+
+/// Vector'ın sonundan bir elemanı çıkarır ve döndürür.
+/// Vector boşsa hata döner.
+///
+/// # Parametreler
+/// - `vec`: Elemanın çıkarılacağı `Vector<T>`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(T)` çıkarılan eleman, `Result::Err(Error)` Vector boşsa.
+pub fn pop<T>(vec: &mut Vector<T>) -> Result<T, Error> {
+    if vec.len == 0 {
+        return Result::Err(Error::VectorEmpty("Cannot pop from an empty vector".to_string()));
+    }
+    vec.len = vec.len - 1;
+    // Elemanı okuyup döndür
+    Result::Ok(raw_ptr_read(vec.data, vec.len))
+}
+
+/// Vector'daki belirli bir indeksteki elemanı siler ve döndürür.
+/// Elemanlar kaydırılarak boşluk doldurulur.
+///
+/// # Parametreler
+/// - `vec`: Elemanın silineceği `Vector<T>`'nin mutable referansı.
+/// - `index`: Silinecek elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(T)` silinen eleman, `Result::Err(Error)` geçersiz indeks ise.
+pub fn remove<T>(vec: &mut Vector<T>, index: int) -> Result<T, Error> {
+    if index < 0 || index >= vec.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for remove operation".to_string()));
+    }
+    let removed_item = raw_ptr_read(vec.data, index);
+
+    // Kalan elemanları kaydır
+    for i in index..(vec.len - 1) {
+        let next_item = raw_ptr_read(vec.data, i + 1);
+        raw_ptr_write(vec.data, i, next_item);
+    }
+    vec.len = vec.len - 1;
+    Result::Ok(removed_item)
+}
+
+/// Vector'daki tüm elemanları temizler, ancak tahsis edilen belleği korur.
+pub fn clear<T>(vec: &mut Vector<T>) -> void {
+    // T tipi için destructors çağrılmalı mı? CNT'nin bellek yönetimi modeline bağlı.
+    // Şimdilik sadece uzunluğu sıfırlıyoruz.
+    vec.len = 0;
+}
+
+// --- 3. Eleman Erişimi ---
+
+/// Belirli bir indeksteki elemanın immutable referansını döndürür.
+///
+/// # Parametreler
+/// - `vec`: Elemanın okunacağı `Vector<T>`'nin referansı.
+/// - `index`: Elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&T)` elemanın referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get<T>(vec: &Vector<T>, index: int) -> Result<&T, Error> {
+    if index < 0 || index >= vec.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get operation".to_string()));
+    }
+    Result::Ok(raw_ptr_offset(vec.data, index))
+}
+
+/// Belirli bir indeksteki elemanın mutable referansını döndürür.
+///
+/// # Parametreler
+/// - `vec`: Elemanın değiştirileceği `Vector<T>`'nin mutable referansı.
+/// - `index`: Elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&mut T)` elemanın mutable referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get_mut<T>(vec: &mut Vector<T>, index: int) -> Result<&mut T, Error> {
+    if index < 0 || index >= vec.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get_mut operation".to_string()));
+    }
+    Result::Ok(raw_ptr_offset_mut(vec.data, index))
+}
+
+/// Vector'ın ilk elemanının immutable referansını döndürür.
+/// Vector boşsa hata döner.
+pub fn first<T>(vec: &Vector<T>) -> Result<&T, Error> {
+    get(vec, 0)
+}
+
+/// Vector'ın ilk elemanının mutable referansını döndürür.
+/// Vector boşsa hata döner.
+pub fn first_mut<T>(vec: &mut Vector<T>) -> Result<&mut T, Error> {
+    get_mut(vec, 0)
+}
+
+/// Vector'ın son elemanının immutable referansını döndürür.
+/// Vector boşsa hata döner.
+pub fn last<T>(vec: &Vector<T>) -> Result<&T, Error> {
+    if vec.len == 0 {
+        return Result::Err(Error::VectorEmpty("Cannot get last element of an empty vector".to_string()));
+    }
+    get(vec, vec.len - 1)
+}
+
+/// Vector'ın son elemanının mutable referansını döndürür.
+/// Vector boşsa hata döner.
+pub fn last_mut<T>(vec: &mut Vector<T>) -> Result<&mut T, Error> {
+    if vec.len == 0 {
+        return Result::Err(Error::VectorEmpty("Cannot get last element of an empty vector".to_string()));
+    }
+    get_mut(vec, vec.len - 1)
+}
+
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Vector'daki geçerli eleman sayısını döndürür.
+pub fn len<T>(vec: &Vector<T>) -> int {
+    vec.len
+}
+
+/// Vector'ın boş olup olmadığını kontrol eder.
+pub fn is_empty<T>(vec: &Vector<T>) -> bool {
+    vec.len == 0
+}
+
+/// Vector'ın tahsis edilmiş kapasitesini döndürür.
+pub fn capacity<T>(vec: &Vector<T>) -> int {
+    vec.capacity
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// CNT'nin iterator mekanizması varsa, burada Iterator trait'i implemente edilebilir.
+// Şimdilik, diziyi indeksle gezmek için döngü kullanılabilir.
+
+ pub fn iter<T>(vec: &Vector<T>) -> Iterator<T> { ... }
+ pub fn iter_mut<T>(vec: &mut Vector<T>) -> MutableIterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Örnek) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, index)`: `ptr`'nin `index` offsetindeki T değerini okur.
+// `raw_ptr_write(ptr, index, value)`: `ptr`'nin `index` offsetindeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, index)`: `ptr`'den `index` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, index)`: `ptr`'den `index` kadar offsetlenmiş bir mutable T referansı döndürür.
