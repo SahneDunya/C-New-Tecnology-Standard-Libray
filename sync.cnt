@@ -1,0 +1,261 @@
+// sync.cnt
+// Standart Senkronizasyon (Synchronization) modülü
+
+import std::collections; // List<T> için
+import std::string; // Hata mesajları için
+
+// Harici C veya sistem senkronizasyon API'lerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, işletim sisteminin thread/mutex/channel API'lerini (örn. pthreads, Windows Threads) kullanır.
+extern fn _cnt_sync_mutex_new() -> _cnt_Result_Mutex_sync_Error;
+extern fn _cnt_sync_mutex_lock(mutex: &Mutex) -> _cnt_Result_void_sync_Error; // Kilitlenmişse blocking
+extern fn _cnt_sync_mutex_try_lock(mutex: &Mutex) -> _cnt_Result_bool_sync_Error; // Başarılıysa true, değilse false
+extern fn _cnt_sync_mutex_unlock(mutex: &Mutex) -> _cnt_Result_void_sync_Error;
+extern fn _cnt_sync_mutex_drop(mutex: Mutex) -> void; // Mutex'in kaynağını serbest bırakır
+
+extern fn _cnt_sync_channel_new<T>(capacity: int) -> _cnt_Result_Channel_sync_Error;
+extern fn _cnt_sync_channel_send<T>(channel: &Channel<T>, value: T) -> _cnt_Result_void_sync_Error; // Blocking
+extern fn _cnt_sync_channel_try_send<T>(channel: &Channel<T>, value: T) -> _cnt_Result_bool_sync_Error; // Blocking olmayan
+extern fn _cnt_sync_channel_recv<T>(channel: &Channel<T>) -> _cnt_Result_T_sync_Error; // Blocking
+extern fn _cnt_sync_channel_try_recv<T>(channel: &Channel<T>) -> _cnt_Result_Option_T_sync_Error; // Blocking olmayan, Option<T> döner
+extern fn _cnt_sync_channel_close<T>(channel: Channel<T>) -> _cnt_Result_void_sync_Error; // Kanalı kapatır
+extern fn _cnt_sync_channel_drop<T>(channel: Channel<T>) -> void; // Kanalın kaynağını serbest bırakır
+
+
+/// `Error` Enum'u: Senkronizasyon işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Kilit alma başarısız oldu (mutex'in kilitlenmesi veya bozulması).
+    LockError(string);
+    /// Bir iş parçacığı tarafından paniklendi (mutex'in bozulması).
+    Poisoned(string);
+    /// Kanal boştu veya kapalıydı.
+    ChannelEmpty;
+    /// Kanal doluydu.
+    ChannelFull;
+    /// Kanal kapatıldı.
+    ChannelClosed;
+    /// Geçersiz argüman.
+    InvalidInput(string);
+    /// Bir I/O veya sistem çağrısı sırasında genel hata.
+    IoError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Bu enum, `fs.cnt` dosyasındakiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Option<T>` Enum'u: Bir değerin varlığını veya yokluğunu temsil eder.
+/// Bu enum, `collections.cnt` dosyasındakiyle aynı mantığı taşır.
+pub enum Option<T> {
+    Some(T);
+    None;
+}
+
+/// `Mutex<T>`: Paylaşılan verilere eş zamanlı erişimi kontrol eden bir karşılıklı dışlama kilidi.
+/// Sadece bir iş parçacığının belirli bir anda kilitli verilere erişmesine izin verir.
+///
+/// `T` tipindeki verinin sahipliğini yönetir.
+pub struct Mutex<T> {
+    // Dahili olarak mutex'in sistem tanımlayıcısı (örn. pthread_mutex_t*)
+    // ve T tipindeki verinin kendisi bulunur.
+    _phantom_data: T; // Jenerik tipi belirtmek için
+}
+
+/// Yeni bir `Mutex` oluşturur ve içine başlangıç verisini koyar.
+///
+/// # Parametreler
+/// - `data`: Mutex tarafından korunacak başlangıç verisi. Sahipliği mutex'e taşınır.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa yeni `Mutex<T>` içeren `Result::Ok(Mutex<T>)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn new_mutex<T>(data: T) -> Result<Mutex<T>, Error> {
+    // Dahili olarak _cnt_sync_mutex_new çağrılacak ve data yerleştirilecek.
+    _cnt_sync_mutex_new()
+}
+
+/// Mutex'i kilitler ve kilitlenmiş veriye mutable bir referans döndürür.
+/// Eğer mutex zaten kilitliyse, bu fonksiyon kilit açılana kadar bloklar.
+///
+/// # Parametreler
+/// - `mutex`: Kilitlemek istediğiniz `Mutex` referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa kilitlenmiş veriye `&mut T` referansı içeren `Result::Ok(&mut T)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn lock<T>(mutex: &mut Mutex<T>) -> Result<&mut T, Error> {
+    // Mutex kilitlenir, içerideki veri açığa çıkarılır.
+    // Eğer kilitlenme başarılı olursa, _cnt_sync_mutex_lock çağrılır
+    // ve Mutex'in dahili verisine mutable bir referans döndürülür.
+    // Başarısız olursa Error döndürülür.
+    // Bu, Rust'taki MutexGuard'a benzer bir davranış gerektirebilir.
+    // Şimdilik basitleştirilmiş bir arayüz.
+    let lock_result = _cnt_sync_mutex_lock(mutex);
+    match lock_result {
+        Result::Ok(_) => {
+            // Dahili veriye bir referans oluşturulur ve döndürülür.
+            // Bu referansın ömrü (lifetime) mutex kilidi açılana kadar geçerli olmalıdır.
+            // Bu, derleyici için karmaşık bir ömür (lifetime) kısıtlaması gerektirecektir.
+            // CNT'nin bunu otomatik olarak yönettiği varsayılıyor.
+            unimplemented!(); // Burası derleyicinin özel bir desteğini gerektirir
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Mutex'i kilitler ve kilitlenmiş veriye immutable bir referans döndürür.
+/// Eğer mutex zaten kilitliyse, bu fonksiyon kilit açılana kadar bloklar.
+///
+/// # Parametreler
+/// - `mutex`: Kilitlemek istediğiniz `Mutex` referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa kilitlenmiş veriye `&T` referansı içeren `Result::Ok(&T)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn lock_read<T>(mutex: &Mutex<T>) -> Result<&T, Error> {
+    // Okuma kilidi, aynı anda birden fazla okuyucuya izin verebilir (RwLock'a benzer).
+    // Ancak tipik bir Mutex, sadece tek bir erişime izin verir. Bu nedenle bu
+    // kilit alma, aslında yukarıdaki `lock` ile aynı mekanizmayı kullanır,
+    // ancak döndürülen referans immutable'dır.
+    let lock_result = _cnt_sync_mutex_lock(mutex);
+    match lock_result {
+        Result::Ok(_) => {
+            unimplemented!(); // Yine derleyici desteği
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Mutex'i kilitlemeye çalışır, eğer kilitliyse hemen geri döner (`false` ile).
+/// Bloklama yapmaz.
+///
+/// # Parametreler
+/// - `mutex`: Kilitlemek istediğiniz `Mutex` referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olup olmadığını belirten `Result::Ok(true)` veya `Result::Ok(false)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn try_lock<T>(mutex: &mut Mutex<T>) -> Result<bool, Error> {
+    _cnt_sync_mutex_try_lock(mutex)
+}
+
+// Not: Mutex'in kilidinin ne zaman açılacağı önemlidir. Rust'taki MutexGuard gibi
+// RAII (Resource Acquisition Is Initialization) prensibini kullanan bir yapı,
+// kilitlenmiş veriye olan referans kapsam dışına çıktığında kilidin otomatik olarak
+// açılmasını sağlar. CNT'nin sahiplik sistemi bunun için bir mekanizma sağlamalıdır.
+// Bu taslakta, kilit açma işlevinin doğrudan bir `unlock` çağrısı yerine,
+// döndürülen referansın ömrü ile ilişkili olduğu varsayılmaktadır.
+// Eğer böyle bir mekanizma yoksa, explicit `unlock` fonksiyonları gerekecektir.
+// Örnek olması için, `unlock` fonksiyonunu manuel kullanım için ekleyelim:
+
+/// Mutex'in kilidini manuel olarak açar.
+/// Eğer otomatik kilit açma mekanizması (RAII) varsa genellikle gerekmez.
+///
+/// # Parametreler
+/// - `mutex`: Kilidi açılacak `Mutex` referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn unlock<T>(mutex: &mut Mutex<T>) -> Result<void, Error> {
+    _cnt_sync_mutex_unlock(mutex)
+}
+
+
+/// `Channel<T>`: İş parçacıkları arasında mesaj göndermek ve almak için kullanılan bir iletişim kanalı.
+/// Tipik olarak "gönderici" ve "alıcı" kısımları vardır.
+///
+/// `T` tipindeki mesajların sahipliğini yönetir.
+pub struct Channel<T> {
+    // Dahili olarak kanalın sistem tanımlayıcısı (örn. bir kuyruk ve senkronizasyon primitifleri)
+    _phantom_data: T; // Jenerik tipi belirtmek için
+}
+
+/// Yeni bir tek üretici, tek tüketici (single-producer, single-consumer - SPSC) kanalı oluşturur.
+///
+/// # Parametreler
+/// - `capacity`: Kanalın mesajları tutabileceği maksimum kapasite. 0 ise sınırsız (unbounded).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa yeni `Channel<T>` içeren `Result::Ok(Channel<T>)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn new_channel<T>(capacity: int) -> Result<Channel<T>, Error> {
+    _cnt_sync_channel_new::<T>(capacity)
+}
+
+/// Kanala bir mesaj gönderir. Eğer kanal doluysa, boş yer açılana kadar bloklar.
+/// Gönderilen mesajın sahipliği kanala taşınır.
+///
+/// # Parametreler
+/// - `channel`: Mesajın gönderileceği kanal referansı.
+/// - `value`: Gönderilecek mesaj. Sahipliği kanala taşınır.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn send<T>(channel: &Channel<T>, value: T) -> Result<void, Error> {
+    _cnt_sync_channel_send(channel, value)
+}
+
+/// Kanala bir mesaj göndermeye çalışır, eğer kanal doluysa hemen geri döner.
+/// Bloklama yapmaz.
+///
+/// # Parametreler
+/// - `channel`: Mesajın gönderileceği kanal referansı.
+/// - `value`: Gönderilecek mesaj. Sahipliği kanala taşınır.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(true)`, kanal doluysa `Result::Ok(false)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn try_send<T>(channel: &Channel<T>, value: T) -> Result<bool, Error> {
+    _cnt_sync_channel_try_send(channel, value)
+}
+
+/// Kanaldan bir mesaj alır. Eğer kanal boşsa, yeni bir mesaj gelene kadar bloklar.
+/// Alınan mesajın sahipliği çağıran tarafa aktarılır.
+///
+/// # Parametreler
+/// - `channel`: Mesajın alınacağı kanal referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa alınan mesajı içeren `Result::Ok(T)`,
+/// kanal kapatılmışsa veya hata oluşursa `Result::Err(Error)`.
+pub fn recv<T>(channel: &Channel<T>) -> Result<T, Error> {
+    _cnt_sync_channel_recv(channel)
+}
+
+/// Kanaldan bir mesaj almaya çalışır, eğer kanal boşsa hemen geri döner (`Option::None` ile).
+/// Bloklama yapmaz.
+///
+/// # Parametreler
+/// - `channel`: Mesajın alınacağı kanal referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa alınan mesajı içeren `Result::Ok(Option::Some(T))`,
+/// kanal boşsa `Result::Ok(Option::None)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn try_recv<T>(channel: &Channel<T>) -> Result<Option<T>, Error> {
+    _cnt_sync_channel_try_recv(channel)
+}
+
+/// Bir kanalı kapatır. Kapatıldıktan sonra yeni mesaj gönderilemez, ancak
+/// mevcut mesajlar hala alınabilir.
+///
+/// # Parametreler
+/// - `channel`: Kapatılacak kanal (sahiplik taşınır ve kaynak serbest bırakılır).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn close_channel<T>(channel: Channel<T>) -> Result<void, Error> {
+    _cnt_sync_channel_close(channel)
+}
+
+
+// --- Gelecekte Eklenebilecek Diğer Senkronizasyon Primitifleri ---
+// - RwLock<T>: Okuma/Yazma kilidi. Aynı anda birden fazla okuyucuya veya tek bir yazıcıya izin verir.
+// - Arc<T> (Atomic Reference Counted): Paylaşılan sahiplik için akıllı işaretçi.
+// - Atomic<T>: Atomik operasyonlar (kilitsiz sayaçlar vb. için).
+// - Condvar: Koşul değişkenleri (iş parçacıklarını belirli koşullar altında bekletmek/uyandırmak için).
+// - Barrier: Birden fazla iş parçacığının belirli bir noktaya kadar birbirlerini beklemesi için.
