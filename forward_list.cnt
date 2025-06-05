@@ -1,0 +1,294 @@
+// forward_list.cnt
+// Standart Tek Yönlü Bağlantılı Liste Modülü
+// Dinamik boyutlu, düğümler halinde saklanan elemanları yönetir, sadece ileriye doğru gezinme.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Liste işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz indeks erişimi.
+    IndexOutOfBounds(string);
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Liste boşken eleman çıkarmaya çalışma.
+    ListEmpty(string);
+    /// Belirtilen eleman bulunamadı.
+    NotFound(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Node<T>` Struct'ı: Tek yönlü bağlantılı listedeki bir düğümü temsil eder.
+pub struct Node<T> {
+    /// Düğümün değeri.
+    value: T;
+    /// Sonraki düğüme işaretçi (null eğer son düğümse).
+    next: raw_ptr<Node<T>>;
+}
+
+/// `ForwardList<T>` Struct'ı: Tek yönlü bağlantılı listeyi temsil eder.
+/// Sadece başa ve bir düğüm sonrası ekleme/çıkarma işlemleri verimlidir.
+///
+/// # Tip Parametreleri
+/// - `T`: Listede saklanacak elemanların tipi.
+pub struct ForwardList<T> {
+    /// Listenin başındaki (ilk eleman) düğüme işaretçi.
+    head: raw_ptr<Node<T>>;
+    /// Listedeki eleman sayısı. (İsteğe bağlı, O(1) len için tutulur, aksi halde O(n))
+    len: int;
+}
+
+// --- 1. Liste Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `ForwardList` oluşturur.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `ForwardList<T>` nesnesi.
+pub fn new<T>() -> ForwardList<T> {
+    ForwardList {
+        head: null_ptr(),
+        len: 0,
+    }
+}
+
+/// Bir `Node<T>` düğümünü bellekte tahsis eder.
+fn allocate_node<T>(value: T) -> Result<raw_ptr<Node<T>>, Error> {
+    match alloc::allocate(size_of<Node<T>>()) {
+        Result::Ok(ptr_u8) => {
+            let node_ptr = ptr_u8 as raw_ptr<Node<T>>;
+            // Düğümün alanlarını başlat
+            raw_ptr_write(node_ptr, 0, Node { value: value, next: null_ptr() });
+            Result::Ok(node_ptr)
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate list node: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Node<T>` düğümünün belleğini serbest bırakır.
+fn deallocate_node<T>(node_ptr: raw_ptr<Node<T>>) -> void {
+    if node_ptr != null_ptr() {
+        // Düğümdeki T değeri için destructors çağrılmalı mı?
+        // CNT'nin bellek yönetimi ve destructor mekanizmasına bağlı.
+        alloc::deallocate(node_ptr as raw_ptr<u8>, size_of<Node<T>>());
+    }
+}
+
+/// Bir `ForwardList`'in belleğini serbest bırakır ve tüm düğümleri temizler.
+/// Bu fonksiyon, Liste artık kullanılmadığı zaman çağrılmalıdır.
+pub fn drop<T>(list: &mut ForwardList<T>) -> void {
+    let mut current_node = list.head;
+    while current_node != null_ptr() {
+        let next_node = raw_ptr_read(current_node, 0).next; // current_node'un next'ini al
+        deallocate_node(current_node); // current_node'u serbest bırak
+        current_node = next_node; // Sonraki düğüme geç
+    }
+    list.head = null_ptr();
+    list.len = 0;
+}
+
+// --- 2. Eleman Ekleme ve Çıkarma ---
+
+/// Listenin başına bir eleman ekler. O(1)
+///
+/// # Parametreler
+/// - `list`: Elemanın ekleneceği `ForwardList<T>`'nin mutable referansı.
+/// - `item`: Eklenecek eleman.
+pub fn push_front<T>(list: &mut ForwardList<T>, item: T) -> Result<void, Error> {
+    match allocate_node(item) {
+        Result::Ok(new_node_ptr) => {
+            let mut new_node = raw_ptr_read(new_node_ptr, 0);
+            new_node.next = list.head; // Yeni düğümün next'i mevcut başa işaret etsin
+            raw_ptr_write(new_node_ptr, 0, new_node); // Yeni düğümü belleğe yaz
+            list.head = new_node_ptr; // Listenin başını yeni düğüm yap
+            list.len = list.len + 1;
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Listenin başından bir elemanı çıkarır ve döndürür. O(1)
+/// Liste boşsa hata döner.
+///
+/// # Parametreler
+/// - `list`: Elemanın çıkarılacağı `ForwardList<T>`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(T)` çıkarılan eleman, `Result::Err(Error)` Liste boşsa.
+pub fn pop_front<T>(list: &mut ForwardList<T>) -> Result<T, Error> {
+    if list.head == null_ptr() {
+        return Result::Err(Error::ListEmpty("Cannot pop from an empty list".to_string()));
+    }
+
+    let old_head_ptr = list.head;
+    let old_head_node = raw_ptr_read(old_head_ptr, 0);
+    let item = old_head_node.value;
+
+    list.head = old_head_node.next; // Baş işaretçisini bir sonraki düğüme taşı
+    deallocate_node(old_head_ptr);
+    list.len = list.len - 1;
+    Result::Ok(item)
+}
+
+/// Belirtilen bir düğümden sonra yeni bir eleman ekler. O(1)
+/// Bu fonksiyon, `insert_after` mantığını uygulamak için kullanılır.
+/// (Belirtilen konumun kendisi değil, ondan *sonraki* konumdur.)
+///
+/// # Parametreler
+/// - `list`: Elemanın ekleneceği `ForwardList<T>`'nin mutable referansı.
+/// - `prev_node_ptr`: Yeni elemanın ekleneceği düğümün işaretçisi (veya null_ptr eğer başa eklenecekse).
+/// - `item`: Eklenecek eleman.
+pub fn insert_after<T>(list: &mut ForwardList<T>, prev_node_ptr: raw_ptr<Node<T>>, item: T) -> Result<void, Error> {
+    match allocate_node(item) {
+        Result::Ok(new_node_ptr) => {
+            let mut new_node = raw_ptr_read(new_node_ptr, 0);
+            if prev_node_ptr == null_ptr() { // Listenin başına ekle (push_front ile aynı)
+                new_node.next = list.head;
+                list.head = new_node_ptr;
+            } else {
+                // prev_node_ptr'den sonra ekle
+                let mut prev_node = raw_ptr_read(prev_node_ptr, 0);
+                new_node.next = prev_node.next;
+                prev_node.next = new_node_ptr;
+                raw_ptr_write(prev_node_ptr, 0, prev_node); // prev_node'un next'ini güncelle
+            }
+            raw_ptr_write(new_node_ptr, 0, new_node); // Yeni düğümü belleğe yaz
+            list.len = list.len + 1;
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Belirtilen bir düğümden sonraki elemanı siler. O(1) (Önceki düğümün işaretçisi verildiğinde)
+/// Bu fonksiyon, `erase_after` mantığını uygulamak için kullanılır.
+///
+/// # Parametreler
+/// - `list`: Elemanın silineceği `ForwardList<T>`'nin mutable referansı.
+/// - `prev_node_ptr`: Silinecek elemanın önceki düğümünün işaretçisi (veya null_ptr eğer ilk eleman silinecekse).
+///
+/// # Dönüş Değeri
+/// `Result::Ok(T)` silinen eleman, `Result::Err(Error)` geçersiz konum veya liste boşsa.
+pub fn erase_after<T>(list: &mut ForwardList<T>, prev_node_ptr: raw_ptr<Node<T>>) -> Result<T, Error> {
+    if prev_node_ptr == null_ptr() { // İlk elemanı sil
+        return pop_front(list);
+    }
+
+    let mut prev_node = raw_ptr_read(prev_node_ptr, 0);
+    let to_remove_ptr = prev_node.next;
+
+    if to_remove_ptr == null_ptr() {
+        return Result::Err(Error::IndexOutOfBounds("No element after the given previous node to erase".to_string()));
+    }
+
+    let to_remove_node = raw_ptr_read(to_remove_ptr, 0);
+    let item = to_remove_node.value;
+
+    prev_node.next = to_remove_node.next; // Silinecek düğümü atla
+    raw_ptr_write(prev_node_ptr, 0, prev_node); // prev_node'un next'ini güncelle
+
+    deallocate_node(to_remove_ptr);
+    list.len = list.len - 1;
+    Result::Ok(item)
+}
+
+
+/// Listedeki tüm elemanları temizler.
+pub fn clear<T>(list: &mut ForwardList<T>) -> void {
+    drop(list); // Drop fonksiyonu tüm düğümleri serbest bırakır ve listeyi sıfırlar.
+}
+
+// --- 3. Eleman Erişimi ve Arama (Rastgele Erişim O(n)) ---
+
+/// Belirli bir indeksteki elemanın immutable referansını döndürür. O(n)
+///
+/// # Parametreler
+/// - `list`: Elemanın okunacağı `ForwardList<T>`'nin referansı.
+/// - `index`: Elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&T)` elemanın referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get<T>(list: &ForwardList<T>, index: int) -> Result<&T, Error> {
+    if index < 0 || index >= list.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get operation".to_string()));
+    }
+    let mut current_ptr = list.head;
+    for i in 0..index {
+        current_ptr = raw_ptr_read(current_ptr, 0).next;
+    }
+    Result::Ok(&raw_ptr_read(current_ptr, 0).value)
+}
+
+/// Belirli bir indeksteki elemanın mutable referansını döndürür. O(n)
+///
+/// # Parametreler
+/// - `list`: Elemanın değiştirileceği `ForwardList<T>`'nin mutable referansı.
+/// - `index`: Elemanın indeksi.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(&mut T)` elemanın mutable referansı, `Result::Err(Error)` geçersiz indeks ise.
+pub fn get_mut<T>(list: &mut ForwardList<T>, index: int) -> Result<&mut T, Error> {
+    if index < 0 || index >= list.len {
+        return Result::Err(Error::IndexOutOfBounds("Index out of bounds for get_mut operation".to_string()));
+    }
+    let mut current_ptr = list.head;
+    for i in 0..index {
+        current_ptr = raw_ptr_read(current_ptr, 0).next;
+    }
+    Result::Ok(raw_ptr_offset_mut(current_ptr, 0).value)
+}
+
+/// Listedeki ilk elemanın immutable referansını döndürür. O(1)
+/// Liste boşsa hata döner.
+pub fn first<T>(list: &ForwardList<T>) -> Result<&T, Error> {
+    if list.head == null_ptr() {
+        return Result::Err(Error::ListEmpty("Cannot get first element of an empty list".to_string()));
+    }
+    Result::Ok(&raw_ptr_read(list.head, 0).value)
+}
+
+/// Listedeki ilk elemanın mutable referansını döndürür. O(1)
+/// Liste boşsa hata döner.
+pub fn first_mut<T>(list: &mut ForwardList<T>) -> Result<&mut T, Error> {
+    if list.head == null_ptr() {
+        return Result::Err(Error::ListEmpty("Cannot get first element of an empty list".to_string()));
+    }
+    Result::Ok(raw_ptr_offset_mut(list.head, 0).value)
+}
+
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Listedeki geçerli eleman sayısını döndürür.
+pub fn len<T>(list: &ForwardList<T>) -> int {
+    list.len
+}
+
+/// Listenin boş olup olmadığını kontrol eder.
+pub fn is_empty<T>(list: &ForwardList<T>) -> bool {
+    list.len == 0
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// İteratör, tek yönlü bir listede doğal bir gezinme şeklidir.
+ pub fn iter<T>(list: &ForwardList<T>) -> Iterator<T> { ... }
+ pub fn iter_mut<T>(list: &mut ForwardList<T>) -> MutableIterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `raw_ptr_offset(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir T referansı döndürür.
+// `raw_ptr_offset_mut(ptr, offset)`: `ptr`'den `offset` kadar offsetlenmiş bir mutable T referansı döndürür.
