@@ -1,0 +1,229 @@
+// exception.cnt
+// Standart İstisna Modülü
+// Çalışma zamanı hatalarını ve istisnai durumları temsil etmek için bir çerçeve sağlar.
+
+import std::string;     // İstisna mesajları için
+import std::alloc;      // İstisna nesneleri için dinamik bellek tahsisi gerekebilir
+
+// Not: Bu modülün implementasyonu, CNT'nin dil düzeyinde istisna işleme
+// (throw/catch/finally) mekanizmalarını destekleyip desteklemediğine bağlıdır.
+// Eğer desteklemiyorsa, buradaki yapılar daha çok 'Result' tipleriyle kullanılacak
+// hata tipleri olarak işlev görecektir.
+// Bu taslak, temel bir istisna mekanizmasının varlığını varsayacaktır.
+
+/// `Exception` Struct'ı: Tüm standart istisnaların temel sınıfıdır.
+///
+/// # Alanlar
+/// - `message`: İstisnanın nedenini açıklayan bir mesaj.
+pub struct Exception {
+    pub message: string;
+}
+
+/// Yeni bir `Exception` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `msg`: İstisna mesajı.
+///
+/// # Dönüş Değeri
+/// `Exception`: Yeni oluşturulan istisna nesnesi.
+pub fn new_exception(msg: string) -> Exception {
+    Exception { message: msg }
+}
+
+/// `what()`: İstisna mesajını döndürür.
+///
+/// # Parametreler
+/// - `e`: İstisna nesnesine referans.
+///
+/// # Dönüş Değeri
+/// `string`: İstisna mesajı.
+pub fn what(e: &Exception) -> string {
+    e.message.clone() // String'in kopyasını döndür (güvenlik için)
+}
+
+// --- 1. Standart İstisna Hiyerarşisi ---
+
+// `Exception` temel sınıfından türeyen daha spesifik istisna tipleri.
+// Bu, hata yönetimini daha granular hale getirir.
+
+/// `LogicError` Struct'ı: Programlama mantığındaki hataları temsil eder.
+/// Örneğin, geçersiz argümanlar, önkoşul ihlalleri.
+pub struct LogicError {
+    base: Exception;
+}
+
+/// Yeni bir `LogicError` nesnesi oluşturur.
+pub fn new_logic_error(msg: string) -> LogicError {
+    LogicError { base: new_exception(msg) }
+}
+
+/// `what()`: LogicError mesajını döndürür.
+pub fn logic_error_what(e: &LogicError) -> string {
+    what(&e.base)
+}
+
+
+/// `InvalidArgument` Struct'ı: Fonksiyonlara veya metotlara geçersiz argümanlar verildiğinde fırlatılır.
+pub struct InvalidArgument {
+    base: LogicError;
+}
+
+/// Yeni bir `InvalidArgument` nesnesi oluşturur.
+pub fn new_invalid_argument(msg: string) -> InvalidArgument {
+    InvalidArgument { base: new_logic_error(msg) }
+}
+
+/// `what()`: InvalidArgument mesajını döndürür.
+pub fn invalid_argument_what(e: &InvalidArgument) -> string {
+    logic_error_what(&e.base)
+}
+
+
+/// `RuntimeError` Struct'ı: Programın çalışma zamanında ortaya çıkan hataları temsil eder.
+/// Örneğin, bellek tahsisi hataları, dosya giriş/çıkış hataları.
+pub struct RuntimeError {
+    base: Exception;
+}
+
+/// Yeni bir `RuntimeError` nesnesi oluşturur.
+pub fn new_runtime_error(msg: string) -> RuntimeError {
+    RuntimeError { base: new_exception(msg) }
+}
+
+/// `what()`: RuntimeError mesajını döndürür.
+pub fn runtime_error_what(e: &RuntimeError) -> string {
+    what(&e.base)
+}
+
+
+/// `BadAlloc` Struct'ı: Bellek tahsisi başarısız olduğunda fırlatılır.
+pub struct BadAlloc {
+    base: RuntimeError;
+}
+
+/// Yeni bir `BadAlloc` nesnesi oluşturur.
+pub fn new_bad_alloc(msg: string) -> BadAlloc {
+    BadAlloc { base: new_runtime_error(msg) }
+}
+
+/// `what()`: BadAlloc mesajını döndürür.
+pub fn bad_alloc_what(e: &BadAlloc) -> string {
+    runtime_error_what(&e.base)
+}
+
+// Daha önce tanımladığımız modüllerden BadAccess hataları için:
+/// `BadOptionalAccess` Struct'ı: std::optional boşken değerine erişilmeye çalışıldığında fırlatılır.
+pub struct BadOptionalAccess {
+    base: LogicError; // Mantıksal bir hata olarak kabul edilebilir (kullanım hatası).
+}
+
+/// Yeni bir `BadOptionalAccess` nesnesi oluşturur.
+pub fn new_bad_optional_access(msg: string) -> BadOptionalAccess {
+    BadOptionalAccess { base: new_logic_error(msg) }
+}
+
+/// `what()`: BadOptionalAccess mesajını döndürür.
+pub fn bad_optional_access_what(e: &BadOptionalAccess) -> string {
+    logic_error_what(&e.base)
+}
+
+
+/// `BadVariantAccess` Struct'ı: std::variant yanlış tipte değerine erişilmeye çalışıldığında fırlatılır.
+pub struct BadVariantAccess {
+    base: LogicError; // Mantıksal bir hata olarak kabul edilebilir (kullanım hatası).
+}
+
+/// Yeni bir `BadVariantAccess` nesnesi oluşturur.
+pub fn new_bad_variant_access(msg: string) -> BadVariantAccess {
+    BadVariantAccess { base: new_logic_error(msg) }
+}
+
+/// `what()`: BadVariantAccess mesajını döndürür.
+pub fn bad_variant_access_what(e: &BadVariantAccess) -> string {
+    logic_error_what(&e.base)
+}
+
+/// `BadAnyCast` Struct'ı: std::any yanlış tipte cast edilmeye çalışıldığında fırlatılır.
+pub struct BadAnyCast {
+    base: LogicError; // Mantıksal bir hata olarak kabul edilebilir (kullanım hatası).
+}
+
+/// Yeni bir `BadAnyCast` nesnesi oluşturur.
+pub fn new_bad_any_cast(msg: string) -> BadAnyCast {
+    BadAnyCast { base: new_logic_error(msg) }
+}
+
+/// `what()`: BadAnyCast mesajını döndürür.
+pub fn bad_any_cast_what(e: &BadAnyCast) -> string {
+    logic_error_what(&e.base)
+}
+
+// --- 2. İstisna Fırlatma (Eğer Dil Destekliyorsa) ---
+
+// Eğer CNT'de `throw` anahtar kelimesi varsa, bu fonksiyonlar istisna fırlatmanın
+// standart bir yolu olabilir. Aksi takdirde, bu fonksiyonlar sadece uygun istisna
+// nesnelerini döndüren veya programı sonlandıran yardımcılar olur.
+
+
+/// `throw_exception<E>(e: E)`: Verilen istisna nesnesini fırlatır.
+///
+/// # Parametreler
+/// - `e`: Fırlatılacak istisna nesnesi.
+///
+/// # Tip Parametreleri
+/// - `E`: `Exception` temel sınıfından türetilmiş herhangi bir istisna tipi.
+///
+/// **NOT**: Bu fonksiyon, CNT'nin `throw` mekanizmasını sarmalar.
+pub fn throw_exception<E>(e: E) -> void {
+    // pseudo-kod: throw e; // CNT'nin throw anahtar kelimesi varsayılmıştır.
+    // Eğer throw yoksa, burada programı sonlandırmak veya hata günlüğüne yazmak gibi
+    // bir işlem yapılabilir.
+    println("Uncaught exception: ".to_string() + what(&e as &Exception)); // Örnek hata günlüğü
+    exit(1); // Programı hata koduyla sonlandır
+}
+
+
+// --- 3. İstisna Yakalama (Eğer Dil Destekliyorsa) ---
+
+// Eğer CNT'de `try-catch` anahtar kelimeleri varsa, bu fonksiyonlar istisna yakalamanın
+// standart bir yolu olabilir. Aksi takdirde, bu bölümde bir şey bulunmaz.
+
+
+// Kullanım örneği:
+ fn do_something_risky() -> void throws BadAlloc { ... }
+
+ try {
+     do_something_risky();
+ } catch (e: &BadAlloc) {
+     println("Caught BadAlloc: ".to_string() + bad_alloc_what(e));
+ } catch (e: &Exception) {
+     println("Caught generic exception: ".to_string() + what(e));
+ }
+
+
+// --- 4. Yardımcı Fonksiyonlar / Raporlama ---
+
+/// Geçerli bir istisna olup olmadığını kontrol eder (eğer istisna sistemi varsa).
+///
+/// # Dönüş Değeri
+/// `bool`: Eğer şu anda aktif (fırlatılmış ve henüz yakalanmamış) bir istisna varsa `true`.
+///
+/// **NOT**: Bu, CNT'nin istisna runtime'ına erişim gerektirir.
+pub fn current_exception_exists() -> bool {
+    // pseudo-kod: compiler_has_current_exception()
+    false // Geçici placeholder
+}
+
+/// Aktif istisnayı döndürür (eğer varsa).
+///
+/// # Dönüş Değeri
+/// `Optional<Exception>`: Aktif istisnayı içeren bir Optional veya boş.
+///
+/// **NOT**: Bu, aktif istisna nesnesini yakalama ve Optional içine alma yeteneği gerektirir.
+pub fn current_exception() -> optional::Optional<Exception> {
+    // pseudo-kod:
+     if compiler_has_current_exception() {
+         return optional::some(compiler_get_current_exception() as Exception);
+     }
+    optional::none() // Geçici placeholder
+}
