@@ -1,0 +1,295 @@
+// u64.cnt
+// Standart U64 Modülü
+// 64-bit işaretsiz tam sayılar için yardımcı fonksiyonlar ve sabitler.
+
+import std::string;     // String dönüşümleri için
+import std::result;     // Güvenli operasyon sonuçları için (Ok/Err)
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `u64` için hata türleri.
+pub enum Error {
+    /// Dönüşüm hatası (örn. string geçersiz format).
+    ParseError(string);
+    /// Taşma/alt taşma hatası.
+    OverflowError(string);
+    /// Geçersiz argüman (örn. sıfıra bölme).
+    InvalidArgument(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T>`: `std::result::Result` ve `u64` modülü hatalarını birleştirir.
+pub type Result<T> = std::result::Result<T, Error>;
+
+// --- 1. Sabitler ---
+
+pub const MAX: u64 = 18446744073709551615u64; // 2^64 - 1
+pub const MIN: u64 = 0u64;
+pub const BITS: u64 = 64u64;
+
+// --- 2. Temel Fonksiyonlar ve Dönüşümler ---
+
+impl u64 { // `u64` tipine metotlar ekliyoruz
+    /// `to_string()`: `u64` değerini onluk tabanda string'e dönüştürür.
+    pub fn to_string(&self) -> string {
+        // Bu, CNT'nin dahili bir dil özelliği veya libstd'deki bir temel dönüşüm olabilir.
+        // Genellikle `std::format` veya benzeri bir temel IO kütüphanesi tarafından sağlanır.
+        // Pseudo-kod:
+         if *self == 0 { return "0".to_string(); }
+         let mut s = std::string::new_string();
+         let mut n = *self;
+         while n > 0 {
+             s.push_char((n % 10) as char + '0');
+             n /= 10;
+         }
+         s.reverse();
+         s
+        
+        // Varsayımsal olarak dahili bir C++ benzeri to_string() fonksiyonu olduğunu varsayalım.
+        // Veya std::format modülü üzerinden yapılabilir.
+        // CNT'nin bir `__builtin_u64_to_string` veya benzeri bir fonksiyonu olmalı.
+        // Şimdilik doğrudan döndürüldüğü varsayılsın.
+        __builtin_u64_to_string(*self) // CNT'nin dahili, hızlı string dönüşüm fonksiyonu
+    }
+
+    /// `to_hex_string()`: `u64` değerini onaltılık tabanda string'e dönüştürür.
+    pub fn to_hex_string(&self) -> string {
+        if *self == 0 { return "0".to_string(); }
+        let mut s = std::string::new_string();
+        let mut n = *self;
+        let hex_chars = "0123456789abcdef".to_string();
+
+        while n > 0 {
+            let remainder = (n % 16) as u64;
+            s.push_char(hex_chars.char_at(remainder as u64));
+            n /= 16;
+        }
+        s.reverse();
+        s
+    }
+
+    /// `to_binary_string()`: `u64` değerini ikilik tabanda string'e dönüştürür.
+    pub fn to_binary_string(&self) -> string {
+        if *self == 0 { return "0".to_string(); }
+        let mut s = std::string::new_string();
+        let mut n = *self;
+
+        while n > 0 {
+            s.push_char(if (n & 1) == 1 { '1' } else { '0' });
+            n >>= 1;
+        }
+        s.reverse();
+        s
+    }
+
+    /// `from_string()`: Bir string'i `u64` değerine onluk tabanda dönüştürür.
+    pub fn from_string(s: string) -> Result<u64> {
+        if s.is_empty() {
+            return Result::Err(Error::ParseError("Empty string cannot be parsed as u64.".to_string()));
+        }
+        let mut result = 0u64;
+        for char_code in s.chars() { // `chars()` metodu varsayılmıştır.
+            if char_code >= '0' as u64 && char_code <= '9' as u64 {
+                let digit = char_code - ('0' as u64);
+                // Taşma kontrolü
+                if result > (MAX / 10) || (result == (MAX / 10) && digit > (MAX % 10)) {
+                    return Result::Err(Error::OverflowError("String causes u64 overflow.".to_string()));
+                }
+                result = result * 10 + digit;
+            } else {
+                return Result::Err(Error::ParseError("Invalid character in u64 string.".to_string()));
+            }
+        }
+        Result::Ok(result)
+    }
+    
+    /// `from_hex_string()`: Onaltılık string'i `u64` değerine dönüştürür.
+    pub fn from_hex_string(s: string) -> Result<u64> {
+        if s.is_empty() {
+            return Result::Err(Error::ParseError("Empty string cannot be parsed as u64.".to_string()));
+        }
+        let mut result = 0u64;
+        for char_code in s.chars() {
+            let digit_val: u64;
+            if char_code >= '0' as u64 && char_code <= '9' as u64 {
+                digit_val = char_code - ('0' as u64);
+            } else if char_code >= 'a' as u64 && char_code <= 'f' as u64 {
+                digit_val = char_code - ('a' as u64) + 10;
+            } else if char_code >= 'A' as u64 && char_code <= 'F' as u64 {
+                digit_val = char_code - ('A' as u64) + 10;
+            } else {
+                return Result::Err(Error::ParseError("Invalid character in hex string.".to_string()));
+            }
+
+            // Taşma kontrolü (result * 16 + digit_val)
+            if result > (MAX / 16) || (result == (MAX / 16) && digit_val > (MAX % 16)) {
+                 return Result::Err(Error::OverflowError("Hex string causes u64 overflow.".to_string()));
+            }
+            result = result * 16 + digit_val;
+        }
+        Result::Ok(result)
+    }
+
+    /// `saturating_add()`: Taşma durumunda maksimum değeri döndüren güvenli toplama.
+    pub fn saturating_add(&self, other: u64) -> u64 {
+        let (sum, did_overflow) = self.checked_add(other); // Varsayımsal dahili checked_add
+        if did_overflow { MAX } else { sum }
+    }
+
+    /// `saturating_sub()`: Alt taşma durumunda minimum değeri (0) döndüren güvenli çıkarma.
+    pub fn saturating_sub(&self, other: u64) -> u64 {
+        let (diff, did_underflow) = self.checked_sub(other); // Varsayımsal dahili checked_sub
+        if did_underflow { MIN } else { diff }
+    }
+
+    /// `checked_add()`: Taşma durumunda hata döndüren toplama.
+    /// Genellikle dahili bir operasyondur, ancak API'ye açılabilir.
+     pub fn checked_add(&self, other: u64) -> Result<u64> { /* ... */ }
+
+    /// `checked_sub()`: Alt taşma durumunda hata döndüren çıkarma.
+     pub fn checked_sub(&self, other: u64) -> Result<u64> { /* ... */ }
+
+    /// `is_power_of_two()`: Sayının 2'nin kuvveti olup olmadığını kontrol eder.
+    pub fn is_power_of_two(&self) -> bool {
+        *self > 0 && (*self & (*self - 1)) == 0
+    }
+
+    /// `next_power_of_two()`: Kendisinden büyük veya eşit en küçük 2'nin kuvvetini döndürür.
+    pub fn next_power_of_two(&self) -> Result<u64> {
+        if *self == 0 { return Result::Ok(1); }
+        if *self == MAX { return Result::Err(Error::OverflowError("Cannot find next power of two for MAX_U64.".to_string())); }
+
+        let mut n = *self;
+        n -= 1;
+        n |= n >> 1;
+        n |= n >> 2;
+        n |= n >> 4;
+        n |= n >> 8;
+        n |= n >> 16;
+        n |= n >> 32; // u64 için
+        n += 1;
+        Result::Ok(n)
+    }
+
+    /// `count_ones()`: Sayıdaki set (1) bit sayısını döndürür (popcount).
+    pub fn count_ones(&self) -> u64 {
+        // Dahili compiler intrinsic veya yazılım implementasyonu.
+        // __builtin_popcountll(*self)
+        let mut count = 0u64;
+        let mut val = *self;
+        while val > 0 {
+            val &= (val - 1); // En düşük set biti temizler
+            count += 1;
+        }
+        count
+    }
+
+    /// `leading_zeros()`: Sayıdaki baştaki sıfırların sayısını döndürür.
+    pub fn leading_zeros(&self) -> u64 {
+        if *self == 0 { return BITS; }
+        // Dahili compiler intrinsic veya yazılım implementasyonu.
+        // __builtin_clzll(*self)
+        let mut count = 0u64;
+        let mut temp_val = *self;
+        for _i in 0..BITS {
+            if (temp_val & (1u64 << (BITS - 1))) == 0 { // En yüksek biti kontrol et
+                count += 1;
+            } else {
+                break;
+            }
+            temp_val <<= 1;
+        }
+        count
+    }
+
+    /// `trailing_zeros()`: Sayıdaki sondaki sıfırların sayısını döndürür.
+    pub fn trailing_zeros(&self) -> u64 {
+        if *self == 0 { return BITS; }
+        // Dahili compiler intrinsic veya yazılım implementasyonu.
+        // __builtin_ctzll(*self)
+        let mut count = 0u64;
+        let mut temp_val = *self;
+        for _i in 0..BITS {
+            if (temp_val & 1) == 0 { // En düşük biti kontrol et
+                count += 1;
+            } else {
+                break;
+            }
+            temp_val >>= 1;
+        }
+        count
+    }
+}
+
+// --- Örnek Kullanım ---
+/*
+fn main() {
+    println("Starting U64 example...".to_string());
+
+    // Sabitler
+    println("U64 Max Value: ".to_string() + u64::MAX.to_string());
+    println("U64 Min Value: ".to_string() + u64::MIN.to_string());
+    println("U64 Bit Count: ".to_string() + u64::BITS.to_string());
+
+    let num: u64 = 12345;
+    println("\nOriginal number: ".to_string() + num.to_string());
+
+    // String dönüşümleri
+    println("Hexadecimal: ".to_string() + num.to_hex_string()); // 3039
+    println("Binary: ".to_string() + num.to_binary_string());   // 11000000111001
+
+    // String'den dönüşümler
+    match u64::from_string("67890".to_string()) {
+        std::result::Ok(n) => println("Parsed from string '67890': ".to_string() + n.to_string()),
+        std::result::Err(e) => println("Error parsing string: ".to_string() + e.to_string()),
+    }
+
+    match u64::from_hex_string("ABCD".to_string()) {
+        std::result::Ok(n) => println("Parsed from hex 'ABCD': ".to_string() + n.to_string()),
+        std::result::Err(e) => println("Error parsing hex string: ".to_string() + e.to_string()),
+    }
+    
+    // Taşma kontrolü
+    match u64::from_string("18446744073709551615".to_string()) { // MAX
+        std::result::Ok(n) => println("Parsed MAX: ".to_string() + n.to_string()),
+        std::result::Err(e) => println("Error parsing MAX: ".to_string() + e.to_string()),
+    }
+
+    match u64::from_string("18446744073709551616".to_string()) { // MAX + 1
+        std::result::Ok(n) => println("Parsed (MAX+1): ".to_string() + n.to_string()),
+        std::result::Err(e) => println("Error parsing (MAX+1): ".to_string() + e.to_string()), // Beklenen hata
+    }
+
+
+    // Güvenli aritmetik
+    let a: u64 = u64::MAX - 5;
+    let b: u64 = 10;
+    let c: u64 = 2;
+
+    println("\nSaturating Add: ".to_string() + a.saturating_add(b).to_string()); // Taşma olmaz
+    println("Saturating Add (Overflow): ".to_string() + u64::MAX.saturating_add(100).to_string()); // MAX kalır
+
+    println("Saturating Sub: ".to_string() + b.saturating_sub(c).to_string()); // 10 - 2 = 8
+    println("Saturating Sub (Underflow): ".to_string() + c.saturating_sub(b).to_string()); // 2 - 10 = 0 (min)
+
+
+    // Bit Manipülasyonu
+    let val: u64 = 0b00101000u64; // 40 decimal
+    println("\nValue for bit ops: ".to_string() + val.to_binary_string() + " (Decimal: " + val.to_string() + ")");
+    println("Is power of two? ".to_string() + val.is_power_of_two().to_string()); // False
+    
+    let pow2_val: u64 = 32u64; // 0b00100000
+    println("Is 32 power of two? ".to_string() + pow2_val.is_power_of_two().to_string()); // True
+
+    match val.next_power_of_two() {
+        std::result::Ok(n) => println("Next power of two for ".to_string() + val.to_string() + ": " + n.to_string()), // 64
+        std::result::Err(e) => println("Error getting next power of two: ".to_string() + e.to_string()),
+    }
+
+    println("Count ones (for ".to_string() + val.to_binary_string() + "): " + val.count_ones().to_string()); // 2
+    println("Leading zeros (for ".to_string() + val.to_binary_string() + "): " + val.leading_zeros().to_string()); // 64 - 6 = 58 (eğer u64 ise)
+    println("Trailing zeros (for ".to_string() + val.to_binary_string() + "): " + val.trailing_zeros().to_string()); // 3
+
+
+    println("\nU64 example finished.".to_string());
+}
