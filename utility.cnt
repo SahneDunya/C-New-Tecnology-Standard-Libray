@@ -1,0 +1,157 @@
+// utility.cnt
+// Standart Yardımcı Fonksiyonlar ve Veri Yapıları Modülü
+// Genel amaçlı küçük yardımcılar ve temel veri yapıları sağlar.
+
+import std::string;     // Hata mesajları için (çok az kullanılır ama güvenlik için)
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// --- 1. Temel Hata ve Sonuç Tipleri (Modüller Arası Tutarlılık İçin) ---
+
+/// `Error` Enum'u: Yardımcı fonksiyonlar sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz argüman hatası.
+    InvalidArgument(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 2. Pair Veri Yapısı ---
+
+/// `Pair<T1, T2>` Struct'ı: İki farklı tipteki değeri bir arada tutan basit bir veri yapısı.
+/// Genellikle fonksiyonlardan birden fazla değer döndürmek veya ilişkili verileri gruplamak için kullanılır.
+///
+/// # Tip Parametreleri
+/// - `T1`: İlk elemanın tipi.
+/// - `T2`: İkinci elemanın tipi.
+pub struct Pair<T1, T2> {
+    pub first: T1;
+    pub second: T2;
+}
+
+/// Yeni bir `Pair` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `val1`: İlk elemanın değeri.
+/// - `val2`: İkinci elemanın değeri.
+///
+/// # Dönüş Değeri
+/// `Pair<T1, T2>`: Oluşturulan Pair nesnesi.
+pub fn make_pair<T1, T2>(val1: T1, val2: T2) -> Pair<T1, T2> {
+    Pair {
+        first: val1,
+        second: val2,
+    }
+}
+
+// --- 3. Değer Takas Fonksiyonu ---
+
+/// İki mutable referansın değerlerini takas eder. O(1)
+///
+/// # Parametreler
+/// - `a`: Takas edilecek ilk değerin mutable referansı.
+/// - `b`: Takas edilecek ikinci değerin mutable referansı.
+///
+/// # Tip Parametreleri
+/// - `T`: Takas edilecek değerlerin tipi (kopyalanabilir ve atanabilir olmalı).
+pub fn swap<T>(a: &mut T, b: &mut T) -> void {
+    let temp = *a; // a'nın değerini geçici değişkende sakla
+    *a = *b;       // b'nin değerini a'ya ata
+    *b = temp;     // geçici değeri b'ye ata
+}
+
+// --- 4. Move ve Forward Semantik (Gelişmiş) ---
+
+// CNT'nin tam olarak move semantiği ve referans türlerini nasıl ele aldığına bağlı olarak,
+// bu fonksiyonlar ya dil intrinsics'i olarak sağlanır ya da bu modülde yer alır.
+
+/// `move<T>(val: T) -> T`
+/// Verilen değerin "move" edilmeye hazır olduğunu belirtir.
+/// Aslında bir no-op (işlem yapmaz) veya bir cast'tir, ancak anlamsal niyetini belirtir.
+/// Kaynak değeri geçersiz kılınabilir (invalidated) anlamına gelir.
+///
+/// # Parametreler
+/// - `val`: Move edilecek değer.
+///
+/// # Dönüş Değeri
+/// `T`: Aynı değer (ancak "move" semantiğiyle işaretlenmiş).
+pub fn move<T>(val: T) -> T {
+    // CNT'nin dil düzeyinde move semantiğini nasıl uyguladığına bağlıdır.
+    // Çoğu durumda, bu sadece bir "cast" veya "identity" işlemidir.
+    // Örneğin, Rust'taki `std::mem::take` veya C++'daki `std::move` gibi davranır.
+    val // Aslında hiçbir şey yapmaz, sadece tip sistemine bir ipucu verir.
+}
+
+/// `forward<T>(val: &mut T) -> U`
+/// Koşullu olarak bir lvalue referansı bir rvalue referansına (veya T'ye) dönüştürür.
+/// Mükemmel yönlendirme (perfect forwarding) için kullanılır.
+///
+/// # Parametreler
+/// - `val`: Yönlendirilecek referans.
+///
+/// # Dönüş Değeri
+/// `U`: Koşullu olarak dönüştürülmüş referans/değer.
+///
+/// **NOT**: Bu fonksiyonun doğru implementasyonu, CNT'nin referans türleri (lvalue/rvalue)
+/// ve generic referans işleme yeteneklerine derinden bağlıdır.
+/// Bu, `std::move`'dan bile daha karmaşıktır ve dilin tam desteğini gerektirir.
+pub fn forward<T>(val: &mut T) -> T {
+    // Bu fonksiyonun implementasyonu, CNT'nin template/generic ve referans bağlama kurallarına
+    // çok güçlü bir şekilde bağlıdır. Genellikle bir `static_cast` veya benzeri bir mekanizma kullanılır.
+    // Şimdilik, sadece bir placeholder olarak bırakıyoruz.
+    // Bu, yalnızca çok gelişmiş bir tip sistemi ve ref-qualifiers olan dillerde anlamlıdır.
+    *val // Bu basit bir dereference ve kopyalama olur, mükemmel yönlendirme değil.
+}
+
+
+// --- 5. Min ve Max Fonksiyonları ---
+
+/// İki değerden küçüğünü döndürür.
+///
+/// # Parametreler
+/// - `a`: Birinci değer.
+/// - `b`: İkinci değer.
+///
+/// # Tip Parametreleri
+/// - `T`: Karşılaştırılabilir tip (`<` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `T`: Daha küçük olan değer.
+pub fn min<T>(a: T, b: T) -> T {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// İki değerden büyüğünü döndürür.
+///
+/// # Parametreler
+/// - `a`: Birinci değer.
+/// - `b`: İkinci değer.
+///
+/// # Tip Parametreleri
+/// - `T`: Karşılaştırılabilir tip (`>` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `T`: Daha büyük olan değer.
+pub fn max<T>(a: T, b: T) -> T {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
