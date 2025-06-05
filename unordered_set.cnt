@@ -1,0 +1,332 @@
+// unordered_set.cnt
+// Standart Sırasız Küme (Unordered Set) Modülü
+// Benzersiz elemanları hash tablosu kullanarak saklar, ortalama O(1) erişim.
+
+import std::string;     // Hata mesajları için
+import std::alloc;      // Bellek tahsisi ve serbest bırakma için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::hash;       // Hash fonksiyonları için 
+
+// Eleman eşitliği ve hash fonksiyonları için 'Equality' ve 'Hash' trait'leri/callback'leri gereklidir.
+// Varsayılan olarak, temel tipler için '==' operatörünün ve `std::hash::hash()` fonksiyonunun kullanıldığı varsayılmıştır.
+// Kullanıcı tanımlı tipler için bunlar sağlanmalıdır.
+
+/// `Error` Enum'u: Unordered Set işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Eleman bulunamadı.
+    ElementNotFound(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Entry<T>` Struct'ı: Hash tablosundaki bir girişi (elemanı) temsil eder.
+/// Çarpışmaları zincirleme (chaining) ile çözmek için kullanılır.
+pub struct Entry<T> {
+    value: T;
+    /// Zincirdeki bir sonraki girişe işaretçi (null eğer sonuncusu ise).
+    next: raw_ptr<Entry<T>>;
+}
+
+/// `UnorderedSet<T>` Struct'ı: Benzersiz elemanları saklayan sırasız bir küme.
+/// Dahili olarak bir dizi (bucket'lar) ve zincirleme ile çarpışma çözümü kullanır.
+///
+/// # Tip Parametreleri
+/// - `T`: Set'te saklanacak elemanların tipi (hashlenebilir ve eşitlik kontrolü yapılabilir olmalı).
+pub struct UnorderedSet<T> {
+    /// Hash tablosunun kovalarını (bucket'larını) tutan dizisi.
+    /// Her kova, `Entry<T>` düğümlerinin bir zincirinin başına işaret eder.
+    buckets: raw_ptr<raw_ptr<Entry<T>>>;
+    /// Kovaların (bucket'ların) geçerli sayısı (tablo boyutu).
+    num_buckets: int;
+    /// Kümedeki eleman sayısı.
+    len: int;
+    /// Yük faktörü limiti. Bu limit aşılırsa tablo yeniden boyutlandırılır.
+    /// (len / num_buckets) > load_factor_limit olduğunda yeniden boyutlandırılır.
+    load_factor_limit: float;
+}
+
+// Varsayılan yük faktörü (örn. 0.75 gibi bir değer iyi bir denge sağlar).
+const DEFAULT_LOAD_FACTOR_LIMIT: float = 0.75;
+// Başlangıç kova sayısı (prime bir sayı genellikle iyi performans sağlar).
+const INITIAL_BUCKET_COUNT: int = 17; // Örneğin, 17 veya 31
+
+// --- 1. Unordered Set Oluşturma ve Yönetme ---
+
+/// Yeni, boş bir `UnorderedSet` oluşturur.
+///
+/// # Dönüş Değeri
+/// Oluşturulan `UnorderedSet<T>` nesnesi.
+pub fn new<T>() -> Result<UnorderedSet<T>, Error> {
+    match alloc::allocate(INITIAL_BUCKET_COUNT * size_of<raw_ptr<Entry<T>>>()) {
+        Result::Ok(buckets_ptr_u8) => {
+            let buckets_ptr = buckets_ptr_u8 as raw_ptr<raw_ptr<Entry<T>>>;
+            // Kovaları null_ptr ile başlat
+            for i in 0..INITIAL_BUCKET_COUNT {
+                raw_ptr_write(buckets_ptr, i, null_ptr());
+            }
+
+            Result::Ok(UnorderedSet {
+                buckets: buckets_ptr,
+                num_buckets: INITIAL_BUCKET_COUNT,
+                len: 0,
+                load_factor_limit: DEFAULT_LOAD_FACTOR_LIMIT,
+            })
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate initial buckets for unordered set: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Entry<T>` düğümünü bellekte tahsis eder.
+fn allocate_entry<T>(value: T) -> Result<raw_ptr<Entry<T>>, Error> {
+    match alloc::allocate(size_of<Entry<T>>()) {
+        Result::Ok(ptr_u8) => {
+            let entry_ptr = ptr_u8 as raw_ptr<Entry<T>>;
+            raw_ptr_write(entry_ptr, 0, Entry {
+                value: value,
+                next: null_ptr(),
+            });
+            Result::Ok(entry_ptr)
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to allocate set entry: ".to_string() + e.to_string())),
+    }
+}
+
+/// Bir `Entry<T>` düğümünün belleğini serbest bırakır.
+fn deallocate_entry<T>(entry_ptr: raw_ptr<Entry<T>>) -> void {
+    if entry_ptr != null_ptr() {
+        // T için destructors çağrılmalı mı?
+        alloc::deallocate(entry_ptr as raw_ptr<u8>, size_of<Entry<T>>());
+    }
+}
+
+/// Bir `UnorderedSet`'in tüm bellek kaynaklarını serbest bırakır.
+/// Tüm zincirlerdeki girişleri ve kova dizisini temizler.
+pub fn drop<T>(set: &mut UnorderedSet<T>) -> void {
+    if set.buckets == null_ptr() { return; }
+
+    for i in 0..set.num_buckets {
+        let mut current_entry_ptr = raw_ptr_read(set.buckets, i);
+        while current_entry_ptr != null_ptr() {
+            let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+            deallocate_entry(current_entry_ptr);
+            current_entry_ptr = next_entry_ptr;
+        }
+    }
+
+    alloc::deallocate(set.buckets as raw_ptr<u8>, set.num_buckets * size_of<raw_ptr<Entry<T>>>());
+    set.buckets = null_ptr();
+    set.num_buckets = 0;
+    set.len = 0;
+}
+
+/// Hash tablosunu yeniden boyutlandırır (rehash).
+/// Ortalama O($N$)
+fn rehash<T>(set: &mut UnorderedSet<T>) -> Result<void, Error> {
+    let old_buckets = set.buckets;
+    let old_num_buckets = set.num_buckets;
+
+    let new_num_buckets = old_num_buckets * 2; // Basitçe iki katına çıkar
+    // İdealde, bir sonraki asal sayıya yuvarlama yapılabilir.
+
+    match alloc::allocate(new_num_buckets * size_of<raw_ptr<Entry<T>>>()) {
+        Result::Ok(new_buckets_ptr_u8) => {
+            let new_buckets_ptr = new_buckets_ptr_u8 as raw_ptr<raw_ptr<Entry<T>>>;
+            // Yeni kovaları null_ptr ile başlat
+            for i in 0..new_num_buckets {
+                raw_ptr_write(new_buckets_ptr, i, null_ptr());
+            }
+
+            set.buckets = new_buckets_ptr;
+            set.num_buckets = new_num_buckets;
+            set.len = 0; // Yeniden doldurulacağı için sıfırla
+
+            // Eski kovadaki tüm elemanları yeni hash tablosuna taşı
+            for i in 0..old_num_buckets {
+                let mut current_entry_ptr = raw_ptr_read(old_buckets, i);
+                while current_entry_ptr != null_ptr() {
+                    let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+                    let current_entry = raw_ptr_read(current_entry_ptr, 0);
+
+                    // Mevcut düğümü yeniden ekle (değeri kopyala, düğümü tekrar tahsis etme)
+                    match insert(set, current_entry.value) { // Set olduğu için sadece değeri ekle
+                        Result::Ok(_) => {},
+                        Result::Err(e) => {
+                            assert!(false, "Rehash failed during re-insertion: ".to_string() + e.to_string());
+                            return Result::Err(e);
+                        }
+                    }
+                    deallocate_entry(current_entry_ptr); // Eski düğümü serbest bırak
+                    current_entry_ptr = next_entry_ptr;
+                }
+            }
+            alloc::deallocate(old_buckets as raw_ptr<u8>, old_num_buckets * size_of<raw_ptr<Entry<T>>>());
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(Error::AllocationError("Failed to reallocate buckets during rehash: ".to_string() + e.to_string())),
+    }
+}
+
+// --- 2. Yardımcı Hash ve Kova Bulma Fonksiyonları ---
+
+/// Bir eleman için hash değerini hesaplar ve ilgili kova indeksini döndürür.
+fn get_bucket_index<T>(set: &UnorderedSet<T>, item: &T) -> int {
+    let hash_value = std::hash::hash(item); // std::hash modülünden hash fonksiyonu
+    (hash_value % set.num_buckets) as int
+}
+
+// --- 3. Unordered Set İşlemleri ---
+
+/// Bir elemanı Unordered Set'e ekler. O(1) (ortalama)
+/// Eleman zaten varsa, hiçbir şey yapmaz.
+///
+/// # Parametreler
+/// - `set`: Elemanın ekleneceği `UnorderedSet<T>`'nin mutable referansı.
+/// - `item`: Eklenecek eleman.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(bool)`: `true` yeni bir eleman eklendiyse, `false` eleman zaten varsa.
+/// `Result::Err(Error)` bellek tahsisi başarısız olursa.
+pub fn insert<T>(set: &mut UnorderedSet<T>, item: T) -> Result<bool, Error> {
+    // Yük faktörünü kontrol et ve gerekirse yeniden boyutlandır
+    if (set.len + 1) as float / set.num_buckets as float > set.load_factor_limit {
+        match rehash(set) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+
+    let bucket_idx = get_bucket_index(set, &item);
+    let mut current_entry_ptr = raw_ptr_read(set.buckets, bucket_idx);
+
+    // Kovada elemanı ara (benzersizlik kontrolü)
+    while current_entry_ptr != null_ptr() {
+        let entry = raw_ptr_read(current_entry_ptr, 0);
+        if item == entry.value { // Eleman zaten var
+            return Result::Ok(false);
+        }
+        current_entry_ptr = entry.next;
+    }
+
+    // Eleman bulunamadı, yeni bir giriş ekle
+    match allocate_entry(item) {
+        Result::Ok(new_entry_ptr) => {
+            // Yeni girişi kovanın başına ekle (en hızlısı)
+            let mut new_entry = raw_ptr_read(new_entry_ptr, 0);
+            new_entry.next = raw_ptr_read(set.buckets, bucket_idx); // Eski kova başını yeniye next yap
+            raw_ptr_write(new_entry_ptr, 0, new_entry);
+
+            raw_ptr_write(set.buckets, bucket_idx, new_entry_ptr); // Yeni girişi kova başı yap
+
+            set.len = set.len + 1;
+            Result::Ok(true)
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// Unordered Set'te belirli bir elemanın olup olmadığını kontrol eder. O(1) (ortalama)
+///
+/// # Parametreler
+/// - `set`: Elemanın aranacağı `UnorderedSet<T>`'nin referansı.
+/// - `item`: Aranacak eleman.
+///
+/// # Dönüş Değeri
+/// `true` eleman Set'te ise, `false` değilse.
+pub fn contains<T>(set: &UnorderedSet<T>, item: &T) -> bool {
+    let bucket_idx = get_bucket_index(set, item);
+    let mut current_entry_ptr = raw_ptr_read(set.buckets, bucket_idx);
+
+    while current_entry_ptr != null_ptr() {
+        let entry = raw_ptr_read(current_entry_ptr, 0);
+        if *item == entry.value {
+            return true;
+        }
+        current_entry_ptr = entry.next;
+    }
+    false
+}
+
+/// Unordered Set'ten bir elemanı siler. O(1) (ortalama)
+///
+/// # Parametreler
+/// - `set`: Elemanın silineceği `UnorderedSet<T>`'nin mutable referansı.
+/// - `item`: Silinecek eleman.
+///
+/// # Dönüş Değeri
+/// `Result::Ok(void)` eleman başarıyla silindiyse, `Result::Err(Error::ElementNotFound)` eleman bulunamazsa.
+pub fn remove<T>(set: &mut UnorderedSet<T>, item: &T) -> Result<void, Error> {
+    let bucket_idx = get_bucket_index(set, item);
+    let mut current_entry_ptr = raw_ptr_read(set.buckets, bucket_idx);
+    let mut prev_entry_ptr = null_ptr::<Entry<T>>(); // Bir önceki düğümü takip et
+
+    while current_entry_ptr != null_ptr() {
+        let current_entry = raw_ptr_read(current_entry_ptr, 0);
+        if *item == current_entry.value {
+            // Düğümü bulduk, zincirden çıkar
+            if prev_entry_ptr == null_ptr() { // Zincirin başındaki düğüm
+                raw_ptr_write(set.buckets, bucket_idx, current_entry.next);
+            } else { // Zincirin ortasında veya sonunda bir düğüm
+                let mut prev_entry = raw_ptr_read(prev_entry_ptr, 0);
+                prev_entry.next = current_entry.next;
+                raw_ptr_write(prev_entry_ptr, 0, prev_entry);
+            }
+            deallocate_entry(current_entry_ptr); // Düğüm belleğini serbest bırak
+            set.len = set.len - 1;
+            return Result::Ok(void);
+        }
+        prev_entry_ptr = current_entry_ptr;
+        current_entry_ptr = current_entry.next;
+    }
+    Result::Err(Error::ElementNotFound("Element not found for removal".to_string()))
+}
+
+/// Unordered Set'teki tüm elemanları temizler.
+pub fn clear<T>(set: &mut UnorderedSet<T>) -> void {
+    // Drop fonksiyonunu kova belleğini serbest bırakmadan yeniden kullanma
+    for i in 0..set.num_buckets {
+        let mut current_entry_ptr = raw_ptr_read(set.buckets, i);
+        while current_entry_ptr != null_ptr() {
+            let next_entry_ptr = raw_ptr_read(current_entry_ptr, 0).next;
+            deallocate_entry(current_entry_ptr);
+            current_entry_ptr = next_entry_ptr;
+        }
+        raw_ptr_write(set.buckets, i, null_ptr()); // Kova başını null yap
+    }
+    set.len = 0;
+}
+
+// --- 4. Bilgi ve Durum Sorgulama ---
+
+/// Unordered Set'teki eleman sayısını döndürür.
+pub fn len<T>(set: &UnorderedSet<T>) -> int {
+    set.len
+}
+
+/// Unordered Set'in boş olup olmadığını kontrol eder.
+pub fn is_empty<T>(set: &UnorderedSet<T>) -> bool {
+    set.len == 0
+}
+
+// --- 5. İterasyon (Idealde bir Iterator trait/interface'i ile) ---
+
+// UnorderedSet üzerinde iterasyon, tüm kovaları ve zincirleri dolaşmayı gerektirir.
+// Sıra garanti edilmez.
+
+ pub fn iter<T>(set: &UnorderedSet<T>) -> Iterator<T> { ... }
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `raw_ptr_read(ptr, offset)`: `ptr`'den `offset` byte ötedeki T değerini okur.
+// `raw_ptr_write(ptr, offset, value)`: `ptr`'den `offset` byte ötedeki T değerine `value` yazar.
+// `std::hash::hash(value)`: Bir değeri hashleyen (size_t veya int döndüren) bir fonksiyon.
