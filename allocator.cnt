@@ -8,7 +8,7 @@ import std::assert;     // Geliştirme/hata ayıklama için
 
 // Not: Bu modül, CNT'nin işletim sistemiyle veya sanal makineyle doğrudan bellek yönetimi
 // arayüzüne (örneğin, `malloc`/`free` benzeri sistem çağrıları) erişebildiği varsayımına dayanır.
-// Bu fonksiyonlar derleyici intrinsikleri (`__builtin_alloc`, `__builtin_free`) olarak temsil edilmiştir.
+// Bu fonksiyonlar derleyici intrinsikleri (`__builtin_alloc`, `__builtin_free`, `__builtin_realloc`) olarak temsil edilmiştir.
 
 /// `Allocator` Trait'i: Bellek tahsis ediciler için temel arayüzü tanımlar.
 /// Bu trait, farklı bellek tahsis stratejilerinin (varsayılan yığın, havuzlar, yığınlar vb.)
@@ -42,8 +42,11 @@ pub trait Allocator {
     unsafe fn reallocate(ptr: std::ptr::ptr_mut<u8>, old_size: u64, old_align: u64, new_size: u64) -> std::ptr::ptr_mut<u8>;
 }
 
-// --- 1. Varsayılan Sistem Yığın Tahsis Edicisi ---
+---
 
+## Varsayılan Sistem Yığın Tahsis Edicisi
+
+```cnt
 /// `SystemAllocator`: İşletim sisteminin varsayılan yığınını kullanan bir bellek tahsis edicidir.
 /// Bu, `malloc` ve `free` gibi fonksiyonlara karşılık gelir.
 pub struct SystemAllocator {}
@@ -73,8 +76,6 @@ impl Allocator for SystemAllocator {
 // Bu, programın herhangi bir yerinden erişilebilen tek bir `SystemAllocator` örneği olacaktır.
 pub static DEFAULT_ALLOCATOR: SystemAllocator = SystemAllocator {};
 
-
-// --- 2. Yardımcı Fonksiyonlar (Genel Tahsis İçin) ---
 // Bu fonksiyonlar, varsayılan tahsis ediciyi kullanarak genel bellek tahsisi sağlar.
 
 /// `allocate<T>(count: u64)`: `T` tipinde `count` adet eleman için bellek tahsis eder.
@@ -127,8 +128,7 @@ pub unsafe fn reallocate<T>(ptr: std::ptr::ptr_mut<T>, old_count: u64, new_count
     std::ptr::ptr_mut::from_address(raw_u8_ptr.__address())
 }
 
-// --- Örnek Kullanım ---
-
+/*
 import std::string;
 
 fn main() {
