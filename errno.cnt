@@ -1,0 +1,142 @@
+// errno.cnt
+// Standart Hata Numaraları Modülü
+// Sistem çağrıları ve diğer düşük seviyeli işlemlerden kaynaklanan hataları temsil eder.
+
+import std::string; // Hata mesajlarını string'e çevirmek için
+
+// `errno` değerini almak ve ayarlamak için harici fonksiyonlar.
+// Bu, genellikle thread-local bir depolama veya OS tarafından sağlanan bir mekanizma ile uygulanır.
+extern fn _cnt_get_errno() -> int;
+extern fn _cnt_set_errno(value: int) -> void;
+
+
+/// `ErrorNumber` Struct'ı: Mevcut thread'in son hata numarasını yönetmek için.
+/// C'deki `errno` global değişkenine benzer şekilde çalışır, ancak daha güvenli olabilir
+/// ve modern dillerde genellikle thread-local'dır.
+pub struct ErrorNumber {
+    // İç implementasyon detayları gizli tutulabilir.
+    // Bu struct, aslında sadece `_cnt_get_errno` ve `_cnt_set_errno` fonksiyonları
+    // aracılığıyla erişilen dahili bir duruma bir arayüz sağlar.
+}
+
+/// Yeni bir `ErrorNumber` örneği oluşturur.
+/// Genellikle doğrudan kullanılmaz, modülün fonksiyonları dolaylı olarak yönetir.
+pub fn new() -> ErrorNumber {
+    ErrorNumber {}
+}
+
+/// Mevcut thread'in son hata numarasını döndürür.
+/// Bir sistem çağrısı veya kütüphane fonksiyonu başarısız olduğunda bu değer ayarlanır.
+///
+/// # Dönüş Değeri
+/// Mevcut hata kodu (integer).
+pub fn get() -> int {
+    _cnt_get_errno()
+}
+
+/// Mevcut thread'in hata numarasını belirtilen değere ayarlar.
+/// Genellikle bir hata durumunu simüle etmek veya hata durumunu temizlemek için kullanılır.
+///
+/// # Parametreler
+/// - `value`: Ayarlanacak yeni hata kodu.
+pub fn set(value: int) -> void {
+    _cnt_set_errno(value);
+}
+
+/// Mevcut thread'in hata numarasını sıfırlar.
+pub fn clear() -> void {
+    _cnt_set_errno(0);
+}
+
+/// Bir hata numarasını insan tarafından okunabilir bir string'e dönüştürür.
+///
+/// # Parametreler
+/// - `error_code`: Dönüştürülecek hata kodu.
+///
+/// # Dönüş Değeri
+/// Hata kodunu açıklayan bir `string`. Bilinmeyen kodlar için "Unknown error" döner.
+pub fn to_string(error_code: int) -> string {
+    match error_code {
+        EPERM => "Operation not permitted".to_string(),
+        ENOENT => "No such file or directory".to_string(),
+        ESRCH => "No such process".to_string(),
+        EINTR => "Interrupted system call".to_string(),
+        EIO => "Input/output error".to_string(),
+        ENXIO => "No such device or address".to_string(),
+        E2BIG => "Argument list too long".to_string(),
+        ENOEXEC => "Exec format error".to_string(),
+        EBADF => "Bad file descriptor".to_string(),
+        ECHILD => "No child processes".to_string(),
+        EAGAIN => "Resource temporarily unavailable".to_string(),
+        ENOMEM => "Cannot allocate memory".to_string(),
+        EACCES => "Permission denied".to_string(),
+        EFAULT => "Bad address".to_string(),
+        ENOTBLK => "Block device required".to_string(),
+        EBUSY => "Device or resource busy".to_string(),
+        EEXIST => "File exists".to_string(),
+        EXDEV => "Invalid cross-device link".to_string(),
+        ENODEV => "No such device".to_string(),
+        ENOTDIR => "Not a directory".to_string(),
+        EISDIR => "Is a directory".to_string(),
+        EINVAL => "Invalid argument".to_string(),
+        ENFILE => "Too many open files in system".to_string(),
+        EMFILE => "Too many open files".to_string(),
+        ENOTTY => "Inappropriate ioctl for device".to_string(),
+        ETXTBSY => "Text file busy".to_string(),
+        EFBIG => "File too large".to_string(),
+        ENOSPC => "No space left on device".to_string(),
+        ESPIPE => "Illegal seek".to_string(),
+        EROFS => "Read-only file system".to_string(),
+        EMLINK => "Too many links".to_string(),
+        EPIPE => "Broken pipe".to_string(),
+        EDOM => "Numerical argument out of domain".to_string(),
+        ERANGE => "Result too large or too small".to_string(),
+        // Diğer yaygın hata kodları eklenebilir.
+        // POSIX standartlarına göre birçok errno değeri vardır.
+        // Sadece en yaygın olanları listeledim.
+        _ => "Unknown error".to_string(), // Bilinmeyen hata kodları için varsayılan
+    }
+}
+
+// --- Hata Kodu Sabitleri (POSIX benzeri) ---
+// Bu sabitler genellikle işletim sistemi başlık dosyalarından gelir
+// ve platforma göre farklılık gösterebilir.
+// Burada, yaygın POSIX hata kodlarının bir alt kümesi tanımlanmıştır.
+
+pub const EPERM: int = 1;      // Operation not permitted
+pub const ENOENT: int = 2;     // No such file or directory
+pub const ESRCH: int = 3;      // No such process
+pub const EINTR: int = 4;      // Interrupted system call
+pub const EIO: int = 5;        // Input/output error
+pub const ENXIO: int = 6;      // No such device or address
+pub const E2BIG: int = 7;      // Argument list too long
+pub const ENOEXEC: int = 8;    // Exec format error
+pub const EBADF: int = 9;      // Bad file descriptor
+pub const ECHILD: int = 10;    // No child processes
+pub const EAGAIN: int = 11;    // Resource temporarily unavailable (or EWOULDBLOCK)
+pub const ENOMEM: int = 12;    // Cannot allocate memory
+pub const EACCES: int = 13;    // Permission denied
+pub const EFAULT: int = 14;    // Bad address
+pub const ENOTBLK: int = 15;   // Block device required
+pub const EBUSY: int = 16;     // Device or resource busy
+pub const EEXIST: int = 17;    // File exists
+pub const EXDEV: int = 18;     // Invalid cross-device link
+pub const ENODEV: int = 19;    // No such device
+pub const ENOTDIR: int = 20;   // Not a directory
+pub const EISDIR: int = 21;    // Is a directory
+pub const EINVAL: int = 22;    // Invalid argument
+pub const ENFILE: int = 23;    // Too many open files in system
+pub const EMFILE: int = 24;    // Too many open files
+pub const ENOTTY: int = 25;    // Inappropriate ioctl for device
+pub const ETXTBSY: int = 26;   // Text file busy
+pub const EFBIG: int = 27;     // File too large
+pub const ENOSPC: int = 28;    // No space left on device
+pub const ESPIPE: int = 29;    // Illegal seek
+pub const EROFS: int = 30;     // Read-only file system
+pub const EMLINK: int = 31;    // Too many links
+pub const EPIPE: int = 32;     // Broken pipe
+pub const EDOM: int = 33;      // Numerical argument out of domain
+pub const ERANGE: int = 34;    // Result too large or too small
+
+// Daha fazla hata kodu eklenebilir:
+// EDEADLK, ENOLCK, ENOSYS, ENOTEMPTY, EILSEQ, ETIMEDOUT, ECONNREFUSED, ENETUNREACH vb.
