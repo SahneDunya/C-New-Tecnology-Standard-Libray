@@ -1,0 +1,232 @@
+// html.cnt
+// Standart HTML Ayrıştırma ve Manipülasyon modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<HtmlNode>, Map<string, string> (öznitelikler için)
+
+// Harici C veya optimize edilmiş HTML ayrıştırma/manipülasyon kütüphanelerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, ham HTML string'lerini dahili HtmlNode temsilimize dönüştürür ve tersini yapar.
+extern fn _cnt_html_parse(html_string: &string) -> _cnt_Result_HtmlNode_html_Error; // Kök (Document) düğümü döndürür
+extern fn _cnt_html_serialize(html_node: &HtmlNode) -> _cnt_Result_string_html_Error; // HtmlNode'dan HTML string'i oluşturur
+
+// Gelecekte CSS seçici veya XPath benzeri sorgular için:
+// extern fn _cnt_html_select(root: &HtmlNode, selector: &string) -> _cnt_Result_collections_List_HtmlNode_html_Error;
+
+
+/// `HtmlNodeType` Enum'u: Bir HTML düğümünün tipini temsil eder.
+pub enum HtmlNodeType {
+    /// Bir HTML öğe düğümü (örn. `<div>`).
+    Element;
+    /// Bir metin düğümü (öğeler arasındaki metin).
+    Text;
+    /// Bir yorum düğümü (örn. ``).
+    Comment;
+    /// Bir belge kök düğümü (tüm HTML belgesini kapsar).
+    Document;
+    /// Bir DOCTYPE bildirimi (örn. `<!DOCTYPE html>`).
+    Doctype;
+    // Diğer düğüm tipleri (örn. CDATA, ProcessingInstruction) gerektiğinde eklenebilir.
+}
+
+/// `HtmlNode` Struct'ı: Bir HTML ağacındaki tek bir düğümü temsil eder.
+pub struct HtmlNode {
+    /// Düğümün tipi.
+    node_type: HtmlNodeType;
+    /// Düğümün adı (Element'ler için etiket adı, örn. "div", "p").
+    name: string;
+    /// Düğümün değeri (Text, Comment için içerik).
+    value: string;
+    /// Element'ler için öznitelikler (ad-değer çiftleri).
+    attributes: collections::Map<string, string>;
+    /// Düğümün alt düğümleri (Element ve Document için geçerlidir).
+    children: collections::List<HtmlNode>;
+    /// Ebeveyn düğüme zayıf referans (döngüsel referansları önlemek ve ağaçta yukarı gezinmek için).
+    // parent: Option<WeakRef<HtmlNode>>; // WeakRef modülü varsa eklenebilir
+}
+
+/// `Error` Enum'u: HTML ayrıştırma veya manipülasyon sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz HTML formatı veya ayrıştırma hatası.
+    ParseError(string);
+    /// Geçersiz veri tipi veya dönüştürme hatası.
+    TypeError(string);
+    /// Düğüm bulunamadı veya geçersiz yol/seçici.
+    NodeNotFoundError(string);
+    /// Seçici (Selector) ayrıştırma hatası.
+    SelectorError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+/// Bir HTML string'ini ayrıştırır ve bir `HtmlNode` ağacının kökünü (Document düğümü) döndürür.
+/// HTML'nin hoşgörülü yapısı nedeniyle, bu ayrıştırıcı hatalı HTML'yi bile işlemeye çalışır.
+///
+/// # Parametreler
+/// - `html_string`: Ayrıştırılacak HTML verisini içeren string referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa HTML ağacının kök `HtmlNode`'u içeren `Result::Ok(HtmlNode)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn parse(html_string: &string) -> Result<HtmlNode, Error> {
+    _cnt_html_parse(html_string)
+}
+
+/// Bir `HtmlNode` ağacını HTML formatında bir string'e dönüştürür (serileştirir).
+///
+/// # Parametreler
+/// - `html_node`: Serileştirilecek `HtmlNode` nesnesinin referansı (genellikle kök düğüm).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa HTML string'ini içeren `Result::Ok(string)`,
+/// serileştirme hatası oluşursa `Result::Err(Error)`.
+pub fn serialize(html_node: &HtmlNode) -> Result<string, Error> {
+    _cnt_html_serialize(html_node)
+}
+
+// --- HtmlNode Oluşturma Yardımcıları ---
+
+/// Yeni bir Element `HtmlNode` oluşturur.
+pub fn new_element(name: string) -> HtmlNode {
+    HtmlNode {
+        node_type: HtmlNodeType::Element,
+        name: name,
+        value: "".to_string(), // Elementler için değeri yok
+        attributes: collections::Map::new(),
+        children: collections::List::new(),
+        // parent: None, // Eğer WeakRef kullanılıyorsa
+    }
+}
+
+/// Yeni bir Text `HtmlNode` oluşturur.
+pub fn new_text(value: string) -> HtmlNode {
+    HtmlNode {
+        node_type: HtmlNodeType::Text,
+        name: "".to_string(), // Metin düğümleri için isim yok
+        value: value,
+        attributes: collections::Map::new(), // Metin düğümleri için öznitelik yok
+        children: collections::List::new(),  // Metin düğümleri için alt düğüm yok
+        // parent: None,
+    }
+}
+
+/// Yeni bir Comment `HtmlNode` oluşturur.
+pub fn new_comment(value: string) -> HtmlNode {
+    HtmlNode {
+        node_type: HtmlNodeType::Comment,
+        name: "".to_string(),
+        value: value,
+        attributes: collections::Map::new(),
+        children: collections::List::new(),
+        // parent: None,
+    }
+}
+
+// --- HtmlNode Üzerinde İşlemler (DOM Benzeri) ---
+
+/// Bir Element düğümüne öznitelik ekler veya günceller.
+///
+/// # Parametreler
+/// - `element_node`: Özniteliğin ekleneceği mutable Element düğüm referansı.
+/// - `attr_name`: Özniteliğin adı.
+/// - `attr_value`: Özniteliğin değeri.
+pub fn add_attribute(element_node: &mut HtmlNode, attr_name: string, attr_value: string) -> Result<void, Error> {
+    if element_node.node_type != HtmlNodeType::Element {
+        return Result::Err(Error::TypeError("Cannot add attribute to non-Element node".to_string()));
+    }
+    collections::insert(&mut element_node.attributes, attr_name, attr_value);
+    Result::Ok(())
+}
+
+/// Bir Element veya Document düğümüne alt düğüm ekler.
+///
+/// # Parametreler
+/// - `parent_node`: Alt düğümün ekleneceği mutable ebeveyn düğüm referansı.
+/// - `child_node`: Eklenecek alt düğüm (sahipliği parent_node'a taşınır).
+pub fn add_child(parent_node: &mut HtmlNode, child_node: HtmlNode) -> Result<void, Error> {
+    if parent_node.node_type != HtmlNodeType::Element && parent_node.node_type != HtmlNodeType::Document {
+        return Result::Err(Error::TypeError("Cannot add child to this node type".to_string()));
+    }
+    collections::push(&mut parent_node.children, child_node);
+    Result::Ok(())
+}
+
+/// Bir düğümün öznitelik değerini döndürür.
+///
+/// # Parametreler
+/// - `element_node`: Özniteliğin aranacağı Element düğüm referansı.
+/// - `attr_name`: Özniteliğin adı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa öznitelik değeri içeren `Result::Ok(&string)`,
+/// düğüm Element değilse veya öznitelik yoksa `Result::Err(Error::NodeNotFoundError)`.
+pub fn get_attribute(element_node: &HtmlNode, attr_name: &string) -> Result<&string, Error> {
+    if element_node.node_type != HtmlNodeType::Element {
+        return Result::Err(Error::TypeError("Cannot get attribute from non-Element node".to_string()));
+    }
+    collections::get(&element_node.attributes, attr_name)
+        .map_or(Result::Err(Error::NodeNotFoundError("Attribute not found".to_string())), |s| Result::Ok(s))
+}
+
+/// Bir düğümün doğrudan alt düğümlerini döndürür.
+///
+/// # Parametreler
+/// - `node`: Alt düğümleri alınacak düğüm referansı.
+///
+/// # Dönüş Değeri
+/// Alt düğümlerin bir listesi içeren `&collections::List<HtmlNode>`.
+pub fn get_children(node: &HtmlNode) -> &collections::List<HtmlNode> {
+    &node.children
+}
+
+/// Bir Element veya Document düğümünün alt düğümlerini belirli bir etiket ismine göre filtreler.
+///
+/// # Parametreler
+/// - `parent_node`: Alt düğümlerin filtreleneceği ebeveyn düğüm referansı.
+/// - `tag_name`: Aranacak alt düğümün etiket ismi (örn. "div", "a").
+///
+/// # Dönüş Değeri
+/// İsme uyan alt Element düğümlerinin bir listesi (referansları) içeren `collections::List<&HtmlNode>`.
+pub fn find_elements_by_tag_name(parent_node: &HtmlNode, tag_name: &string) -> collections::List<&HtmlNode> {
+    let mut matching_elements = collections::List::new();
+    for child in collections::iter(&parent_node.children) {
+        if child.node_type == HtmlNodeType::Element && &child.name == tag_name {
+            collections::push(&mut matching_elements, child);
+        }
+    }
+    matching_elements
+}
+
+/// Bir düğümün tüm metin içeriğini (alt metin düğümlerini birleştirerek) döndürür.
+///
+/// # Parametreler
+/// - `node`: Metin içeriği alınacak düğüm referansı.
+///
+/// # Dönüş Değeri
+/// Metin içeriği içeren `string`.
+pub fn get_text_content(node: &HtmlNode) -> string {
+    let mut content = "".to_string();
+    if node.node_type == HtmlNodeType::Text || node.node_type == HtmlNodeType::Comment { // CData da dahil edilebilir
+        content = node.value.to_string();
+    } else if node.node_type == HtmlNodeType::Element || node.node_type == HtmlNodeType::Document {
+        for child in collections::iter(&node.children) {
+            content = content + &get_text_content(child);
+        }
+    }
+    content
+}
+
+// --- CSS Seçici Benzeri Sorgu Fonksiyonları (Gelecekteki Geliştirmeler) ---
+
+// CSS seçicilerle daha esnek sorgulama yetenekleri, web kazıma için olmazsa olmazdır.
+// Bu fonksiyonlar, dahili olarak _cnt_html_select'i çağırabilir.
+
+ pub fn query_selector(root: &HtmlNode, selector: &string) -> Result<Option<&HtmlNode>, Error> { /* ... */ }
+ pub fn query_selector_all(root: &HtmlNode, selector: &string) -> Result<collections::List<&HtmlNode>, Error> { /* ... */ }
