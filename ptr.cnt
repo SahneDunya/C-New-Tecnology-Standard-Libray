@@ -1,0 +1,334 @@
+// ptr.cnt
+// Standart Pointer Modülü
+// Düşük seviyeli ham işaretçi manipülasyonları için temel araçlar.
+
+import std::assert;     // Geliştirme/hata ayıklama için
+
+// Not: Ham işaretçi operasyonları genellikle 'unsafe' kod blokları içinde yapılmalıdır.
+// CNT'nin 'unsafe' keyword'ünü desteklediği varsayılmıştır.
+// 'unsafe' bloklar, geliştiricinin hafıza güvenliği garantilerini manuel olarak sağlamasını gerektirir.
+
+/// `ptr<T>`: `T` tipinde bir değere işaret eden ham, değişmez (immutable) bir işaretçi.
+/// Null olabilir. Güvenli olmayan bir nesnedir; dikkatli kullanılmalıdır.
+pub struct ptr<T> {
+    __address: u64; // İçsel olarak bellek adresini tutar
+}
+
+/// `ptr_mut<T>`: `T` tipinde bir değere işaret eden ham, değişebilir (mutable) bir işaretçi.
+/// Null olabilir. Güvenli olmayan bir nesnedir; dikkatli kullanılmalıdır.
+pub struct ptr_mut<T> {
+    __address: u64; // İçsel olarak bellek adresini tutar
+}
+
+// --- 1. Null İşaretçiler ve Oluşturma Fonksiyonları ---
+
+impl<T> ptr<T> {
+    /// `null()`: Boş (null) bir değişmez işaretçi döndürür.
+    pub fn null() -> ptr<T> {
+        ptr { __address: 0u64 }
+    }
+
+    /// `from_address(address: u64)`: Belirli bir bellek adresinden bir değişmez işaretçi oluşturur.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü `address` geçerli bir `T` değerini işaret etmeyebilir.
+    pub unsafe fn from_address(address: u64) -> ptr<T> {
+        ptr { __address: address }
+    }
+
+    /// `from_ref(reference: &T)`: Bir referanstan değişmez bir işaretçi oluşturur.
+    /// Referansın geçerli olduğu sürece işaretçi de geçerlidir.
+    pub fn from_ref(reference: &T) -> ptr<T> {
+        // Bu, CNT'nin dahili bir dil özelliği veya referansın adresini alma mekanizması olmalı.
+        // Pseudo-kod: `ptr { __address: &reference as u64 }`
+        ptr { __address: __builtin_address_of(reference) }
+    }
+}
+
+impl<T> ptr_mut<T> {
+    /// `null_mut()`: Boş (null) bir değişebilir işaretçi döndürür.
+    pub fn null_mut() -> ptr_mut<T> {
+        ptr_mut { __address: 0u64 }
+    }
+
+    /// `from_address(address: u64)`: Belirli bir bellek adresinden bir değişebilir işaretçi oluşturur.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü `address` geçerli bir `T` değerini işaret etmeyebilir.
+    pub unsafe fn from_address(address: u64) -> ptr_mut<T> {
+        ptr_mut { __address: address }
+    }
+
+    /// `from_mut_ref(reference: &mut T)`: Bir değişebilir referanstan değişebilir bir işaretçi oluşturur.
+    /// Referansın geçerli olduğu sürece işaretçi de geçerlidir.
+    pub fn from_mut_ref(reference: &mut T) -> ptr_mut<T> {
+        // Pseudo-kod: `ptr_mut { __address: &mut reference as u64 }`
+        ptr_mut { __address: __builtin_address_of(reference) }
+    }
+
+    /// `as_ptr()`: `ptr_mut`'ı değişmez `ptr`'a dönüştürür.
+    pub fn as_ptr(&self) -> ptr<T> {
+        ptr { __address: self.__address }
+    }
+}
+
+// --- 2. İşaretçi Kıyaslama ---
+
+impl<T> ptr<T> {
+    /// `is_null()`: İşaretçinin null olup olmadığını kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.__address == 0u64
+    }
+
+    /// `eq(other: ptr<T>)`: İki değişmez işaretçinin eşitliğini kontrol eder (adresleri karşılaştırır).
+    pub fn eq(&self, other: ptr<T>) -> bool {
+        self.__address == other.__address
+    }
+
+    /// `ne(other: ptr<T>)`: İki değişmez işaretçinin eşitsizliğini kontrol eder.
+    pub fn ne(&self, other: ptr<T>) -> bool {
+        self.__address != other.__address
+    }
+}
+
+impl<T> ptr_mut<T> {
+    /// `is_null()`: İşaretçinin null olup olmadığını kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.__address == 0u64
+    }
+
+    /// `eq(other: ptr_mut<T>)`: İki değişebilir işaretçinin eşitliğini kontrol eder.
+    pub fn eq(&self, other: ptr_mut<T>) -> bool {
+        self.__address == other.__address
+    }
+
+    /// `ne(other: ptr_mut<T>)`: İki değişebilir işaretçinin eşitsizliğini kontrol eder.
+    pub fn ne(&self, other: ptr_mut<T>) -> bool {
+        self.__address != other.__address
+    }
+}
+
+// --- 3. İşaretçi Aritmetiği ---
+
+impl<T> ptr<T> {
+    /// `offset(count: i64)`: İşaretçiyi `count` kadar eleman ileri veya geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü hesaplanan adres geçerli bellek içinde olmayabilir.
+    pub unsafe fn offset(&self, count: i64) -> ptr<T> {
+        let size_of_t = __builtin_sizeof::<T>(); // CNT'nin sizeof operatörü
+        let byte_offset = (count as u64) * size_of_t;
+        ptr { __address: self.__address + byte_offset } // İşaretçi aritmetiği
+    }
+
+    /// `add(count: u64)`: İşaretçiyi `count` kadar eleman ileri kaydırır.
+    /// Negatif `count` için tanımsız davranıştır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn add(&self, count: u64) -> ptr<T> {
+        let size_of_t = __builtin_sizeof::<T>();
+        ptr { __address: self.__address + (count * size_of_t) }
+    }
+
+    /// `sub(count: u64)`: İşaretçiyi `count` kadar eleman geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn sub(&self, count: u64) -> ptr<T> {
+        let size_of_t = __builtin_sizeof::<T>();
+        ptr { __address: self.__address - (count * size_of_t) }
+    }
+
+    /// `byte_offset(count: i64)`: İşaretçiyi `count` kadar bayt ileri veya geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn byte_offset(&self, count: i64) -> ptr<T> {
+        ptr { __address: (self.__address as i64 + count) as u64 }
+    }
+}
+
+impl<T> ptr_mut<T> {
+    /// `offset(count: i64)`: İşaretçiyi `count` kadar eleman ileri veya geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn offset(&self, count: i64) -> ptr_mut<T> {
+        let size_of_t = __builtin_sizeof::<T>();
+        let byte_offset = (count as u64) * size_of_t;
+        ptr_mut { __address: self.__address + byte_offset }
+    }
+
+    /// `add(count: u64)`: İşaretçiyi `count` kadar eleman ileri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn add(&self, count: u64) -> ptr_mut<T> {
+        let size_of_t = __builtin_sizeof::<T>();
+        ptr_mut { __address: self.__address + (count * size_of_t) }
+    }
+
+    /// `sub(count: u64)`: İşaretçiyi `count` kadar eleman geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn sub(&self, count: u64) -> ptr_mut<T> {
+        let size_of_t = __builtin_sizeof::<T>();
+        ptr_mut { __address: self.__address - (count * size_of_t) }
+    }
+
+    /// `byte_offset(count: i64)`: İşaretçiyi `count` kadar bayt ileri veya geri kaydırır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn byte_offset(&self, count: i64) -> ptr_mut<T> {
+        ptr_mut { __address: (self.__address as i64 + count) as u64 }
+    }
+}
+
+// --- 4. Bellek Okuma/Yazma ve Takas ---
+
+impl<T> ptr<T> {
+    /// `read()`: İşaretçinin gösterdiği bellek konumundan `T` tipinde bir değeri okur.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü işaretçi geçerli bir `T` değerini işaret etmeyebilir
+    /// veya bellek geçerli olmayabilir.
+    pub unsafe fn read(&self) -> T {
+        // Bu, CNT'nin dahili bir bellek okuma intrinsiksi olmalı.
+        __builtin_load(self.__address)
+    }
+
+    /// `as_ref()`: İşaretçiyi değişmez bir referansa (`&T`) dönüştürmeye çalışır.
+    /// Eğer işaretçi null ise veya geçerli bir `T` tipini işaret etmiyorsa `Option::None` döndürür.
+    ///
+    /// # Güvenli Olmayan
+    /// Dönüştürme işleminin arkasındaki kontrol güvenli olmayabilir.
+    pub unsafe fn as_ref(&self) -> std::option::Option<&T> {
+        if self.is_null() {
+            return std::option::Option::None;
+        }
+        // Dahili olarak referans oluşturma intrinsiksi
+        std::option::Option::Some(__builtin_create_ref_from_address(self.__address))
+    }
+}
+
+impl<T> ptr_mut<T> {
+    /// `read()`: İşaretçinin gösterdiği bellek konumundan `T` tipinde bir değeri okur.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn read(&self) -> T {
+        __builtin_load(self.__address)
+    }
+
+    /// `write(value: T)`: İşaretçinin gösterdiği bellek konumuna `value` değerini yazar.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir, çünkü işaretçi geçerli bir bellek konumunu işaret etmeyebilir.
+    pub unsafe fn write(&self, value: T) {
+        __builtin_store(self.__address, value);
+    }
+
+    /// `replace(value: T)`: İşaretçinin gösterdiği bellek konumundaki değeri `value` ile değiştirir
+    /// ve eski değeri döndürür.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn replace(&self, value: T) -> T {
+        let old_value = self.read();
+        self.write(value);
+        old_value
+    }
+
+    /// `swap(other: ptr_mut<T>)`: İki değişebilir işaretçinin gösterdiği değerleri takas eder.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu fonksiyon güvenli değildir.
+    pub unsafe fn swap(&self, other: ptr_mut<T>) {
+        if self.eq(other) { return; } // Aynı işaretçiyse hiçbir şey yapma
+
+        let val_self = self.read();
+        let val_other = other.read();
+        self.write(val_other);
+        other.write(val_self);
+    }
+
+    /// `as_mut()`: İşaretçiyi değişebilir bir referansa (`&mut T`) dönüştürmeye çalışır.
+    /// Eğer işaretçi null ise veya geçerli bir `T` tipini işaret etmiyorsa `Option::None` döndürür.
+    ///
+    /// # Güvenli Olmayan
+    /// Dönüştürme işleminin arkasındaki kontrol güvenli olmayabilir.
+    pub unsafe fn as_mut(&self) -> std::option::Option<&mut T> {
+        if self.is_null() {
+            return std::option::Option::None;
+        }
+        // Dahili olarak referans oluşturma intrinsiksi
+        std::option::Option::Some(__builtin_create_mut_ref_from_address(self.__address))
+    }
+}
+
+// --- Örnek Kullanım ---
+
+import std::string;
+import std::option; // std::ptr'a dahil edilmeli
+
+fn main() {
+    println("Starting Ptr example...".to_string());
+
+    let mut x: i64 = 42;
+    let mut y: i64 = 100;
+
+    // `ptr_mut` oluşturma
+    let x_ptr_mut = std::ptr::ptr_mut::from_mut_ref(&mut x);
+    let y_ptr_mut = std::ptr::ptr_mut::from_mut_ref(&mut y);
+
+    println("Initial x: ".to_string() + x.to_string()); // 42
+    println("Initial y: ".to_string() + y.to_string()); // 100
+
+    unsafe {
+        // Okuma
+        let val_x = x_ptr_mut.read();
+        println("Value at x_ptr_mut: ".to_string() + val_x.to_string()); // 42
+
+        // Yazma
+        x_ptr_mut.write(50);
+        println("New x: ".to_string() + x.to_string()); // 50
+
+        // Takas
+        println("Before swap: x=".to_string() + x.to_string() + ", y=" + y.to_string());
+        x_ptr_mut.swap(y_ptr_mut);
+        println("After swap: x=".to_string() + x.to_string() + ", y=" + y.to_string()); // x=100, y=50
+
+        // İşaretçi aritmetiği
+        let mut arr: [i64; 3] = [10, 20, 30];
+        let arr_ptr_mut = std::ptr::ptr_mut::from_mut_ref(&mut arr[0]);
+
+        println("Array elements: ".to_string() + arr[0].to_string() + ", " + arr[1].to_string() + ", " + arr[2].to_string());
+
+        let arr_element_1_ptr = arr_ptr_mut.offset(1); // arr[1]'e işaret eder
+        println("Value at arr_element_1_ptr: ".to_string() + arr_element_1_ptr.read().to_string()); // 20
+
+        let arr_element_2_ptr = arr_ptr_mut.add(2); // arr[2]'ye işaret eder
+        println("Value at arr_element_2_ptr: ".to_string() + arr_element_2_ptr.read().to_string()); // 30
+
+        // `as_ref` / `as_mut` kullanımı
+        let x_ref_option = x_ptr_mut.as_mut();
+        match x_ref_option {
+            std::option::Option::Some(r) => {
+                println("x as &mut i64: ".to_string() + r.to_string());
+                *r = 200; // Referans üzerinden değeri değiştir
+            },
+            std::option::Option::None => println("Failed to get mutable reference to x.".to_string()),
+        }
+        println("x after as_mut modification: ".to_string() + x.to_string()); // 200
+
+        let null_ptr_mut: std::ptr::ptr_mut<i64> = std::ptr::ptr_mut::null_mut();
+        let null_ref_option = null_ptr_mut.as_mut();
+        assert!(null_ref_option.is_none(), "Null pointer should return None for as_mut.");
+        println("Null pointer as_mut() test passed.".to_string());
+    } // `unsafe` blok burada sona erer
+
+    println("Ptr example finished.".to_string());
+}
