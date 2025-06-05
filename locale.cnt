@@ -1,0 +1,237 @@
+// locale.cnt
+// Standart Yerel Ayar (Locale) Modülü
+// Programların kullanıcının kültürel ve dilsel tercihlerine uyum sağlamasını sağlar.
+
+import std::string;     // Metin işlemleri ve hata mesajları için
+import std::vector;     // Kategori isimlerini tutmak için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::chrono;     // Tarih/saat biçimlendirme için
+
+// Not: Bu modülün implementasyonu, CNT'nin işletim sistemi yerel ayar API'lerine
+// (setlocale, newlocale, uselocale, GetLocaleInfo vb.) FFI veya runtime desteğine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'os::set_locale_category', 'os::get_locale_info' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+/// `Error` Enum'u: Locale işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz yerel ayar adı belirtildi.
+    InvalidLocaleName(string);
+    /// Belirtilen kategori için yerel ayar ayarlanırken hata oluştu.
+    SetLocaleError(string);
+    /// Yerel ayar bilgisi alınırken hata oluştu.
+    GetLocaleInfoError(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Category` Enum'u: Yerel ayar sisteminin farklı işlevsellik kategorilerini temsil eder.
+/// Bu kategoriler C standardındaki LC_ALL, LC_COLLATE vb. ile eşleşir.
+pub enum Category {
+    /// Tüm kategoriler.
+    All;
+    /// String sıralaması ve karşılaştırması.
+    Collate;
+    /// Karakter sınıflandırması (is_alpha, is_digit vb.) ve büyük/küçük harf dönüşümü.
+    Ctype;
+    /// Para birimi biçimlendirme.
+    Monetary;
+    /// Sayısal biçimlendirme (nokta/virgül ayracı, binlik ayraçları).
+    Numeric;
+    /// Zaman ve tarih biçimlendirme.
+    Time;
+    /// Mesajların çevirisi (gettext gibi).
+    Messages;
+}
+
+// --- Dahili OS API Wrapparları (CNT Runtime/Compiler Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, altta yatan OS API'lerini çağıran CNT'nin runtime'ına veya FFI'sına aittir.
+
+// `os_set_locale`: Belirli bir kategori için yerel ayarı ayarlar.
+// Dönüş: Başarılı olursa ayarlanmış yerel ayarın adı, aksi takdirde hata.
+ pub fn os_set_locale(category: Category, locale_name: string) -> Result<string, string>;
+
+// `os_get_locale_info_string`: Belirli bir yerel ayar ve bilgi türü için string bilgi alır.
+ pub fn os_get_locale_info_string(locale_name: string, info_type_code: i32) -> Result<string, string>;
+
+// `os_get_locale_info_char`: Belirli bir yerel ayar ve bilgi türü için char bilgi alır (örn. ondalık ayraç).
+ pub fn os_get_locale_info_char(locale_name: string, info_type_code: i32) -> Result<char, string>;
+
+// `os_get_current_locale_name`: Mevcut (küresel veya iş parçacığı) yerel ayarın adını alır.
+ pub fn os_get_current_locale_name(category: Category) -> Result<string, string>;
+// --- 1. Locale Yapısı ---
+
+/// `Locale` Struct'ı: Belirli bir yerel ayarı temsil eden bir nesne.
+/// `Locale` nesneleri değişmezdir (immutable) ve bir kez oluşturulduktan sonra özellikleri değişmez.
+pub struct Locale {
+    name: string;
+    // Yerel ayarın detaylı bilgileri (örn. ondalık ayraç, para birimi sembolü).
+    // Bu bilgiler, gerektiğinde OS'tan sorgulanmalı veya önbelleğe alınmalıdır.
+    // Şimdilik sadece isim üzerinden OS'a erişim varsayıyoruz.
+}
+
+/// `new_locale()`: Belirtilen adla yeni bir `Locale` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `name`: Yerel ayarın adı (örn. "en_US.UTF-8", "tr_TR", "C").
+///
+/// # Dönüş Değeri
+/// `Result<Locale, Error>`: Oluşturulan `Locale` nesnesi veya hata.
+pub fn new_locale(name: string) -> Result<Locale, Error> {
+    // Burada OS'tan yerel ayarın geçerli olup olmadığını kontrol edebiliriz.
+    // Şimdilik sadece adını saklayıp kabul ediyoruz.
+    if name.is_empty() {
+        return Result::Err(Error::InvalidLocaleName("Locale name cannot be empty.".to_string()));
+    }
+    Result::Ok(Locale { name: name })
+}
+
+/// `name()`: Bu yerel ayarın adını döndürür.
+pub fn name(loc: &Locale) -> string {
+    loc.name
+}
+
+/// `is_equal()`: İki `Locale` nesnesinin aynı yerel ayarı temsil edip etmediğini kontrol eder.
+pub fn is_equal(loc1: &Locale, loc2: &Locale) -> bool {
+    loc1.name == loc2.name
+}
+
+// --- 2. Küresel Yerel Ayar Yönetimi ---
+
+/// `set_global_locale()`: Programın küresel yerel ayarını ayarlar.
+/// Bu, tüm iş parçacıklarını ve yeni oluşturulan yerel ayar nesnelerini etkiler.
+///
+/// # Parametreler
+/// - `loc`: Ayarlanacak `Locale` nesnesi.
+/// - `category`: Hangi kategorinin ayarlanacağını belirler. `Category::All` tümünü ayarlar.
+///
+/// # Dönüş Değeri
+/// `Result<Locale, Error>`: Başarılı olursa, ayarlanmış olan (muhtemelen önceki) yerel ayarın adını
+/// içeren bir `Locale` nesnesi veya hata.
+pub fn set_global_locale(loc: &Locale, category: Category) -> Result<Locale, Error> {
+    match os_set_locale(category, loc.name) {
+        Result::Ok(old_locale_name) => new_locale(old_locale_name),
+        Result::Err(msg) => Result::Err(Error::SetLocaleError("Failed to set global locale: ".to_string() + msg)),
+    }
+}
+
+/// `get_global_locale()`: Programın mevcut küresel yerel ayarını döndürür.
+///
+/// # Parametreler
+/// - `category`: Hangi kategorinin yerel ayarının alınacağını belirler.
+///
+/// # Dönüş Değeri
+/// `Result<Locale, Error>`: Mevcut küresel `Locale` nesnesi veya hata.
+pub fn get_global_locale(category: Category) -> Result<Locale, Error> {
+    match os_get_current_locale_name(category) {
+        Result::Ok(name) => new_locale(name),
+        Result::Err(msg) => Result::Err(Error::GetLocaleInfoError("Failed to get global locale: ".to_string() + msg)),
+    }
+}
+
+// --- 3. Karakter İşlemleri (ctype Kategori Bazlı) ---
+
+// Bu fonksiyonlar, `is_alpha`, `is_digit`, `to_upper`, `to_lower` gibi işlevsellik sağlayacaktır.
+// Bunlar, varsayılan olarak küresel yerel ayarı kullanır veya bir `Locale` nesnesi alabilir.
+
+/// `is_alpha()`: Belirtilen karakterin yerel ayara göre bir alfabetik karakter olup olmadığını kontrol eder.
+pub fn is_alpha(c: char, loc: &Locale) -> bool {
+    // Dahili OS çağrısı varsayılır: os_is_alpha_locale(c, loc.name)
+    // Şimdilik basit bir kontrol yapalım.
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') // Sadece ASCII için
+}
+
+/// `to_upper()`: Belirtilen karakterin yerel ayara göre büyük harf karşılığını döndürür.
+pub fn to_upper(c: char, loc: &Locale) -> char {
+    // Dahili OS çağrısı varsayılır: os_to_upper_locale(c, loc.name)
+    // Şimdilik basit bir kontrol yapalım.
+    if c >= 'a' && c <= 'z' {
+        return (c as i32 - 32) as char; // Basit ASCII dönüşümü
+    }
+    c
+}
+
+// --- 4. Sayısal Biçimlendirme (numeric Kategori Bazlı) ---
+
+/// `get_decimal_point()`: Belirtilen yerel ayar için ondalık ayraç karakterini döndürür.
+pub fn get_decimal_point(loc: &Locale) -> Result<char, Error> {
+    // Varsayılan bir OS bilgi kodu
+    let decimal_point_code = 1; // Varsayımsal kod (örn. LC_NUMERIC_DECIMAL_POINT_CODE)
+    match os_get_locale_info_char(loc.name, decimal_point_code) {
+        Result::Ok(c) => Result::Ok(c),
+        Result::Err(msg) => Result::Err(Error::GetLocaleInfoError("Failed to get decimal point: ".to_string() + msg)),
+    }
+}
+
+/// `format_double()`: Bir `f64` değerini belirtilen yerel ayara göre string olarak biçimlendirir.
+/// Karmaşık bir fonksiyondur, örnek bir iskelet sağlanmıştır.
+pub fn format_double(value: f64, loc: &Locale) -> Result<string, Error> {
+    let decimal_point = get_decimal_point(loc)?;
+    let s = value.to_string(); // Varsayılan CNT to_string()
+    // Burada `s` string'ini `decimal_point` kullanarak yeniden biçimlendirme mantığı eklenecek.
+    // Örn: s.replace('.', decimal_point.to_string())
+    Result::Ok(s) // Şimdilik basit dönüşüm
+}
+
+// --- 5. Tarih/Saat Biçimlendirme (time Kategori Bazlı) ---
+
+/// `format_date_time()`: Bir `DateTime` nesnesini belirtilen yerel ayara ve biçim dizesine göre biçimlendirir.
+/// `std::chrono::DateTime` tipinin varlığını varsayarız.
+pub fn format_date_time(dt: &chrono::DateTime, format_str: string, loc: &Locale) -> Result<string, Error> {
+    // Bu fonksiyon genellikle OS'un `strftime` benzeri bir fonksiyonunu çağırır.
+    pub fn os_format_time_locale(dt: &chrono::DateTime, format_str: string, locale_name: string) -> Result<string, string>;
+    // Şimdilik basit bir yer tutucu.
+    Result::Ok(dt.to_string() + " (formatted by locale: " + loc.name + ")")
+}
+
+// --- 6. Para Birimi Biçimlendirme (monetary Kategori Bazlı) ---
+
+/// `get_currency_symbol()`: Belirtilen yerel ayar için para birimi sembolünü döndürür.
+pub fn get_currency_symbol(loc: &Locale) -> Result<string, Error> {
+    // Varsayılan bir OS bilgi kodu
+    let currency_symbol_code = 2; // Varsayımsal kod (örn. LC_MONETARY_CURRENCY_SYMBOL_CODE)
+    match os_get_locale_info_string(loc.name, currency_symbol_code) {
+        Result::Ok(s) => Result::Ok(s),
+        Result::Err(msg) => Result::Err(Error::GetLocaleInfoError("Failed to get currency symbol: ".to_string() + msg)),
+    }
+}
+
+/// `format_currency()`: Bir `f64` para birimi değerini belirtilen yerel ayara göre biçimlendirir.
+pub fn format_currency(amount: f64, loc: &Locale) -> Result<string, Error> {
+    let symbol = get_currency_symbol(loc)?;
+    let formatted_amount = format_double(amount, loc)?;
+    // Para birimi sembolünün konumunu da yerel ayara göre ayarlamak gerekir (öne/arkaya, boşluk vb.)
+    Result::Ok(symbol + formatted_amount)
+}
+
+// --- Örnek Kullanım ---
+/*
+fn main() {
+    println("Current global locale (all categories): ".to_string() + get_global_locale(Category::All).expect("Failed to get global locale").name);
+
+    // Yeni bir yerel ayar oluştur
+    let tr_locale = new_locale("tr_TR").expect("Failed to create tr_TR locale");
+    println("Created locale: ".to_string() + tr_locale.name);
+
+    // Global yerel ayarı tr_TR olarak ayarla (sadece numeric kategori için)
+    let old_numeric_locale = set_global_locale(&tr_locale, Category::Numeric).expect("Failed to set global numeric locale");
+    println("Global numeric locale set to tr_TR. Old locale was: ".to_string() + old_numeric_locale.name);
+
+    // Sayısal biçimlendirme testi
+    let num_value: f64 = 12345.678;
+    println("Formatted number (current global numeric locale): ".to_string() + format_double(num_value, &get_global_locale(Category::Numeric).expect("Failed to get numeric locale")).expect("Failed to format number"));
+
+    // Karakter işlemi testi (ctype)
+    let char_to_test: char = 'i';
+    println("Is 'i' alpha (tr_TR locale)? ".to_string() + is_alpha(char_to_test, &tr_locale).to_string());
+    println("To upper 'i' (tr_TR locale): ".to_string() + to_upper(char_to_test, &tr_locale).to_string()); // 'İ' beklenir
+
+    // Global yerel ayarı orijinal haline geri döndür
+    set_global_locale(&old_numeric_locale, Category::Numeric).expect("Failed to restore old numeric locale");
+    println("Global numeric locale restored to: ".to_string() + get_global_locale(Category::Numeric).expect("Failed to get numeric locale").name);
+}
