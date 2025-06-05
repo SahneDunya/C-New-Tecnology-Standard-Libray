@@ -1,0 +1,147 @@
+// lambda.cnt
+// Standart Lambda ve Closure Modülü
+// Kapsamdan değişken yakalayabilen isimsiz fonksiyon nesneleri.
+
+import std::ops;       // Fn, FnMut, FnOnce trait'leri için
+import std::string;    // String işlemleri ve hata mesajları için
+import std::io;        // println için
+import std::assert;    // Hata ayıklama için
+
+// Not: CNT'nin `lambda` sentaksını (örneğin `|arg1, arg2| { ... }`)
+// dahili olarak bu tür struct'lara ve trait implementasyonlarına dönüştürdüğü varsayılmıştır.
+// Bu dosya, bu dönüşümün arkasındaki conceptual modeli göstermektedir.
+
+// --- Temel Lambda Yapısı ---
+
+// Bir lambda, aslında yakaladığı değişkenleri içeren bir struct'a derleyici tarafından dönüştürülür.
+// Daha sonra bu struct, `std::ops` modülündeki `Fn`, `FnMut` veya `FnOnce` trait'lerinden birini implemente eder.
+
+// Örnek: `|x| { println(x + y); }` lambda'sı için yandaki `y` değişkenini yakalar.
+// Bu lambda, aşağıdaki gibi bir struct'a dönüştürülebilir:
+
+pub struct __MyClosureType1 {
+    // Kapanım listesi: Lambda'nın yakaladığı değişkenler
+    captured_y: i32, // 'y' değişkenini değer olarak yakalar (by value)
+}
+
+// Bu struct, bir fonksiyon gibi çağrılabilir olmak için `Fn` trait'ini implemente eder.
+// Eğer `captured_y` değiştirilmiyorsa ve kapanım kendi durumunu değiştirmiyorsa `Fn` kullanılabilir.
+// Eğer `captured_y` değiştiriliyorsa veya closure'ın kendi durumu değiştiriliyorsa `FnMut` kullanılır.
+// Eğer closure bir kez çağrıldıktan sonra tüketiliyorsa `FnOnce` kullanılır.
+impl ops::Fn<(i32,)> for __MyClosureType1 { // Argüman olarak bir i32 (tuple içinde) alır
+    type Output = (); // Dönüş tipi boş tuple (void gibi)
+
+    // `call` metodu, `Fn` trait'ini implemente ederken `&self` alır.
+    // Bu, closure'ın yakaladığı değişkenleri veya kendi durumunu değiştiremediği anlamına gelir.
+    fn call(&self, args: (i32,)) -> Self::Output {
+        let x = args.0;
+        std::io::println((x + self.captured_y).to_string());
+    }
+}
+
+
+// --- `std::lambda` Modülünün Sağlayabileceği Yardımcı Fonksiyonlar ---
+// Gerçekte, bu fonksiyonlar derleyici tarafından oluşturulur ve doğrudan çağrılmazlar.
+// Ancak, conceptual olarak `lambda`'ların nasıl çalıştığını göstermek için buradayız.
+
+/// `closure_fn<F, Args, Ret>(f: F)`: Sadece değişmez referans ile çağrılabilen bir closure oluşturur.
+///
+/// Not: Bu, derleyici tarafından `|args| { ... }` sözdiziminden otomatik olarak oluşturulan bir
+/// `Fn` implementasyonu için bir yer tutucudur.
+pub fn closure_fn<F, Args, Ret>(f: F) -> F
+where F: ops::Fn<Args, Output = Ret>
+{
+    f // Derleyici zaten doğru tipi ve implementasyonu oluşturmuştur.
+}
+
+/// `closure_fn_mut<F, Args, Ret>(f: F)`: Değişebilir referans ile çağrılabilen bir closure oluşturur.
+///
+/// Not: Bu, derleyici tarafından `|args| { ... }` sözdiziminden otomatik olarak oluşturulan bir
+/// `FnMut` implementasyonu için bir yer tutucudur.
+pub fn closure_fn_mut<F, Args, Ret>(f: F) -> F
+where F: ops::FnMut<Args, Output = Ret>
+{
+    f // Derleyici zaten doğru tipi ve implementasyonu oluşturmuştur.
+}
+
+/// `closure_fn_once<F, Args, Ret>(f: F)`: Bir kez çağrılabilecek bir closure oluşturur.
+///
+/// Not: Bu, derleyici tarafından `|args| { ... }` sözdiziminden otomatik olarak oluşturulan bir
+/// `FnOnce` implementasyonu için bir yer tutucudur.
+pub fn closure_fn_once<F, Args, Ret>(f: F) -> F
+where F: ops::FnOnce<Args, Output = Ret>
+{
+    f // Derleyici zaten doğru tipi ve implementasyonu oluşturmuştur.
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::string;
+import std::io; // println için
+import std::ops; // Fn trait'leri için
+
+fn main() {
+    io::println("Starting Lambda example...".to_string());
+
+    // 1. Kapanım yakalamayan basit bir lambda (Fonksiyon İşaretçisi gibi davranır)
+    let simple_add = |a: i32, b: i32| -> i32 {
+        a + b
+    };
+    io::println("Simple Add (5 + 3): ".to_string() + simple_add.call((5, 3)).to_string()); // Çıktı: 8
+
+    // 2. Kapanım yakalayan lambda (Değer olarak yakalama - by value)
+    let factor = 10;
+    let multiply_by_factor = |num: i32| -> i32 {
+        num * factor // `factor` değişkeni yakalandı
+    };
+    io::println("Multiply by Factor (7 * 10): ".to_string() + multiply_by_factor.call((7,)).to_string()); // Çıktı: 70
+
+    // `factor` değişirse `multiply_by_factor`'daki değer değişmez, çünkü değer olarak yakalandı.
+    // factor = 20; // Hata: 'factor' hala kullanılan bir değişkendir, değeri değiştirilemez.
+    // io::println("Multiply by Factor (7 * 20 - after change): ".to_string() + multiply_by_factor.call((7,)).to_string());
+
+
+    // 3. Değişebilir kapanım yakalayan lambda (Değişebilir referans olarak yakalama - by mutable reference)
+    let mut counter = 0;
+    let increment_counter = |amount: i32| {
+        counter += amount; // `counter` değişkeni değişebilir referans olarak yakalandı
+        io::println("Counter incremented to: ".to_string() + counter.to_string());
+    };
+    // `increment_counter` artık bir `FnMut` closure'ı olarak işlem görür.
+    // `call_mut` metodu ile çağrılır.
+    increment_counter.call_mut((5,)); // Counter: 5
+    increment_counter.call_mut((10,)); // Counter: 15
+    io::println("Final counter value: ".to_string() + counter.to_string());
+
+
+    // 4. Bir kez çağrılabilecek lambda (Sahipliği taşıma - by move)
+    let my_string = "Hello, world!".to_string();
+    let consume_string = || {
+        // `my_string` değeri bu closure'a taşındı (moved).
+        // Artık `my_string` dış kapsamda kullanılamaz.
+        io::println(my_string);
+    };
+    // `consume_string` bir `FnOnce` closure'ı olarak işlem görür.
+    // `call_once` metodu ile çağrılır.
+    consume_string.call_once(()); // Çıktı: Hello, world!
+
+    // io::println(my_string); // Hata: `my_string` taşındı ve artık kullanılamaz.
+
+
+    // 5. Bir vektördeki elemanları işlemek için lambda kullanma
+    let mut numbers = [1, 2, 3, 4, 5];
+    let multiplier = 2;
+
+    // `for_each` gibi bir yüksek dereceli fonksiyonun kullanıldığı varsayılmıştır.
+     for_each(&mut numbers, |val: &mut i32| {
+        *val *= multiplier; // multiplier'ı yakala
+     });
+     io::println("Doubled numbers: ".to_string());
+     for num in numbers {
+        io::println(num.to_string()); // 2, 4, 6, 8, 10
+     }
+
+
+    io::println("Lambda example finished.".to_string());
+}
