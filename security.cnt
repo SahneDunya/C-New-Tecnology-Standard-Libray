@@ -1,0 +1,229 @@
+// security.cnt
+// Standart Güvenlik ve Kriptografi Modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<u8> (byte dizileri) için
+
+// Harici C veya optimize edilmiş kriptografi kütüphanelerine (örn. OpenSSL, LibreSSL, BoringSSL)
+// bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, düşük seviyeli kriptografik işlemleri gerçekleştirir.
+extern fn _cnt_security_hash_sha256(data: &collections::List<u8>) -> collections::List<u8>;
+extern fn _cnt_security_hash_sha512(data: &collections::List<u8>) -> collections::List<u8>;
+extern fn _cnt_security_generate_random_bytes(length: int) -> _cnt_Result_collections_List_u8_security_Error;
+extern fn _cnt_security_pbkdf2_hmac_sha256(
+    password: &collections::List<u8>,
+    salt: &collections::List<u8>,
+    iterations: int,
+    key_length: int
+) -> _cnt_Result_collections_List_u8_security_Error;
+// Diğer kriptografik işlemler (AES şifreleme/şifre çözme, RSA anahtar işlemleri) eklenebilir.
+
+
+/// `Error` Enum'u: Güvenlik işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Kriptografik işlem sırasında genel hata.
+    CryptoError(string);
+    /// Geçersiz giriş parametresi (örn. geçersiz uzunluk).
+    InvalidInput(string);
+    /// Rastgele sayı üreteci hatası.
+    RandomnessError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+// --- 1. Kriptografik Hash Fonksiyonları (Tek Yönlü Hash'ler) ---
+
+/// Verilen byte dizisinin SHA-256 hash'ini hesaplar.
+///
+/// SHA-256, yaygın olarak kullanılan bir kriptografik hash fonksiyonudur ve
+/// veri bütünlüğünü doğrulamak ve dijital imzalar oluşturmak için kullanılır.
+///
+/// # Parametreler
+/// - `data`: Hash'i hesaplanacak byte dizisi referansı.
+///
+/// # Dönüş Değeri
+/// 32 byte'lık (256 bit) hash değeri içeren `collections::List<u8>`.
+pub fn sha256(data: &collections::List<u8>) -> collections::List<u8> {
+    _cnt_security_hash_sha256(data)
+}
+
+/// Verilen string'in UTF-8 kodlamasının SHA-256 hash'ini hesaplar.
+///
+/// # Parametreler
+/// - `s`: Hash'i hesaplanacak string referansı.
+///
+/// # Dönüş Değeri
+/// 32 byte'lık (256 bit) hash değeri içeren `collections::List<u8>`.
+pub fn sha256_from_string(s: &string) -> collections::List<u8> {
+    sha256(&string::to_bytes(s)) // string::to_bytes fonksiyonu varsayılır
+}
+
+/// Verilen byte dizisinin SHA-512 hash'ini hesaplar.
+///
+/// SHA-512, SHA-256'ya göre daha uzun (64 byte / 512 bit) bir hash değeri üretir
+/// ve bazı durumlarda daha yüksek güvenlik sağlar.
+///
+/// # Parametreler
+/// - `data`: Hash'i hesaplanacak byte dizisi referansı.
+///
+/// # Dönüş Değeri
+/// 64 byte'lık (512 bit) hash değeri içeren `collections::List<u8>`.
+pub fn sha512(data: &collections::List<u8>) -> collections::List<u8> {
+    _cnt_security_hash_sha512(data)
+}
+
+/// Verilen string'in UTF-8 kodlamasının SHA-512 hash'ini hesaplar.
+///
+/// # Parametreler
+/// - `s`: Hash'i hesaplanacak string referansı.
+///
+/// # Dönüş Değeri
+/// 64 byte'lık (512 bit) hash değeri içeren `collections::List<u8>`.
+pub fn sha512_from_string(s: &string) -> collections::List<u8> {
+    sha512(&string::to_bytes(s))
+}
+
+
+// --- 2. Güvenli Rastgele Sayı Üretimi (CSPRNG) ---
+
+/// Kriptografik olarak güvenli rastgele byte'lar üretir.
+///
+/// Bu fonksiyon, şifreleme anahtarları, nonce'lar ve diğer güvenlik açısından
+/// kritik veriler için kullanılmalıdır. Geleneksel "psödö rastgele" üreteçlerden
+/// (PRNG) farklı olarak, tahmin edilemezlik garantisi verir.
+///
+/// # Parametreler
+/// - `length`: Üretilecek byte sayısı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa rastgele byte dizisi içeren `Result::Ok(List<u8>)`,
+/// hata oluşursa `Result::Err(Error::RandomnessError)`.
+pub fn generate_random_bytes(length: int) -> Result<collections::List<u8>, Error> {
+    if length < 0 {
+        return Result::Err(Error::InvalidInput("Length cannot be negative".to_string()));
+    }
+    _cnt_security_generate_random_bytes(length)
+}
+
+/// Kriptografik olarak güvenli rastgele bir UUID (Universally Unique Identifier) string'i üretir (RFC 4122 v4).
+///
+/// # Dönüş Değeri
+/// Rastgele UUID string'i içeren `Result::Ok(string)`.
+pub fn generate_uuid_v4() -> Result<string, Error> {
+    let result = generate_random_bytes(16); // UUID v4 için 16 rastgele byte
+    match result {
+        Result::Ok(bytes) => {
+            if collections::len(&bytes) != 16 {
+                return Result::Err(Error::RandomnessError("Failed to generate enough random bytes for UUID".to_string()));
+            }
+            // UUID v4 formatlama kuralları:
+            // Zaman damgası ve MAC adresi yerine tamamen rastgele
+            // Set version (4) and variant (RFC 4122) bits
+            let mut uuid_bytes = bytes.clone(); // Kopyala veya sahiplen
+
+            // Version (4): byte 6'nın ilk 4 biti 0100 olmalı
+            let mut byte_6 = collections::get(&uuid_bytes, 6).unwrap();
+            byte_6 = (byte_6 & 0x0F) | 0x40; // Clear top 4 bits, set to 0100
+            collections::set(&mut uuid_bytes, 6, byte_6);
+
+            // Variant (RFC 4122): byte 8'in ilk 2 biti 10 olmalı
+            let mut byte_8 = collections::get(&uuid_bytes, 8).unwrap();
+            byte_8 = (byte_8 & 0x3F) | 0x80; // Clear top 2 bits, set to 10
+            collections::set(&mut uuid_bytes, 8, byte_8);
+
+            // Byte dizisini hex string'e dönüştür ve tireleri ekle
+            let mut uuid_hex_string = "".to_string();
+            for i in 0..collections::len(&uuid_bytes) {
+                let byte_val = collections::get(&uuid_bytes, i).unwrap();
+                let hex_part = string::format_hex(byte_val, 2); // Her byte'ı 2 haneli hex'e çevir
+                uuid_hex_string = uuid_hex_string + &hex_part;
+
+                if i == 3 || i == 5 || i == 7 || i == 9 {
+                    uuid_hex_string = uuid_hex_string + "-";
+                }
+            }
+            Result::Ok(uuid_hex_string)
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+
+// --- 3. Şifreleme Anahtarı Türetme Fonksiyonları ---
+
+/// PBKDF2 (Password-Based Key Derivation Function 2) kullanarak bir paroladan
+/// kriptografik anahtar türetir.
+///
+/// PBKDF2, parolaları doğrudan hash'lemek yerine, yavaş ve tuzlanmış (salted)
+/// bir hashleme işlemi uygulayarak kaba kuvvet saldırılarına karşı direnci artırır.
+/// Genellikle parola depolamada kullanılır.
+///
+/// # Parametreler
+/// - `password`: Türetme için kullanılacak parola byte dizisi.
+/// - `salt`: Türetme için kullanılacak rastgele tuz byte dizisi. Her parola için benzersiz olmalıdır.
+/// - `iterations`: Hashleme işleminin tekrar sayısı (güvenlik parametresi, genelde yüksek olmalıdır).
+/// - `key_length`: Türetilecek anahtarın uzunluğu (byte olarak).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa türetilmiş anahtar byte dizisi içeren `Result::Ok(List<u8>)`,
+/// hata oluşursa `Result::Err(Error::CryptoError)`.
+pub fn pbkdf2_hmac_sha256(
+    password: &collections::List<u8>,
+    salt: &collections::List<u8>,
+    iterations: int,
+    key_length: int
+) -> Result<collections::List<u8>, Error> {
+    if iterations <= 0 || key_length <= 0 {
+        return Result::Err(Error::InvalidInput("Iterations and key_length must be positive".to_string()));
+    }
+    _cnt_security_pbkdf2_hmac_sha256(password, salt, iterations, key_length)
+}
+
+// --- 4. Güvenli String İşlemleri / Karşılaştırmalar ---
+
+/// İki byte dizisini sabit zamanda karşılaştırır.
+///
+/// Bu fonksiyon, zamanlama saldırılarını önlemek için tasarlanmıştır.
+/// Normal byte karşılaştırmaları, eşleşmeyen ilk byte'ı bulduklarında erken durabilir,
+/// bu da saldırganların bir sırrı tahmin etmesine olanak tanıyan zamanlama farklılıkları yaratır.
+///
+/// # Parametreler
+/// - `a`: Karşılaştırılacak ilk byte dizisi.
+/// - `b`: Karşılaştırılacak ikinci byte dizisi.
+///
+/// # Dönüş Değeri
+/// İki dizi eşitse `true`, değilse `false`.
+pub fn constant_time_compare(a: &collections::List<u8>, b: &collections::List<u8>) -> bool {
+    if collections::len(a) != collections::len(b) {
+        return false;
+    }
+
+    let mut diff = 0;
+    for i in 0..collections::len(a) {
+        // Bitwise XOR kullanarak farkı biriktir.
+        // Bu işlem, dizinin tamamı üzerinde her zaman aynı sürede çalışır.
+        diff = diff | (collections::get(a, i).unwrap() ^ collections::get(b, i).unwrap());
+    }
+
+    // diff sıfır ise, tüm byte'lar eşleşiyor demektir.
+    diff == 0
+}
+
+
+// --- Gelecekte Eklenebilecek Diğer Özellikler ---
+// - Simetrik Şifreleme (örn. AES-256-GCM)
+// - Asimetrik Kriptografi (örn. RSA, ECC anahtar oluşturma, imzalama/doğrulama)
+// - Dijital İmzalar
+// - X.509 Sertifika İşlemleri
+// - HTTPS/TLS desteği (http.cnt ile entegrasyon)
+// - Güvenli Enkoding (Base64, Hex)
+// - Daha fazla Hash algoritması (MD5 - güvenlik için tavsiye edilmez, Blake3)
+// - HMAC (Hash-based Message Authentication Code)
