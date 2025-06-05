@@ -1,0 +1,317 @@
+// float.cnt
+// Standart Kayan Nokta Sayı Modülü
+// IEEE 754 kayan nokta sayıları için özel işlemler ve sorgular sağlar.
+
+import std::string; // Hata mesajları için (gerektiğinde)
+import std::limits; // Kayan nokta sınırlarına erişim için
+
+// Harici C veya optimize edilmiş kayan nokta yardımcı kütüphanelerine
+// bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, düşük seviyeli FPU (Floating Point Unit) işlemlerini gerçekleştirebilir.
+extern fn _cnt_float_is_nan(f: float) -> bool;
+extern fn _cnt_float_is_infinite(f: float) -> bool;
+extern fn _cnt_float_is_finite(f: float) -> bool;
+extern fn _cnt_float_is_normal(f: float) -> bool;
+extern fn _cnt_float_signbit(f: float) -> bool;
+extern fn _cnt_float_copysign(magnitude: float, sign: float) -> float;
+extern fn _cnt_float_round(f: float) -> float;
+extern fn _cnt_float_ceil(f: float) -> float;
+extern fn _cnt_float_floor(f: float) -> float;
+extern fn _cnt_float_trunc(f: float) -> float;
+
+
+// --- 1. Kayan Nokta Sayı Özelliklerini Sorgulama ---
+
+/// Bir `float` değerinin "Sayı Değil" (Not-a-Number - NaN) olup olmadığını kontrol eder.
+/// NaN, geçersiz matematiksel işlemlerin (örn. 0.0 / 0.0) sonucudur.
+///
+/// # Parametreler
+/// - `f`: Kontrol edilecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// `f` NaN ise `true`, değilse `false`.
+pub fn is_nan_f(f: float) -> bool {
+    _cnt_float_is_nan(f)
+}
+
+/// Bir `double` değerinin "Sayı Değil" (Not-a-Number - NaN) olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `d`: Kontrol edilecek `double` değeri.
+///
+/// # Dönüş Değeri
+/// `d` NaN ise `true`, değilse `false`.
+pub fn is_nan_d(d: double) -> bool {
+    _cnt_float_is_nan(d as float) // double'ı float'a çevirerek aynı harici fonksiyonu kullanabiliriz,
+                                // veya _cnt_double_is_nan gibi ayrı bir fonksiyon tanımlayabiliriz.
+                                // Idealde her tip için ayrı, optimize edilmiş extern fonksiyon olmalı.
+}
+
+/// Bir `float` değerinin pozitif veya negatif sonsuzluk olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `f`: Kontrol edilecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// `f` sonsuzluk ise `true`, değilse `false`.
+pub fn is_infinite_f(f: float) -> bool {
+    _cnt_float_is_infinite(f)
+}
+
+/// Bir `double` değerinin pozitif veya negatif sonsuzluk olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `d`: Kontrol edilecek `double` değeri.
+///
+/// # Dönüş Değeri
+/// `d` sonsuzluk ise `true`, değilse `false`.
+pub fn is_infinite_d(d: double) -> bool {
+    _cnt_float_is_infinite(d as float) // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+/// Bir `float` değerinin sonlu (NaN veya sonsuzluk olmayan) olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `f`: Kontrol edilecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// `f` sonlu ise `true`, değilse `false`.
+pub fn is_finite_f(f: float) -> bool {
+    _cnt_float_is_finite(f)
+}
+
+/// Bir `double` değerinin sonlu (NaN veya sonsuzluk olmayan) olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `d`: Kontrol edilecek `double` değeri.
+///
+/// # Dönüş Değeri
+/// `d` sonlu ise `true`, değilse `false`.
+pub fn is_finite_d(d: double) -> bool {
+    _cnt_float_is_finite(d as float) // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+/// Bir `float` değerinin normal bir sayı (denormalize veya sıfır olmayan) olup olmadığını kontrol eder.
+/// Normal sayılar, IEEE 754'te tam hassasiyetle temsil edilebilen sayılardır.
+///
+/// # Parametreler
+/// - `f`: Kontrol edilecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// `f` normal ise `true`, değilse `false`.
+pub fn is_normal_f(f: float) -> bool {
+    _cnt_float_is_normal(f)
+}
+
+/// Bir `double` değerinin normal bir sayı olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `d`: Kontrol edilecek `double` değeri.
+///
+/// # Dönüş Değeri
+/// `d` normal ise `true`, değilse `false`.
+pub fn is_normal_d(d: double) -> bool {
+    _cnt_float_is_normal(d as float) // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+
+// --- 2. İşaret Manipülasyonu ---
+
+/// Bir `float` değerinin işaret bitini kontrol eder.
+/// Pozitif sıfır ve negatif sıfır farklı işaret bitlerine sahiptir.
+///
+/// # Parametreler
+/// - `f`: Kontrol edilecek `float` değeri.
+///
+/// # Dönüş Değeri
+/// İşaret biti ayarlıysa (negatifse) `true`, değilse (pozitifse) `false`.
+pub fn sign_bit_f(f: float) -> bool {
+    _cnt_float_signbit(f)
+}
+
+/// Bir `double` değerinin işaret bitini kontrol eder.
+///
+/// # Parametreler
+/// - `d`: Kontrol edilecek `double` değeri.
+///
+/// # Dönüş Değeri
+/// İşaret biti ayarlıysa (negatifse) `true`, değilse (pozitifse) `false`.
+pub fn sign_bit_d(d: double) -> bool {
+    _cnt_float_signbit(d as float) // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+/// Bir `float` değerinin mutlak değerini (magnitude) korurken,
+/// başka bir `float` değerinin işaretini kopyalar.
+///
+/// # Parametreler
+/// - `magnitude`: Mutlak değeri alınacak `float` değeri.
+/// - `sign`: İşareti kopyalanacak `float` değeri.
+///
+/// # Dönüş Değeri
+/// `magnitude`'nin mutlak değeri ve `sign`'ın işareti ile yeni `float` değeri.
+pub fn copy_sign_f(magnitude: float, sign: float) -> float {
+    _cnt_float_copysign(magnitude, sign)
+}
+
+/// Bir `double` değerinin mutlak değerini korurken,
+/// başka bir `double` değerinin işaretini kopyalar.
+///
+/// # Parametreler
+/// - `magnitude`: Mutlak değeri alınacak `double` değeri.
+/// - `sign`: İşareti kopyalanacak `double` değeri.
+///
+/// # Dönüş Değeri
+/// `magnitude`'nin mutlak değeri ve `sign`'ın işareti ile yeni `double` değeri.
+pub fn copy_sign_d(magnitude: double, sign: double) -> double {
+    _cnt_float_copysign(magnitude as float, sign as float) as double // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+
+// --- 3. Yuvarlama Fonksiyonları ---
+
+/// Bir `float` değerini en yakın tam sayıya yuvarlar.
+/// Yuvarlama kuralı genellikle "en yakın çifte yuvarla" (round half to even) veya
+/// "sıfırdan uzağa yuvarla" (round half away from zero) olabilir.
+/// Genellikle `round()` fonksiyonu "en yakın çifte yuvarla" kuralını kullanır.
+///
+/// # Parametreler
+/// - `f`: Yuvarlanacak `float` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `float` değeri.
+pub fn round_f(f: float) -> float {
+    _cnt_float_round(f)
+}
+
+/// Bir `double` değerini en yakın tam sayıya yuvarlar.
+///
+/// # Parametreler
+/// - `d`: Yuvarlanacak `double` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `double` değeri.
+pub fn round_d(d: double) -> double {
+    _cnt_float_round(d as float) as double // Aynı şekilde, idealde ayrı extern fonksiyon
+}
+
+/// Bir `float` değerini yukarı, en yakın tam sayıya yuvarlar (tavan fonksiyonu).
+///
+/// # Parametreler
+/// - `f`: Yuvarlanacak `float` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `float` değeri.
+pub fn ceil_f(f: float) -> float {
+    _cnt_float_ceil(f)
+}
+
+/// Bir `double` değerini yukarı, en yakın tam sayıya yuvarlar (tavan fonksiyonu).
+///
+/// # Parametreler
+/// - `d`: Yuvarlanacak `double` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `double` değeri.
+pub fn ceil_d(d: double) -> double {
+    _cnt_float_ceil(d as float) as double
+}
+
+/// Bir `float` değerini aşağı, en yakın tam sayıya yuvarlar (taban fonksiyonu).
+///
+/// # Parametreler
+/// - `f`: Yuvarlanacak `float` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `float` değeri.
+pub fn floor_f(f: float) -> float {
+    _cnt_float_floor(f)
+}
+
+/// Bir `double` değerini aşağı, en yakın tam sayıya yuvarlar (taban fonksiyonu).
+///
+/// # Parametreler
+/// - `d`: Yuvarlanacak `double` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `double` değeri.
+pub fn floor_d(d: double) -> double {
+    _cnt_float_floor(d as float) as double
+}
+
+/// Bir `float` değerinin kesirli kısmını atarak sıfıra doğru yuvarlar (kesme).
+///
+/// # Parametreler
+/// - `f`: Yuvarlanacak `float` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `float` değeri.
+pub fn trunc_f(f: float) -> float {
+    _cnt_float_trunc(f)
+}
+
+/// Bir `double` değerinin kesirli kısmını atarak sıfıra doğru yuvarlar (kesme).
+///
+/// # Parametreler
+/// - `d`: Yuvarlanacak `double` değeri.
+///
+/// # Dönüş Değeri
+/// Yuvarlanmış `double` değeri.
+pub fn trunc_d(d: double) -> double {
+    _cnt_float_trunc(d as float) as double
+}
+
+
+// --- 4. Kayan Nokta Karşılaştırmaları (Kayan Nokta Eşitliği Problemi) ---
+
+/// İki `float` değerinin bir `epsilon` toleransı dahilinde birbirine yakın olup olmadığını kontrol eder.
+/// Kayan nokta sayılarını doğrudan `==` ile karşılaştırmak genellikle güvenli değildir.
+///
+/// # Parametreler
+/// - `a`: İlk `float` değeri.
+/// - `b`: İkinci `float` değeri.
+/// - `epsilon`: İzin verilen maksimum fark (tolerans).
+///
+/// # Dönüş Değeri
+/// İki sayı `epsilon` toleransı dahilinde yakınsa `true`, değilse `false`.
+pub fn almost_equal_f(a: float, b: float, epsilon: float) -> bool {
+    let diff = if a > b { a - b } else { b - a }; // Mutlak fark
+    diff <= epsilon
+}
+
+/// İki `double` değerinin bir `epsilon` toleransı dahilinde birbirine yakın olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `a`: İlk `double` değeri.
+/// - `b`: İkinci `double` değeri.
+/// - `epsilon`: İzin verilen maksimum fark (tolerans).
+///
+/// # Dönüş Değeri
+/// İki sayı `epsilon` toleransı dahilinde yakınsa `true`, değilse `false`.
+pub fn almost_equal_d(a: double, b: double, epsilon: double) -> bool {
+    let diff = if a > b { a - b } else { b - a }; // Mutlak fark
+    diff <= epsilon
+}
+
+
+// --- 5. Özel Değerler için Sabitler (limits.cnt'den import edilebilir) ---
+
+/// Pozitif sonsuzluk için `float` sabiti.
+pub const INFINITY_F: float = limits::FLOAT_INFINITY;
+/// Negatif sonsuzluk için `float` sabiti.
+pub const NEG_INFINITY_F: float = -limits::FLOAT_INFINITY;
+/// Sayı değil (Not-a-Number) için `float` sabiti.
+pub const NAN_F: float = limits::FLOAT_NAN;
+
+/// Pozitif sonsuzluk için `double` sabiti.
+pub const INFINITY_D: double = limits::DOUBLE_INFINITY;
+/// Negatif sonsuzluk için `double` sabiti.
+pub const NEG_INFINITY_D: double = -limits::DOUBLE_INFINITY;
+/// Sayı değil (Not-a-Number) için `double` sabiti.
+pub const NAN_D: double = limits::DOUBLE_NAN;
+
+// --- Gelecekte Eklenebilecek Diğer Özellikler ---
+// - Kayan noktalı sayıların bit düzeyinde temsiline erişim (örn. float_to_bits, bits_to_float).
+// - Fused Multiply-Add (FMA) gibi performans artırıcı işlemler.
+// - IEEE 754'ün yuvarlama modlarını ayarlama.
+// - Kayan noktalı sayı sınıflandırması (subnormal, zero, normal, infinity, NaN).
+// - `next_after` veya `next_toward` gibi sayısal komşuluk fonksiyonları.
