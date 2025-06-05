@@ -1,0 +1,356 @@
+// date_time.cnt
+// Standart Tarih ve Saat Modülü
+// Tarih ve saatle ilgili işlemleri, zaman damgalarını ve dönüşümleri yönetir.
+
+import std::string; // String işlemleri için
+import std::fmt;    // Formatlama için
+import std::option; // Option<T> dönüş tipleri için
+import std::result; // Result<T, E> dönüş tipleri için
+import std::assert; // Hata ayıklama için
+
+// Not: Bu implementasyon, sistemden UTC ve yerel zamanı alabilen
+// varsayımsal `__builtin_get_utc_timestamp_ms()` ve `__builtin_get_local_time_components()` gibi
+// intrinsik fonksiyonlara veya sistem çağrılarına ihtiyaç duyar.
+// Ayrıca, zaman dilimi bilgisi ve DST (gün ışığından yararlanma saati) yönetimi
+// daha karmaşık bir implementasyon gerektirecektir.
+
+/// `Duration`: Bir zaman aralığını milisaniye cinsinden temsil eder.
+pub struct Duration {
+    pub milliseconds: i64,
+}
+
+impl Duration {
+    /// `new(milliseconds: i64)`: Yeni bir `Duration` oluşturur.
+    pub fn new(milliseconds: i64) -> Duration {
+        Duration { milliseconds }
+    }
+
+    /// `from_seconds(seconds: i64)`: Saniye cinsinden bir `Duration` oluşturur.
+    pub fn from_seconds(seconds: i64) -> Duration {
+        Duration { milliseconds: seconds * 1000 }
+    }
+
+    /// `from_minutes(minutes: i64)`: Dakika cinsinden bir `Duration` oluşturur.
+    pub fn from_minutes(minutes: i64) -> Duration {
+        Duration { milliseconds: minutes * 60 * 1000 }
+    }
+
+    /// `from_hours(hours: i64)`: Saat cinsinden bir `Duration` oluşturur.
+    pub fn from_hours(hours: i64) -> Duration {
+        Duration { milliseconds: hours * 60 * 60 * 1000 }
+    }
+
+    /// `from_days(days: i64)`: Gün cinsinden bir `Duration` oluşturur.
+    pub fn from_days(days: i64) -> Duration {
+        Duration { milliseconds: days * 24 * 60 * 60 * 1000 }
+    }
+
+    /// `as_seconds(&self) -> i64`: Süreyi saniye cinsinden döndürür (küsüratlar kesilir).
+    pub fn as_seconds(&self) -> i64 {
+        self.milliseconds / 1000
+    }
+
+    /// `as_minutes(&self) -> i64`: Süreyi dakika cinsinden döndürür (küsüratlar kesilir).
+    pub fn as_minutes(&self) -> i64 {
+        self.milliseconds / (60 * 1000)
+    }
+
+    /// `as_hours(&self) -> i64`: Süreyi saat cinsinden döndürür (küsüratlar kesilir).
+    pub fn as_hours(&self) -> i64 {
+        self.milliseconds / (60 * 60 * 1000)
+    }
+
+    /// `as_days(&self) -> i64`: Süreyi gün cinsinden döndürür (küsüratlar kesilir).
+    pub fn as_days(&self) -> i64 {
+        self.milliseconds / (24 * 60 * 60 * 1000)
+    }
+}
+
+// Duration için temel aritmetik işlemler
+impl ops::Add for Duration {
+    type Output = Duration;
+    fn add(self, other: Duration) -> Duration {
+        Duration::new(self.milliseconds + other.milliseconds)
+    }
+}
+impl ops::Sub for Duration {
+    type Output = Duration;
+    fn sub(self, other: Duration) -> Duration {
+        Duration::new(self.milliseconds - other.milliseconds)
+    }
+}
+impl ops::Neg for Duration {
+    type Output = Duration;
+    fn neg(self) -> Duration {
+        Duration::new(-self.milliseconds)
+    }
+}
+
+/// `DateTime`: Bir tarih ve saat değerini temsil eder.
+/// Dahili olarak Unix Epoch'tan (1 Ocak 1970 UTC) bu yana geçen milisaniye sayısı olarak saklanır.
+pub struct DateTime {
+    pub timestamp_ms: i64, // Unix Epoch'tan bu yana geçen milisaniye sayısı (UTC)
+}
+
+impl DateTime {
+    /// `new(timestamp_ms: i64)`: Belirtilen milisaniye zaman damgasıyla bir `DateTime` oluşturur.
+    pub fn new(timestamp_ms: i64) -> DateTime {
+        DateTime { timestamp_ms }
+    }
+
+    /// `now_utc()`: Şu anki UTC zamanını bir `DateTime` olarak döndürür.
+    pub fn now_utc() -> DateTime {
+        unsafe {
+            // Varsayımsal sistem intrinsik fonksiyonu
+            DateTime { timestamp_ms: __builtin_get_utc_timestamp_ms() }
+        }
+    }
+
+    /// `now_local()`: Şu anki yerel zamanı bir `DateTime` olarak döndürür.
+    ///
+    /// Not: Yerel zaman dilimi ve DST bilgisi sistem tarafından sağlanmalıdır.
+    /// Bu fonksiyon dahili olarak UTC zaman damgasını alır ve sistemin yerel zaman dilimi ayarlarını kullanarak dönüştürür.
+    pub fn now_local() -> DateTime {
+        unsafe {
+            // Varsayımsal sistem intrinsik fonksiyonu
+            // Bu, UTC timestamp'i alıp sistemin yerel zaman dilimine göre ayarlar.
+            // Genellikle UTC timestamp'i alır ve sonra yerel ofseti uygular.
+            DateTime { timestamp_ms: __builtin_get_local_timestamp_ms() }
+        }
+    }
+
+    /// `from_components_utc(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8, millisecond: u16) -> Option<DateTime>`:
+    /// UTC bileşenlerinden bir `DateTime` oluşturur.
+    ///
+    /// Geçersiz tarih/saat bileşenleri için `None` döndürür.
+    pub fn from_components_utc(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8, millisecond: u16) -> option::Option<DateTime> {
+        // Bu fonksiyonun implementasyonu karmaşıktır ve takvim aritmetiği gerektirir (yılın kaç gün olduğu, artık yıllar vb.).
+        // Basitlik adına, burada varsayımsal bir dahili fonksiyon çağrısı yapılmaktadır.
+        unsafe {
+            let timestamp = __builtin_components_to_utc_timestamp(year, month, day, hour, minute, second, millisecond);
+            if timestamp == -1 { // -1 başarısızlığı temsil ediyor
+                option::Option::None
+            } else {
+                option::Option::Some(DateTime::new(timestamp))
+            }
+        }
+    }
+
+    /// `to_utc_components(&self) -> DateTimeComponents`: `DateTime`'ı UTC bileşenlerine ayırır.
+    pub fn to_utc_components(&self) -> DateTimeComponents {
+        unsafe {
+            // Varsayımsal sistem intrinsik fonksiyonu
+            __builtin_timestamp_to_utc_components(self.timestamp_ms)
+        }
+    }
+
+    /// `to_local_components(&self) -> DateTimeComponents`: `DateTime`'ı yerel zaman bileşenlerine ayırır.
+    pub fn to_local_components(&self) -> DateTimeComponents {
+        unsafe {
+            // Varsayımsal sistem intrinsik fonksiyonu
+            __builtin_timestamp_to_local_components(self.timestamp_ms)
+        }
+    }
+
+    /// `add_duration(&self, duration: Duration) -> DateTime`: `DateTime`'a bir süre ekler.
+    pub fn add_duration(&self, duration: Duration) -> DateTime {
+        DateTime::new(self.timestamp_ms + duration.milliseconds)
+    }
+
+    /// `sub_duration(&self, duration: Duration) -> DateTime`: `DateTime`'dan bir süre çıkarır.
+    pub fn sub_duration(&self, duration: Duration) -> DateTime {
+        DateTime::new(self.timestamp_ms - duration.milliseconds)
+    }
+
+    /// `duration_since(&self, earlier: DateTime) -> Duration`: Bu `DateTime` ile verilen `earlier` `DateTime` arasındaki süreyi döndürür.
+    /// Eğer bu tarih `earlier` tarihten önce ise negatif bir süre döndürür.
+    pub fn duration_since(&self, earlier: DateTime) -> Duration {
+        Duration::new(self.timestamp_ms - earlier.timestamp_ms)
+    }
+
+    /// `format(&self, format_str: String) -> String`: `DateTime`'ı belirtilen format dizgisine göre biçimlendirir.
+    ///
+    /// Örnek format karakterleri (Rust'ın `strftime` benzeri):
+    /// %Y: Yıl (4 haneli)
+    /// %m: Ay (01-12)
+    /// %d: Gün (01-31)
+    /// %H: Saat (24 saat, 00-23)
+    /// %M: Dakika (00-59)
+    /// %S: Saniye (00-59)
+    /// %f: Milisaniye (000-999)
+    /// %F: Tam tarih (%Y-%m-%d)
+    /// %T: Tam zaman (%H:%M:%S)
+    /// %c: Yerel tarih ve saat
+    /// %a: Haftanın kısa günü
+    /// %A: Haftanın tam günü
+    /// %b: Ayın kısa adı
+    /// %B: Ayın tam adı
+    ///
+    /// Not: Bu implementasyon yerel zaman dilimine göre formatlama yapar.
+    pub fn format(&self, format_str: String) -> String {
+        let components = self.to_local_components(); // Yerel bileşenleri kullan
+
+        let mut formatted_string = String::new();
+        let mut chars = format_str.chars(); // Varsayımsal char iteratörü
+        while let option::Option::Some(c) = chars.next() {
+            if c == '%' {
+                if let option::Option::Some(next_c) = chars.next() {
+                    match next_c {
+                        'Y' => formatted_string.push_str(&components.year.to_string()),
+                        'm' => formatted_string.push_str(&format_two_digits(components.month as u64)),
+                        'd' => formatted_string.push_str(&format_two_digits(components.day as u64)),
+                        'H' => formatted_string.push_str(&format_two_digits(components.hour as u64)),
+                        'M' => formatted_string.push_str(&format_two_digits(components.minute as u64)),
+                        'S' => formatted_string.push_str(&format_two_digits(components.second as u64)),
+                        'f' => formatted_string.push_str(&format_three_digits(components.millisecond as u64)),
+                        'F' => formatted_string.push_str(&format_str!("%Y-%m-%d", components.year, components.month, components.day)),
+                        'T' => formatted_string.push_str(&format_str!("%H:%M:%S", components.hour, components.minute, components.second)),
+                        // Daha fazla format karakteri eklenebilir.
+                        // c, A, a, b, B gibi formatlayıcılar için ek mantık veya lookup tabloları gerekir.
+                        _ => formatted_string.push(c), // Bilinmeyen % karakteri
+                    }
+                } else {
+                    formatted_string.push('%'); // Yalnızca % işareti
+                }
+            } else {
+                formatted_string.push(c);
+            }
+        }
+        formatted_string
+    }
+}
+
+/// `DateTimeComponents`: Bir tarih ve saatin bireysel bileşenlerini tutar.
+/// (Yıl, Ay, Gün, Saat, Dakika, Saniye, Milisaniye).
+pub struct DateTimeComponents {
+    pub year: i32,
+    pub month: u8,      // 1-12
+    pub day: u8,        // 1-31
+    pub hour: u8,       // 0-23
+    pub minute: u8,     // 0-59
+    pub second: u8,     // 0-59
+    pub millisecond: u16, // 0-999
+    // Ek bilgi: hafta içi, yılın günü, zaman dilimi ofseti vb. eklenebilir.
+}
+
+// Yardımcı fonksiyonlar (basit formatlama için)
+fn format_two_digits(val: u64) -> String {
+    if val < 10 {
+        "0".to_string() + val.to_string()
+    } else {
+        val.to_string()
+    }
+}
+
+fn format_three_digits(val: u64) -> String {
+    if val < 10 {
+        "00".to_string() + val.to_string()
+    } else if val < 100 {
+        "0".to_string() + val.to_string()
+    } else {
+        val.to_string()
+    }
+}
+
+
+// --- Varsayımsal Intrinsikler ve Sistem Çağrıları (CNT Derleyicisi Tarafından Sağlanır) ---
+// Bu fonksiyonlar, CNT derleyicisinin veya çalışma zamanının işletim sistemi ile etkileşimini temsil eder.
+extern "cnt_intrinsic" {
+    /// Sistemden UTC zaman damgasını milisaniye cinsinden alır (Epoch'tan bu yana).
+    fn __builtin_get_utc_timestamp_ms() -> i64;
+
+    /// Sistemden yerel zaman damgasını milisaniye cinsinden alır (Epoch'tan bu yana),
+    /// yerel zaman dilimi ve DST ayarları uygulanmış olarak.
+    fn __builtin_get_local_timestamp_ms() -> i64;
+
+    /// Verilen UTC bileşenlerinden UTC zaman damgası hesaplar.
+    /// Geçersiz bileşenler için -1 döndürebilir.
+    fn __builtin_components_to_utc_timestamp(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8, millisecond: u16) -> i64;
+
+    /// Verilen UTC zaman damgasını UTC bileşenlerine ayırır.
+    fn __builtin_timestamp_to_utc_components(timestamp_ms: i64) -> DateTimeComponents;
+
+    /// Verilen UTC zaman damgasını yerel zaman dilimi ve DST ayarlarını kullanarak yerel bileşenlere ayırır.
+    fn __builtin_timestamp_to_local_components(timestamp_ms: i64) -> DateTimeComponents;
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::time::date_time;
+import std::io;
+import std::string;
+import std::option;
+
+fn main() {
+    io::println("Starting DateTime example...".to_string());
+
+    // 1. Şimdiki Zamanı Alma
+    let now_utc = date_time::DateTime::now_utc();
+    let now_local = date_time::DateTime::now_local();
+
+    io::println("Current UTC Timestamp (ms): ".to_string() + now_utc.timestamp_ms.to_string());
+    io::println("Current Local Timestamp (ms): ".to_string() + now_local.timestamp_ms.to_string());
+
+    let utc_comps = now_utc.to_utc_components();
+    io::println("Current UTC Time: ".to_string() +
+                utc_comps.year.to_string() + "-" +
+                date_time::private::format_two_digits(utc_comps.month as u64) + "-" +
+                date_time::private::format_two_digits(utc_comps.day as u64) + " " +
+                date_time::private::format_two_digits(utc_comps.hour as u64) + ":" +
+                date_time::private::format_two_digits(utc_comps.minute as u64) + ":" +
+                date_time::private::format_two_digits(utc_comps.second as u64) + "." +
+                date_time::private::format_three_digits(utc_comps.millisecond as u64) + " UTC");
+
+    let local_comps = now_local.to_local_components();
+    io::println("Current Local Time: ".to_string() +
+                local_comps.year.to_string() + "-" +
+                date_time::private::format_two_digits(local_comps.month as u64) + "-" +
+                date_time::private::format_two_digits(local_comps.day as u64) + " " +
+                local_comps.hour.to_string() + ":" +
+                date_time::private::format_two_digits(local_comps.minute as u64) + ":" +
+                date_time::private::format_two_digits(local_comps.second as u64) + "." +
+                date_time::private::format_three_digits(local_comps.millisecond as u64) + " Local");
+
+
+    // 2. Belirli Bir Tarih ve Saat Oluşturma (UTC)
+    io::println("\n--- Creating Specific DateTime (UTC) ---".to_string());
+    let specific_utc_date = date_time::DateTime::from_components_utc(2025, 6, 5, 23, 0, 0, 0); // 5 Haziran 2025, 23:00:00.000 UTC
+    match specific_utc_date {
+        option::Option::Some(dt) => {
+            io::println("Specific UTC Date: ".to_string() + dt.format("%Y-%m-%d %H:%M:%S.%f UTC".to_string()));
+            io::println("Timestamp (ms): ".to_string() + dt.timestamp_ms.to_string());
+        },
+        option::Option::None => io::println("Failed to create specific UTC date.".to_string()),
+    }
+
+    // 3. Süreler ile Çalışma
+    io::println("\n--- Working with Durations ---".to_string());
+    let one_hour = date_time::Duration::from_hours(1);
+    let two_days = date_time::Duration::from_days(2);
+    let five_minutes = date_time::Duration::from_minutes(5);
+
+    io::println("One hour in ms: ".to_string() + one_hour.milliseconds.to_string());
+    io::println("Two days in seconds: ".to_string() + two_days.as_seconds().to_string());
+
+    let future_time = now_utc.add_duration(two_days + one_hour);
+    io::println("Now UTC + 2 days + 1 hour: ".to_string() + future_time.format("%Y-%m-%d %H:%M:%S UTC".to_string()));
+
+    let past_time = now_utc.sub_duration(five_minutes);
+    io::println("Now UTC - 5 minutes: ".to_string() + past_time.format("%Y-%m-%d %H:%M:%S UTC".to_string()));
+
+    // 4. İki Tarih Arasındaki Farkı Bulma
+    io::println("\n--- Duration Since ---".to_string());
+    let dt1 = date_time::DateTime::from_components_utc(2025, 1, 1, 0, 0, 0, 0).unwrap();
+    let dt2 = date_time::DateTime::from_components_utc(2025, 1, 2, 12, 0, 0, 0).unwrap();
+    let diff = dt2.duration_since(dt1);
+    io::println("Duration between dt1 and dt2: ".to_string() + diff.as_hours().to_string() + " hours"); // 36 hours
+
+    // 5. Formatlama
+    io::println("\n--- Formatting ---".to_string());
+    let example_dt = date_time::DateTime::from_components_utc(2024, 7, 15, 9, 5, 2, 123).unwrap();
+    io::println("Formatted: ".to_string() + example_dt.format("%Y-%m-%d %H:%M:%S.%f".to_string()));
+    io::println("Formatted (full): ".to_string() + example_dt.format("%F %T".to_string()));
+
+    io::println("DateTime example finished.".to_string());
+}
