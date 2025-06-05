@@ -1,0 +1,432 @@
+// fmt.cnt
+// Standart Biçimlendirme Modülü
+// Değerleri string temsillerine dönüştürmek için trait'ler ve yardımcılar sağlar.
+
+import std::string::String;  // Biçimlendirilmiş çıktıyı tutmak için
+import std::io;             // Hata ayıklama çıktıları için (varsayımsal)
+import std::vec::Vec;       // Dahili buffer veya yardımcılar için
+
+/// `Result`: Biçimlendirme işlemlerinin sonucunu temsil eder.
+/// Error türü şimdilik sadece `String` olacaktır.
+type Result = std::result::Result<(), String>;
+
+/// `Formatter`: Biçimlendirme işlemleri için bir arayüz sağlar.
+/// Biçimlendirilmiş veriyi bir dahili string buffer'ına yazar.
+pub struct Formatter {
+    buffer: String, // Biçimlendirilmiş çıktıyı tutan string
+    // Formatlama seçenekleri (genişlik, hassasiyet, hizalama vb.) buraya eklenebilir.
+    // Şimdilik sadece temel yazma yeteneği.
+}
+
+impl Formatter {
+    /// `new()`: Yeni bir `Formatter` oluşturur.
+    fn new() -> Formatter {
+        Formatter {
+            buffer: String::new(),
+        }
+    }
+
+    /// `write_str(&mut self, s: &String) -> Result`: Bir string dilimini buffer'a yazar.
+    pub fn write_str(&mut self, s: &String) -> Result {
+        self.buffer.push_str(s);
+        std::result::Result::Ok(())
+    }
+
+    /// `write_char(&mut self, c: char) -> Result`: Bir karakteri buffer'a yazar.
+    pub fn write_char(&mut self, c: char) -> Result {
+        self.buffer.push_char(c);
+        std::result::Result::Ok(())
+    }
+
+    // `write_fmt` gibi daha karmaşık bir makro/fonksiyon için buraya eklenebilir.
+    // Şimdilik, her fmt trait'i için ayrı bir 'fmt' metodu kullanacağız.
+}
+
+/// `Display` trait'i: Kullanıcıya yönelik, okunabilir bir çıktı sağlar.
+/// Genellikle `to_string()` ile aynı çıktıyı sağlar.
+pub trait Display {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+/// `Debug` trait'i: Hata ayıklama amaçlı, programatik bir çıktı sağlar.
+/// Genellikle değerin nasıl yapılandırıldığını gösterir.
+pub trait Debug {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+/// `Binary` trait'i: İkili (binary) formda çıktı sağlar.
+pub trait Binary {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+/// `Octal` trait'i: Sekizlik (octal) formda çıktı sağlar.
+pub trait Octal {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+/// `LowerHex` trait'i: Küçük harfli onaltılık (hexadecimal) formda çıktı sağlar.
+pub trait LowerHex {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+/// `UpperHex` trait'i: Büyük harfli onaltılık (hexadecimal) formda çıktı sağlar.
+pub trait UpperHex {
+    fn fmt(&self, f: &mut Formatter) -> Result;
+}
+
+// --- Temel Tipler İçin fmt Trait Implementasyonları ---
+
+// u64 için Display
+impl Display for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_str(&self.to_string()) // Varsayımsal to_string() metodu
+    }
+}
+
+// i64 için Display
+impl Display for i64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_str(&self.to_string())
+    }
+}
+
+// bool için Display
+impl Display for bool {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        if *self {
+            f.write_str(&"true".to_string())
+        } else {
+            f.write_str(&"false".to_string())
+        }
+    }
+}
+
+// String için Display
+impl Display for String {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_str(self)
+    }
+}
+
+// char için Display
+impl Display for char {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_char(*self)
+    }
+}
+
+// u64 için Debug (Display ile aynı olabilir veya daha ayrıntılı)
+impl Debug for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_str(&self.to_string())
+    }
+}
+
+// String için Debug (genellikle tırnak işaretleriyle)
+impl Debug for String {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.write_char('"')?; // Hata propagasyonu için '?'
+        f.write_str(self)?;
+        f.write_char('"')
+    }
+}
+
+// Diğer sayısal tipler için (u8, u16, u32, i8, i16, i32) benzer implementasyonlar gerekecektir.
+
+// Sayısal Tipler için Binary, Octal, Hexadecimal implementasyonları
+// Bunlar genellikle `__builtin_to_binary_string`, `__builtin_to_octal_string`, `__builtin_to_hex_string` gibi
+// derleyici intrinsiklerine veya özel dönüşüm algoritmalarına dayanır.
+
+impl Binary for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        // Varsayımsal intrinsik:
+        // f.write_str(&__builtin_to_binary_string(*self))
+        // veya manuel dönüşüm:
+        let mut val = *self;
+        if val == 0 {
+            return f.write_str(&"0b0".to_string());
+        }
+        let mut s = String::new();
+        s.push_str(&"0b".to_string());
+        let mut temp_vec: Vec<char> = Vec::new();
+        while val > 0 {
+            temp_vec.push_char(if (val & 1) == 1 { '1' } else { '0' });
+            val >>= 1;
+        }
+        for i in (0..temp_vec.len()).rev() {
+            s.push_char(temp_vec[i]);
+        }
+        f.write_str(&s)
+    }
+}
+
+impl Octal for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        // Varsayımsal intrinsik:
+        // f.write_str(&__builtin_to_octal_string(*self))
+        // veya manuel dönüşüm:
+        let mut val = *self;
+        if val == 0 {
+            return f.write_str(&"0o0".to_string());
+        }
+        let mut s = String::new();
+        s.push_str(&"0o".to_string());
+        let mut temp_vec: Vec<char> = Vec::new();
+        while val > 0 {
+            temp_vec.push_char(((val % 8) as u8 + '0' as u8) as char);
+            val /= 8;
+        }
+        for i in (0..temp_vec.len()).rev() {
+            s.push_char(temp_vec[i]);
+        }
+        f.write_str(&s)
+    }
+}
+
+impl LowerHex for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        // Varsayımsal intrinsik:
+        // f.write_str(&__builtin_to_lower_hex_string(*self))
+        // veya manuel dönüşüm:
+        let mut val = *self;
+        if val == 0 {
+            return f.write_str(&"0x0".to_string());
+        }
+        let mut s = String::new();
+        s.push_str(&"0x".to_string());
+        let hex_chars = "0123456789abcdef".to_string(); // Varsayımsal string harf dizisi
+        let mut temp_vec: Vec<char> = Vec::new();
+        while val > 0 {
+            temp_vec.push_char(hex_chars.chars().nth((val % 16) as u64).unwrap());
+            val /= 16;
+        }
+        for i in (0..temp_vec.len()).rev() {
+            s.push_char(temp_vec[i]);
+        }
+        f.write_str(&s)
+    }
+}
+
+impl UpperHex for u64 {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        // Varsayımsal intrinsik:
+        // f.write_str(&__builtin_to_upper_hex_string(*self))
+        // veya manuel dönüşüm:
+        let mut val = *self;
+        if val == 0 {
+            return f.write_str(&"0X0".to_string());
+        }
+        let mut s = String::new();
+        s.push_str(&"0X".to_string());
+        let hex_chars = "0123456789ABCDEF".to_string();
+        let mut temp_vec: Vec<char> = Vec::new();
+        while val > 0 {
+            temp_vec.push_char(hex_chars.chars().nth((val % 16) as u64).unwrap());
+            val /= 16;
+        }
+        for i in (0..temp_vec.len()).rev() {
+            s.push_char(temp_vec[i]);
+        }
+        f.write_str(&s)
+    }
+}
+
+// --- Biçimlendirme Makroları (Varsayımsal) ---
+// Rust'taki `format!`, `print!`, `println!` gibi makrolar için temel yapı.
+// Bunlar derleyici tarafından özel olarak işlenir.
+
+// `format!` makrosu: Biçimlendirilmiş bir string oluşturur.
+// Kullanım: format!("Merhaba, {}!", "Dünya")
+// Bu gerçek bir makro implementasyonu yerine, nasıl çalışabileceğine dair bir şablon.
+// Makro genişletme, CNT derleyicisinin bir parçası olmalıdır.
+
+macro_rules! format {
+    ($($arg:tt)*) => ({
+        // Bu kısım, derleyicinin format argümanlarını ayrıştırıp
+        // bir Formatter nesnesi kullanarak string'e yazdığı yerdir.
+        // Genellikle karmaşık bir tür eşleştirme ve trait dispatch içerir.
+        let mut formatter = std::fmt::Formatter::new();
+        // Varsayımsal olarak, tüm argümanları formatter'a uygun şekilde yazdırırız.
+        // Örneğin: formatter.write_fmt_args(format_string, args);
+        // Aşağıdaki, bu makronun nasıl çağrılabileceğini simüle eder.
+        std::fmt::format_internal(&mut formatter, format_string, $($arg)*);
+        formatter.buffer
+    })
+}
+
+
+// `print!` makrosu: Standart çıktıya biçimlendirilmiş metin yazar.
+
+macro_rules! print {
+    ($($arg:tt)*) => ({
+        let s = format!($($arg)*);
+        std::io::write_stdout(&s); // Varsayımsal std::io fonksiyonu
+    })
+}
+
+
+// `println!` makrosu: Standart çıktıya biçimlendirilmiş metin yazar ve ardından yeni satır ekler.
+/*
+macro_rules! println {
+    ($($arg:tt)*) => ({
+        let s = format!($($arg)*);
+        std::io::write_stdout(&s);
+        std::io::write_stdout(&"\n".to_string());
+    })
+}
+
+
+// `format_internal` fonksiyonu (makrolar tarafından çağrılan dahili helper)
+// Bu fonksiyon, `format!` makrosunun iç mekanizmasını simüle eder.
+// Gerçek bir derleyici, bu deseni AST seviyesinde işlerdi.
+pub fn format_internal<T: Display>(formatter: &mut Formatter, format_string: String, arg1: T) -> Result {
+    let mut chars = format_string.chars();
+    while let option::Option::Some(c) = chars.next() {
+        if c == '{' {
+            if let option::Option::Some(next_c) = chars.next() {
+                if next_c == '}' {
+                    // `{}` bulundu, arg1'i Display olarak formatla
+                    arg1.fmt(formatter)?;
+                } else {
+                    // Diğer format specifier'lar (örn. {:?}, {:x})
+                    // Şimdilik sadece basit {} destekliyoruz.
+                    formatter.write_char('{')?;
+                    formatter.write_char(next_c)?;
+                    // Hata veya özel durum yönetimi eklenebilir.
+                }
+            } else {
+                formatter.write_char('{')?; // Yalnızca `{` bulundu
+            }
+        } else {
+            formatter.write_char(c)?;
+        }
+    }
+    std::result::Result::Ok(())
+}
+
+// `format_internal_debug` (Debug trait için)
+pub fn format_internal_debug<T: Debug>(formatter: &mut Formatter, format_string: String, arg1: T) -> Result {
+    let mut chars = format_string.chars();
+    while let option::Option::Some(c) = chars.next() {
+        if c == '{' {
+            if let option::Option::Some(next_c) = chars.next() {
+                if next_c == '?' { // {:?}
+                    if let option::Option::Some(curly_brace_end) = chars.next() {
+                        if curly_brace_end == '}' {
+                            arg1.fmt(formatter)?;
+                        } else {
+                            formatter.write_char('{')?; formatter.write_char('?')?; formatter.write_char(curly_brace_end)?;
+                        }
+                    } else {
+                        formatter.write_char('{')?; formatter.write_char('?')?;
+                    }
+                } else {
+                    formatter.write_char('{')?;
+                    formatter.write_char(next_c)?;
+                }
+            } else {
+                formatter.write_char('{')?;
+            }
+        } else {
+            formatter.write_char(c)?;
+        }
+    }
+    std::result::Result::Ok(())
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::fmt;
+import std::io;
+import std::string::String;
+import std::option::Option;
+
+// Kendi özel struct'ımızı tanımlayalım ve Display, Debug implemente edelim
+struct MyStruct {
+    id: u64,
+    name: String,
+}
+
+impl fmt::Display for MyStruct {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&"MyStruct(".to_string())?;
+        f.write_str(&self.name)?;
+        f.write_str(&")".to_string())
+    }
+}
+
+impl fmt::Debug for MyStruct {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&"MyStruct { id: ".to_string())?;
+        self.id.fmt(f)?; // u64'ün Debug implementasyonunu kullan
+        f.write_str(&", name: ".to_string())?;
+        self.name.fmt(f)?; // String'in Debug implementasyonunu kullan
+        f.write_str(&" }".to_string())
+    }
+}
+
+
+fn main() {
+    io::println("Starting fmt example...".to_string());
+
+    let my_num: u64 = 12345;
+    let my_str: String = "Hello, CNT!".to_string();
+    let my_bool: bool = true;
+
+    // --- fmt::Display kullanarak formatlama ---
+    io::println("\n--- Display Formatting ---".to_string());
+    // format! makrosunun tam implementasyonu karmaşıktır, burada simüle ediyoruz.
+    // Gerçekte `format!("{}", my_num)` veya `my_num.to_string()` gibi olurdu.
+    let mut f_display_num = fmt::Formatter::new();
+    my_num.fmt(&mut f_display_num);
+    io::println(&("Number (Display): ".to_string() + &f_display_num.buffer)); // 12345
+
+    let mut f_display_str = fmt::Formatter::new();
+    my_str.fmt(&mut f_display_str);
+    io::println(&("String (Display): ".to_string() + &f_display_str.buffer)); // Hello, CNT!
+
+    let custom_struct = MyStruct { id: 101, name: "Gizem".to_string() };
+    let mut f_display_custom = fmt::Formatter::new();
+    custom_struct.fmt(&mut f_display_custom);
+    io::println(&("Custom Struct (Display): ".to_string() + &f_display_custom.buffer)); // MyStruct(Gizem)
+
+
+    // --- fmt::Debug kullanarak formatlama ---
+    io::println("\n--- Debug Formatting ---".to_string());
+    let mut f_debug_num = fmt::Formatter::new();
+    my_num.fmt(&mut f_debug_num); // u64 için Debug aynı
+    io::println(&("Number (Debug): ".to_string() + &f_debug_num.buffer)); // 12345
+
+    let mut f_debug_str = fmt::Formatter::new();
+    my_str.fmt(&mut f_debug_str);
+    io::println(&("String (Debug): ".to_string() + &f_debug_str.buffer)); // "Hello, CNT!"
+
+    let mut f_debug_custom = fmt::Formatter::new();
+    custom_struct.fmt(&mut f_debug_custom);
+    io::println(&("Custom Struct (Debug): ".to_string() + &f_debug_custom.buffer)); // MyStruct { id: 101, name: "Gizem" }
+
+
+    // --- Sayısal Formatlar (Binary, Octal, Hex) ---
+    io::println("\n--- Numeric Formatting ---".to_string());
+    let value: u64 = 255; // 0xFF, 0o377, 0b11111111
+
+    let mut f_bin = fmt::Formatter::new();
+    value.fmt_binary(&mut f_bin);
+    io::println(&("Binary (255): ".to_string() + &f_bin.buffer)); // 0b11111111
+
+    let mut f_oct = fmt::Formatter::new();
+    value.fmt_octal(&mut f_oct);
+    io::println(&("Octal (255): ".to_string() + &f_oct.buffer)); // 0o377
+
+    let mut f_lower_hex = fmt::Formatter::new();
+    value.fmt_lower_hex(&mut f_lower_hex);
+    io::println(&("LowerHex (255): ".to_string() + &f_lower_hex.buffer)); // 0xff
+
+    let mut f_upper_hex = fmt::Formatter::new();
+    value.fmt_upper_hex(&mut f_upper_hex);
+    io::println(&("UpperHex (255): ".to_string() + &f_upper_hex.buffer)); // 0XFF
+
+
+    io::println("fmt example finished.".to_string());
+}
