@@ -1,0 +1,242 @@
+// thread.cnt
+// Standart İş Parçacığı (Thread) Modülü
+// İşletim sistemi seviyesindeki iş parçacıklarını yönetmek için araçlar sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::alloc;      // İş parçacığı argümanları veya stack tahsisi için
+import std::chrono;     // Uyku fonksiyonları için
+
+// Not: Bu modülün implementasyonu, CNT'nin işletim sistemi iş parçacığı API'lerine
+// (pthreads, Windows Threads) FFI veya runtime desteğine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'os::thread_create', 'os::thread_join' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+/// `Error` Enum'u: İş parçacığı işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// İş parçacığı oluşturma başarısız oldu.
+    ThreadCreationError(string);
+    /// İş parçacığı birleştirme (join) başarısız oldu.
+    ThreadJoinError(string);
+    /// Geçersiz iş parçacığı durumu (örn. zaten birleştirilmiş bir iş parçacığını birleştirmeye çalışmak).
+    InvalidThreadState(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- Dahili OS API Wrapparları (CNT Runtime/Compiler Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, altta yatan OS API'lerini çağıran CNT'nin runtime'ına veya FFI'sına aittir.
+
+// İşletim sistemi seviyesi iş parçacığı kimliği (örneğin, pthread_t veya HANDLE)
+pub type OsThreadId = u64; // Veya raw_ptr<void> platforma göre
+
+// İşletim sistemi seviyesi iş parçacığı oluşturma fonksiyonu.
+// Başlangıç fonksiyonu ve ona geçirilecek argüman için ham pointer'lar kullanılır.
+ pub fn os_thread_create(start_routine: raw_ptr<fn(raw_ptr<void>) -> raw_ptr<void>>, arg: raw_ptr<void>) -> Result<OsThreadId, string>;
+ pub fn os_thread_join(thread_id: OsThreadId) -> Result<raw_ptr<void>, string>;
+ pub fn os_thread_detach(thread_id: OsThreadId) -> Result<void, string>;
+ pub fn os_thread_get_current_id() -> OsThreadId;
+ pub fn os_thread_yield() -> void;
+ pub fn os_sleep_for_nanos(nanos: u64) -> void;
+
+
+// --- 1. ThreadId (İş Parçacığı Kimliği) ---
+
+/// `ThreadId` Struct'ı: Benzersiz bir iş parçacığı kimliğini temsil eder.
+pub struct ThreadId {
+    id: OsThreadId;
+}
+
+/// İki `ThreadId`'nin eşit olup olmadığını kontrol eder.
+pub fn thread_id_equals(lhs: &ThreadId, rhs: &ThreadId) -> bool {
+    lhs.id == rhs.id
+}
+
+/// `ThreadId`'yi stringe dönüştürür.
+pub fn thread_id_to_string(id: &ThreadId) -> string {
+    id.id.to_string()
+}
+
+// --- 2. Thread (İş Parçacığı Nesnesi) ---
+
+/// `Thread` Struct'ı: Çalışan bir iş parçacığını veya birleştirilebilir/ayrılabilir bir iş parçacığı referansını temsil eder.
+pub struct Thread {
+    // İşletim sistemi seviyesi iş parçacığı kimliği.
+    os_id: OsThreadId;
+    // İş parçacığının birleştirilebilir olup olmadığını belirten bayrak.
+    // Birleştirilemez hale geldiğinde (join veya detach sonrası) false olur.
+    joinable: bool;
+    // İş parçacığına geçirilecek argümanların ve kapatmaların (closures) yönetimi
+    // için karmaşık bir mekanizma gerekebilir.
+    // Örneğin, Type-erasure ve heap tahsisi.
+}
+
+/// Yeni bir `Thread` nesnesi oluşturur ve yeni bir iş parçacığı başlatır.
+///
+/// # Parametreler
+/// - `f`: Yeni iş parçacığında çalıştırılacak fonksiyon veya kapatma (closure).
+///   Bu fonksiyon, CNT'nin `Fn()` veya `FnOnce()` gibi bir trait'i desteklediğini varsayar
+///   ve dinamik olarak çağrılabilir olmalıdır.
+///
+/// # Dönüş Değeri
+/// `Result<Thread, Error>`: Yeni `Thread` nesnesi veya hata.
+///
+/// **NOT**: `f`'nin bir kapatma olması durumunda, yakaladığı değişkenlerin
+/// iş parçacıkları arasında güvenli bir şekilde aktarılması (taşınması) sağlanmalıdır.
+pub fn spawn<F>(f: F) -> Result<Thread, Error>
+where F: FnOnce() -> void + Send + 'static { // `Send` ve `'static` trait'leri varsayılmıştır.
+    // İş parçacığı başlangıç rutinini sarmalayan bir adaptör fonksiyonu gereklidir.
+    // Bu adaptör, `f` kapatmasını yakalayacak ve onu yeni iş parçacığı bağlamında çağıracaktır.
+    // Kapatmanın heap'te tahsis edilmesi ve ham bir pointer olarak aktarılması gerekir.
+
+    let closure_ptr: raw_ptr<F> = alloc::allocate_one::<F>(); // Kapatmayı heap'e tahsis et
+    if closure_ptr == null_ptr() {
+        return Result::Err(Error::ThreadCreationError("Failed to allocate memory for closure.".to_string()));
+    }
+    unsafe {
+        *closure_ptr = f; // Kapatmayı tahsis edilen belleğe kopyala/taşı.
+    }
+
+    // OS seviyesi başlangıç fonksiyonu: Bu, `closure_ptr`'yi alacak
+    // ve içindeki kapatmayı çağıracaktır.
+    let os_start_routine = &thread_start_routine_adapter as raw_ptr<fn(raw_ptr<void>) -> raw_ptr<void>>;
+
+    match os_thread_create(os_start_routine, closure_ptr as raw_ptr<void>) {
+        Result::Ok(id) => Result::Ok(Thread { os_id: id, joinable: true }),
+        Result::Err(msg) => {
+            alloc::deallocate_one(closure_ptr); // Hata durumunda belleği temizle
+            Result::Err(Error::ThreadCreationError("OS thread creation failed: ".to_string() + msg))
+        }
+    }
+}
+
+/// `thread_start_routine_adapter`: OS tarafından çağrılacak adaptör fonksiyonu.
+/// Bu fonksiyon, `void*` argümanını orijinal kapatma tipine geri dönüştürür ve çağırır.
+fn thread_start_routine_adapter(arg: raw_ptr<void>) -> raw_ptr<void> {
+    unsafe {
+        let closure_ptr = arg as raw_ptr<fn() -> void>; // Kapatmanın gerçek tipi bilinmeli veya TypeId kullanılmalı
+        let f = *closure_ptr; // Kapatmayı al
+        f(); // Kapatmayı çağır
+        alloc::deallocate_one(closure_ptr); // Kapatma belleğini serbest bırak
+    }
+    null_ptr::<void>() // POSIX'te dönüş değeri.
+}
+
+/// `join()`: İş parçacığının tamamlanmasını bekler.
+/// İş parçacığı birleştirildikten sonra artık birleştirilemez.
+///
+/// # Parametreler
+/// - `t`: Birleştirilecek iş parçacığı nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn join(t: &mut Thread) -> Result<void, Error> {
+    if !t.joinable {
+        return Result::Err(Error::InvalidThreadState("Thread is not joinable.".to_string()));
+    }
+    match os_thread_join(t.os_id) {
+        Result::Ok(_) => {
+            t.joinable = false;
+            Result::Ok(())
+        },
+        Result::Err(msg) => Result::Err(Error::ThreadJoinError("Failed to join thread: ".to_string() + msg)),
+    }
+}
+
+/// `detach()`: İş parçacığını ayırır.
+/// İş parçacığı ayrıldıktan sonra artık birleştirilemez ve kendi başına çalışmaya devam eder.
+/// Kaynakları otomatik olarak serbest bırakılır.
+///
+/// # Parametreler
+/// - `t`: Ayrılacak iş parçacığı nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn detach(t: &mut Thread) -> Result<void, Error> {
+    if !t.joinable {
+        return Result::Err(Error::InvalidThreadState("Thread is not joinable.".to_string()));
+    }
+    match os_thread_detach(t.os_id) {
+        Result::Ok(_) => {
+            t.joinable = false;
+            Result::Ok(())
+        },
+        Result::Err(msg) => Result::Err(Error::Other("Failed to detach thread: ".to_string() + msg)),
+    }
+}
+
+/// `get_id()`: İş parçacığının `ThreadId`'sini döndürür.
+pub fn get_id(t: &Thread) -> ThreadId {
+    ThreadId { id: t.os_id }
+}
+
+/// `joinable()`: İş parçacığının birleştirilebilir olup olmadığını kontrol eder.
+pub fn is_joinable(t: &Thread) -> bool {
+    t.joinable
+}
+
+// --- 3. Current Thread (Mevcut İş Parçacığı İşlemleri) ---
+
+/// `current_thread_id()`: Mevcut iş parçacığının `ThreadId`'sini döndürür.
+///
+/// # Dönüş Değeri
+/// `ThreadId`: Mevcut iş parçacığının kimliği.
+pub fn current_thread_id() -> ThreadId {
+    ThreadId { id: os_thread_get_current_id() }
+}
+
+/// `yield_current_thread()`: Mevcut iş parçacığının CPU kontrolünü bırakmasını ve
+/// başka bir iş parçacığının çalışmasına izin vermesini önerir.
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn yield_current_thread() -> void {
+    os_thread_yield();
+}
+
+/// `sleep_for<Rep, Period>(duration)`: Mevcut iş parçacığını belirli bir süre boyunca uyutur.
+///
+/// # Parametreler
+/// - `duration_ns`: Uyutulacak süre (nanosaniye cinsinden).
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn sleep_for_nanos(duration_ns: u64) -> void {
+    os_sleep_for_nanos(duration_ns);
+}
+
+/// `sleep_for<D>(duration: D)`: Mevcut iş parçacığını belirli bir süre boyunca uyutur.
+/// (Daha generic bir yaklaşım, `std::chrono::Duration` tiplerini kullanır).
+
+pub fn sleep_for<D>(duration: D) -> void
+where D: chrono::DurationTrait { // `DurationTrait` varsayılmıştır.
+    sleep_for_nanos(duration.to_nanos());
+}
+
+
+// --- 4. Donanım Eş Zamanlılığı ---
+
+/// `hardware_concurrency()`: Sistemin desteklediği eş zamanlı iş parçacığı sayısını döndürür.
+/// Genellikle CPU çekirdeklerinin sayısı (hiper-threading dahil) anlamına gelir.
+///
+/// # Dönüş Değeri
+/// `u32`: Eş zamanlı iş parçacığı sayısı (0, belirlenemediği anlamına gelebilir).
+pub fn hardware_concurrency() -> u32 {
+    // pseudo-kod: os_get_hardware_concurrency()
+    1 // Geçici placeholder
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// `os_thread_create`, `os_thread_join`, `os_thread_detach`, `os_thread_get_current_id`,
+// `os_thread_yield`, `os_sleep_for_nanos`:
+// Bu fonksiyonlar, işletim sisteminin alt seviye iş parçacığı API'leriyle etkileşimi simgeler.
+// CNT runtime veya FFI aracılığıyla sağlanmalıdır.
+// `FnOnce() -> void + Send + 'static`: Kapatma tipi için varsayılan trait'ler.
+// `Send`: Kapatmanın iş parçacıkları arasında güvenli bir şekilde taşınabileceğini garanti eder.
+// `'static`: Kapatmanın herhangi bir referans ömrüne sahip olmadığını garanti eder.
