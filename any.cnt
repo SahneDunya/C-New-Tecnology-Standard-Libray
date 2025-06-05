@@ -1,0 +1,304 @@
+// any.cnt
+// Standart Any Modülü
+// Herhangi bir tipteki değeri tip-güvenli bir şekilde depolar ve dinamik olarak erişime izin verir.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::alloc;      // Dinamik bellek tahsisi için
+import std::optional;   // get_if gibi yardımcı fonksiyonlar için
+import std::utility;    // swap fonksiyonu için
+
+/// `Error` Enum'u: Any işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// `Any` nesnesinde yanlış tipte değer beklenirken erişim hatası.
+    BadAnyCast(string);
+    /// `Any` nesnesinde boşken değer erişim hatası.
+    BadAnyAccess(string);
+    /// Bellek tahsisi başarısız oldu.
+    AllocationError(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: `Any`'nin çekirdek implementasyonu karmaşıktır.
+// Temel olarak, depolanan değerin bir kopyasını tutan (veya pointer'ını)
+// ve ayrıca tip kimliğini (TypeID) tutan bir mekanizma gerektirir.
+// CNT'nin "TypeInfo" veya "RTTI (Runtime Type Information)" benzeri bir sisteme sahip olduğu varsayılmıştır.
+
+// TypeID: Her tip için benzersiz bir derleme zamanı veya çalışma zamanı kimliği.
+// CNT'nin derleyicisinin `type_id<T>()` gibi bir intrinsics sağlaması beklenir.
+pub type TypeID = u64; // Her tip için benzersiz bir sayısal kimlik.
+
+/// `Any` Struct'ı: Herhangi bir tipteki değeri depolayabilen dinamik bir kap.
+pub struct Any {
+    // Depolanan değerin tip kimliği. Boşsa 0 olabilir veya özel bir değer.
+    type_id: TypeID;
+    // Değerin kendisini depolamak için ham bellek pointer'ı.
+    // Küçük tipler için "küçük nesne optimizasyonu" (Small Object Optimization - SOO)
+    // yapılabilir (yani değeri doğrudan `Any` struct'ın içinde tutmak), ancak
+    // bu taslakta dinamik tahsis varsayılmıştır.
+    data_ptr: raw_ptr<u8>;
+    // Depolanan değerin boyutu (byte cinsinden).
+    data_size: u64;
+
+    // Type-erased fonksiyon pointer'ları veya trait objeleri:
+    // Bu, `Any`'nin içindeki değeri kopyalama, taşıma veya yok etme gibi
+    // işlemleri tip bağımsız bir şekilde yapmasını sağlar.
+    // Bu, CNT'nin dinamik dispatch veya fonksiyon pointer'ı yeteneklerine bağlıdır.
+    copy_fn: raw_ptr<fn(raw_ptr<u8>, raw_ptr<u8>) -> raw_ptr<u8>>; // func(dest_ptr, src_ptr) -> new_dest_ptr
+    destroy_fn: raw_ptr<fn(raw_ptr<u8>) -> void>; // func(ptr_to_destroy)
+     move_fn: raw_ptr<fn(raw_ptr<u8>, raw_ptr<u8>) -> raw_ptr<u8>>;
+}
+
+// --- Dahili Yardımcılar (Derleyici/Runtime Tarafından Sağlanmalı) ---
+
+// Her `T` tipi için benzersiz bir TypeID döndürür.
+ pub fn type_id<T>() -> TypeID { compiler_type_id<T>() }
+
+// `Any` içinde depolanacak bir `T` tipi için kopyalama ve yok etme fonksiyonlarını döndürür.
+ pub fn get_type_ops<T>() -> (raw_ptr<fn(...)>, raw_ptr<fn(...)>) { compiler_get_type_ops<T>() }
+
+// --- 1. Any Nesnesi Oluşturma ---
+
+/// Boş (değer içermeyen) bir `Any` nesnesi oluşturur.
+pub fn new_empty_any() -> Any {
+    Any {
+        type_id: 0, // 0 tip yokluğunu temsil etsin
+        data_ptr: null_ptr::<u8>(),
+        data_size: 0,
+        copy_fn: null_ptr::<fn(raw_ptr<u8>, raw_ptr<u8>) -> raw_ptr<u8>>(),
+        destroy_fn: null_ptr::<fn(raw_ptr<u8>) -> void>(),
+    }
+}
+
+/// Bir değeri kapsayan `Any` nesnesi oluşturur.
+/// Değer dinamik olarak tahsis edilir ve kopyalanır.
+///
+/// # Parametreler
+/// - `val`: Kapsanacak değer.
+///
+/// # Tip Parametreleri
+/// - `T`: Kapsanacak değerin tipi.
+///
+/// # Dönüş Değeri
+/// `Result<Any, Error>`: Değeri kapsayan `Any` nesnesi veya hata.
+pub fn make_any<T>(val: T) -> Result<Any, Error> {
+    let size = size_of::<T>() as u64;
+    match alloc::allocate(size) {
+        Result::Ok(ptr) => {
+            // Değeri tahsis edilen belleğe kopyala/taşı
+            // Bu, CNT'nin `memcpy` veya doğrudan atama yeteneğine bağlıdır.
+            // C++'daki "placement new" benzeri bir yapıya ihtiyaç duyar.
+             (ptr as raw_ptr<T>).write(val); // Pseudo-kod
+            unsafe {
+                *(ptr as raw_ptr<T>) = val; // Doğrudan atama, move veya copy constructor çağrısı varsayılmıştır
+            }
+
+
+            // Type-erased operasyonları al
+            // Bu fonksiyonlar, T tipi için nasıl kopyalanacağını ve yok edileceğini bilir.
+            // Örneğin:
+             let (copy_op, destroy_op) = get_type_ops::<T>();
+
+            // Şimdilik placeholder fonksiyon pointer'ları kullanacağız.
+            // Gerçek implementasyonda her T için özel kopyalama/yıkım mantığı gerekir.
+            let copy_op = &copy_value_internal::<T> as raw_ptr<fn(raw_ptr<u8>, raw_ptr<u8>) -> raw_ptr<u8>>;
+            let destroy_op = &destroy_value_internal::<T> as raw_ptr<fn(raw_ptr<u8>) -> void>;
+
+            Result::Ok(Any {
+                type_id: type_id::<T>(), // `type_id<T>()` compiler intrinsics'i varsayılmıştır.
+                data_ptr: ptr,
+                data_size: size,
+                copy_fn: copy_op,
+                destroy_fn: destroy_op,
+            })
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// Any nesnesinin yıkıcısı gibi davranacak fonksiyon.
+// Any nesnesini kullandıktan sonra bellek sızıntısını önlemek için çağrılmalıdır.
+pub fn destroy_any(mut a: Any) -> void {
+    if a.data_ptr != null_ptr() && a.destroy_fn != null_ptr() {
+        // İçindeki değeri yık
+        unsafe {
+            (a.destroy_fn)(a.data_ptr);
+        }
+        // Belleği serbest bırak
+        alloc::deallocate(a.data_ptr, a.data_size);
+        a.data_ptr = null_ptr::<u8>();
+        a.data_size = 0;
+        a.type_id = 0;
+    }
+}
+
+// Kopyalama kurucusu (Any nesnesi kopyalandığında çağrılmalı)
+pub fn copy_any(src: &Any) -> Result<Any, Error> {
+    if src.data_ptr == null_ptr() {
+        return Result::Ok(new_empty_any());
+    }
+
+    if src.copy_fn == null_ptr() {
+        return Result::Err(Error::Other("Cannot copy an Any object without a copy function.".to_string()));
+    }
+
+    let new_size = src.data_size;
+    match alloc::allocate(new_size) {
+        Result::Ok(new_ptr) => {
+            // Kaynak değeri yeni tahsis edilen belleğe kopyala.
+            // copy_fn, src.data_ptr'deki değeri new_ptr'e kopyalamalıdır.
+            unsafe {
+                (src.copy_fn)(new_ptr, src.data_ptr);
+            }
+
+            Result::Ok(Any {
+                type_id: src.type_id,
+                data_ptr: new_ptr,
+                data_size: new_size,
+                copy_fn: src.copy_fn,    // Aynı kopyalama/yıkım fonksiyonları
+                destroy_fn: src.destroy_fn,
+            })
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// Atama operatörü (Any nesnesi atandığında çağrılmalı)
+pub fn assign_any(lhs: &mut Any, rhs: Any) -> Result<void, Error> {
+    if lhs.data_ptr != null_ptr() {
+        destroy_any(lhs); // Mevcut içeriği temizle
+    }
+
+    let copy_result = copy_any(&rhs);
+    match copy_result {
+        Result::Ok(copied_rhs) => {
+            *lhs = copied_rhs;
+            Result::Ok(())
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+
+// --- 2. Any Nesnesini Sorgulama ---
+
+/// `has_value`: Any nesnesinin bir değer içerip içermediğini kontrol eder.
+pub fn has_value(a: &Any) -> bool {
+    a.data_ptr != null_ptr()
+}
+
+/// `type_id`: Any nesnesinin içindeki aktif değerin tip kimliğini döndürür.
+/// Eğer boşsa 0 döndürür.
+pub fn type_id_of_any(a: &Any) -> TypeID {
+    a.type_id
+}
+
+// --- 3. Any İçeriğine Erişim (Cast) ---
+
+/// `any_cast<T>(a)`: Any nesnesinin içindeki değeri `T` tipine dönüştürmeye çalışır.
+/// Eğer başarılıysa değerin referansını, değilse hata döndürür.
+///
+/// # Parametreler
+/// - `a`: Dönüştürülecek Any nesnesi.
+///
+/// # Tip Parametreleri
+/// - `T`: Erişilmek istenen hedef tip.
+///
+/// # Dönüş Değeri
+/// `Result<&T, Error>`: `T` tipindeki değerin referansı veya `BadAnyCast` hatası.
+pub fn any_cast<T>(a: &Any) -> Result<&T, Error> {
+    if !has_value(a) {
+        return Result::Err(Error::BadAnyAccess("Attempted to cast from an empty Any object.".to_string()));
+    }
+    if a.type_id == type_id::<T>() {
+        // Güvenli olmayan (unsafe) bir dönüşüm gereklidir.
+        Result::Ok(unsafe { &*(a.data_ptr as raw_ptr<T>) })
+    } else {
+        Result::Err(Error::BadAnyCast("Cannot cast Any object to requested type.".to_string()))
+    }
+}
+
+/// `any_cast_mut<T>(a)`: Any nesnesinin içindeki değeri `T` tipine dönüştürmeye çalışır (mutable referans).
+///
+/// # Parametreler
+/// - `a`: Dönüştürülecek Any nesnesi (mutable).
+///
+/// # Tip Parametreleri
+/// - `T`: Erişilmek istenen hedef tip.
+///
+/// # Dönüş Değeri
+/// `Result<&mut T, Error>`: `T` tipindeki değerin mutable referansı veya `BadAnyCast` hatası.
+pub fn any_cast_mut<T>(a: &mut Any) -> Result<&mut T, Error> {
+    if !has_value(a) {
+        return Result::Err(Error::BadAnyAccess("Attempted to cast from an empty Any object.".to_string()));
+    }
+    if a.type_id == type_id::<T>() {
+        // Güvenli olmayan (unsafe) bir dönüşüm gereklidir.
+        Result::Ok(unsafe { &mut *(a.data_ptr as raw_ptr<T>) })
+    } else {
+        Result::Err(Error::BadAnyCast("Cannot cast Any object to requested type.".to_string()))
+    }
+}
+
+/// `any_cast_optional<T>(a)`: Any nesnesinin içindeki değeri `T` tipine dönüştürmeye çalışır.
+/// Başarılıysa `Optional::some`, değilse `Optional::none` döndürür.
+///
+/// # Parametreler
+/// - `a`: Dönüştürülecek Any nesnesi.
+///
+/// # Tip Parametreleri
+/// - `T`: Erişilmek istenen hedef tip.
+///
+/// # Dönüş Değeri
+/// `optional::Optional<&T>`: `T` tipindeki değerin referansını içeren `Optional` veya boş `Optional`.
+pub fn any_cast_optional<T>(a: &Any) -> optional::Optional<&T> {
+    if has_value(a) && a.type_id == type_id::<T>() {
+        optional::some(unsafe { &*(a.data_ptr as raw_ptr<T>) })
+    } else {
+        optional::none()
+    }
+}
+
+// --- Dahili Tip-Erased Operasyonlar (CNT Runtime/Compiler Tarafından Oluşturulmalı) ---
+// Bu fonksiyonlar, `Any`'nin içinde saklanan her `T` tipi için özel olarak oluşturulur.
+// Dynamik polimorfizm için vtable benzeri bir yapı veya fonksiyon pointer'ları kullanılır.
+
+// Genellikle her T için derleyici tarafından otomatik olarak oluşturulan bir "Concept map" veya "VTable".
+
+// T tipindeki bir değeri başka bir `raw_ptr`'ye kopyalar.
+// Bu fonksiyon, `Any`'nin `copy_fn`'i olarak atanır.
+// `dest_ptr` ve `src_ptr`'nin `T` tipini işaret ettiği varsayılır.
+pub fn copy_value_internal<T>(dest_ptr: raw_ptr<u8>, src_ptr: raw_ptr<u8>) -> raw_ptr<u8> {
+    assert!(size_of::<T>() as u64 <= alloc::size_of_max_alloc_unit(), "Type T is too large for internal copy buffer."); // Örnek kontrol
+    unsafe {
+        let src_ref = &*(src_ptr as raw_ptr<T>);
+        let dest_ref_mut = &mut *(dest_ptr as raw_ptr<T>);
+        *dest_ref_mut = *src_ref; // T'nin kopyalama atama operatörü çağrılır.
+    }
+    dest_ptr
+}
+
+// T tipindeki bir değerin yıkıcısını çağırır ve belleği temizler.
+// Bu fonksiyon, `Any`'nin `destroy_fn`'i olarak atanır.
+pub fn destroy_value_internal<T>(ptr: raw_ptr<u8>) -> void {
+    unsafe {
+        // T'nin yıkıcısı çağrılmalı. CNT'nin yıkıcı mekanizması burada tetiklenir.
+        // Örneğin, T bir struct ise ve içinde kaynaklar varsa, onların serbest bırakılması gerekir.
+         *(ptr as raw_ptr<T>).drop(); // Pseudo-kod: Eğer drop() metodu varsa
+    }
+}
+
+// `type_id<T>()` fonksiyonu, derleyicinin her T tipi için benzersiz bir kimlik sağlaması gereken bir intrinsics'tir.
+// Örnek bir placeholder:
+pub fn type_id<T>() -> TypeID {
+    // Derleyici tarafından doldurulur. Gerçek bir implementasyonda,
+    // her T için benzersiz bir compile-time hash veya adres olabilir.
+    0 // Geçici placeholder, gerçekte derleyici tarafından sağlanmalı.
+}
