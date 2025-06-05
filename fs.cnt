@@ -1,152 +1,163 @@
-// std/fs.cnt
-// Standard library File System module
-// This module provides functions for interacting with the file system
-// (creating, deleting, reading metadata, etc.).
+// fs.cnt
+// Standart Dosya Sistemi (File System) modülü
 
-// Import necessary types from other standard library modules.
-// Assuming Result<T, E> is defined in std::core.
-import std::core; // Imports items from std::core, including core::Result
+import std::string; // toString() ve diğer string işlemleri için gerekebilir
 
-// --- Error Handling for File System Operations ---
+// Harici C veya sistem dosya sistemi API'lerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, işletim sisteminin dosya sistemi çağrılarını (örn. open, read, write, stat) kullanır.
+extern fn _cnt_fs_read_to_string(path: &string) -> _cnt_Result_string_fs_Error;
+extern fn _cnt_fs_write_string(path: &string, content: &string) -> _cnt_Result_void_fs_Error;
+extern fn _cnt_fs_create_file(path: &string) -> _cnt_Result_void_fs_Error;
+extern fn _cnt_fs_remove_file(path: &string) -> _cnt_Result_void_fs_Error;
+extern fn _cnt_fs_exists(path: &string) -> bool;
+extern fn _cnt_fs_is_file(path: &string) -> bool;
+extern fn _cnt_fs_is_dir(path: &string) -> bool;
+extern fn _cnt_fs_create_dir(path: &string) -> _cnt_Result_void_fs_Error;
+extern fn _cnt_fs_remove_dir(path: &string) -> _cnt_Result_void_fs_Error;
 
-// Represents the types of errors that can occur during file system operations.
-// [Intended API]
+
+/// `Error` Enum'u: Dosya sistemi işlemleri sırasında oluşabilecek hataları temsil eder.
 pub enum Error {
-    NotFound;         // The specified file or directory was not found.
-    PermissionDenied; // The process lacks the necessary permissions.
-    AlreadyExists;    // A file or directory at the target path already exists.
-    DirectoryNotEmpty; // Attempted to remove a directory that is not empty.
-    InvalidInput;     // Invalid characters in path, invalid arguments, etc.
-    IoError(string);  // Other I/O specific errors (may wrap an OS error code or string).
-    // Add more specific error kinds as needed (e.g., NotADirectory, IsADirectory, UnexpectedEof)
+    /// Dosya veya dizin bulunamadı.
+    NotFound;
+    /// İzinler yetersiz.
+    PermissionDenied;
+    /// Geçersiz argüman (örn. geçersiz yol).
+    InvalidInput(string);
+    /// Dosya zaten mevcut.
+    AlreadyExists;
+    /// Bir I/O işlemi sırasında bilinmeyen bir hata oluştu.
+    IoError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
 }
 
-
-// --- File Types ---
-
-// Represents the type of an entry in the file system.
-// [Intended API]
-pub enum FileType {
-    File;      // A regular file.
-    Directory; // A directory.
-    Symlink;   // A symbolic link.
-    Unknown;   // The type could not be determined or is not one of the above.
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Bu, Rust dilindeki `Result` enum'una benzer şekilde, hata yönetimini güvenli ve zorunlu kılar.
+pub enum Result<T, E> {
+    /// İşlem başarılı oldu ve `T` tipinde bir değer döndürdü.
+    Ok(T);
+    /// İşlem bir hata ile sonuçlandı ve `E` tipinde bir hata döndürdü.
+    Err(E);
 }
 
+// _cnt_Result_string_fs_Error ve _cnt_Result_void_fs_Error gibi extern tipleri,
+// CNT derleyicisinin dahili olarak Result enum'unu nasıl temsil ettiğini gösterir.
+// CNT içinde bu tipler doğrudan Result<string, Error> ve Result<void, Error> olarak kullanılacaktır.
 
-// --- File Metadata ---
 
-// Represents metadata about a file or directory, such as size, type, and timestamps.
-// [Intended API]
-pub struct Metadata {
-    // Note: Representation details may vary by operating system.
-    // Common fields found across platforms:
-    file_type: FileType;      // The type of the file system entry.
-    len: int;                 // The size of the file in bytes (consider u64 for large files).
-     permissions: Permissions; // File permissions (requires Permissions type).
-     modified: SystemTime;   // Last modification time (requires SystemTime from another module).
-     accessed: SystemTime;   // Last access time.
-     created: SystemTime;    // Creation time.
-
-    // Derived properties (often available as methods on Metadata object):
-     fn is_file(&self) -> bool;
-     fn is_dir(&self) -> bool;
-     fn is_symlink(&self) -> bool;
-     fn permissions(&self) -> &Permissions;
+/// Bir dosyadan tüm içeriği string olarak okur.
+///
+/// # Parametreler
+/// - `path`: Okunacak dosyanın yolu (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa dosya içeriğini içeren `Result::Ok(string)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn read_to_string(path: &string) -> Result<string, Error> {
+    _cnt_fs_read_to_string(path)
 }
 
-// pub struct Permissions; // Placeholder for file permissions type
-// import std::time; // Assuming SystemTime is in a time module
- pub struct SystemTime; // Placeholder for timestamps
+/// Bir string içeriğini belirtilen dosyaya yazar.
+/// Eğer dosya mevcutsa içeriğini üzerine yazar. Dosya mevcut değilse oluşturur.
+///
+/// # Parametreler
+/// - `path`: Yazılacak dosyanın yolu (string referansı).
+/// - `content`: Dosyaya yazılacak içerik (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn write_string(path: &string, content: &string) -> Result<void, Error> {
+    _cnt_fs_write_string(path, content)
+}
 
+/// Belirtilen yolda yeni bir boş dosya oluşturur.
+/// Eğer dosya zaten mevcutsa `Error::AlreadyExists` hatası döndürür.
+///
+/// # Parametreler
+/// - `path`: Oluşturulacak dosyanın yolu (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn create_file(path: &string) -> Result<void, Error> {
+    _cnt_fs_create_file(path)
+}
 
-// --- File System Functions (Path-based Operations) ---
-// Most functions return Result<T, Error> to indicate success or failure.
+/// Belirtilen yoldaki dosyayı siler.
+/// Eğer dosya bulunamazsa veya silme izni yoksa hata döndürür.
+///
+/// # Parametreler
+/// - `path`: Silinecek dosyanın yolu (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn remove_file(path: &string) -> Result<void, Error> {
+    _cnt_fs_remove_file(path)
+}
 
-// Reads the entire contents of a file into a string.
-// Returns Ok(string) containing the file's content or Err(Error) on failure.
-// [Intended API]
-pub fn read_to_string(path: string) -> core::Result<string, fs::Error>;
+/// Belirtilen yolun var olup olmadığını kontrol eder (dosya veya dizin).
+///
+/// # Parametreler
+/// - `path`: Kontrol edilecek yol (string referansı).
+///
+/// # Dönüş Değeri
+/// Yol varsa `true`, yoksa `false`.
+pub fn exists(path: &string) -> bool {
+    _cnt_fs_exists(path)
+}
 
-// Writes a string slice to a file.
-// If the file already exists, its contents are replaced. If it does not exist, a new file is created.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn write_string(path: string, contents: string) -> core::Result<void, fs::Error>;
+/// Belirtilen yolun bir dosya olup olmadığını kontrol eder.
+/// Yol mevcut değilse `false` döndürür.
+///
+/// # Parametreler
+/// - `path`: Kontrol edilecek yol (string referansı).
+///
+/// # Dönüş Değeri
+/// Yol bir dosya ise `true`, değilse `false`.
+pub fn is_file(path: &string) -> bool {
+    _cnt_fs_is_file(path)
+}
 
-// Copies the contents of the file at `from` to the file at `to`.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn copy(from: string, to: string) -> core::Result<void, fs::Error>;
+/// Belirtilen yolun bir dizin olup olmadığını kontrol eder.
+/// Yol mevcut değilse `false` döndürür.
+///
+/// # Parametreler
+/// - `path`: Kontrol edilecek yol (string referansı).
+///
+/// # Dönüş Değeri
+/// Yol bir dizin ise `true`, değilse `false`.
+pub fn is_dir(path: &string) -> bool {
+    _cnt_fs_is_dir(path)
+}
 
-// Removes the file at the specified path.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn remove_file(path: string) -> core::Result<void, fs::Error>;
+/// Belirtilen yolda yeni bir dizin oluşturur.
+/// Eğer dizin zaten mevcutsa `Error::AlreadyExists` hatası döndürür.
+///
+/// # Parametreler
+/// - `path`: Oluşturulacak dizinin yolu (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn create_dir(path: &string) -> Result<void, Error> {
+    _cnt_fs_create_dir(path)
+}
 
-// Creates a new directory at the specified path.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn create_dir(path: string) -> core::Result<void, fs::Error>;
+/// Belirtilen yoldaki boş bir dizini siler.
+/// Eğer dizin boş değilse veya bulunamazsa/silme izni yoksa hata döndürür.
+///
+/// # Parametreler
+/// - `path`: Silinecek dizinin yolu (string referansı).
+///
+/// # Dönüş Değeri
+/// İşlem başarılı olursa `Result::Ok(void)`, hata oluşursa `Result::Err(Error)`.
+pub fn remove_dir(path: &string) -> Result<void, Error> {
+    _cnt_fs_remove_dir(path)
+}
 
-// Creates a new directory and all of its parent components if they are missing.
-// [Intended API]
- pub fn create_dir_all(path: string) -> core::Result<void, fs::Error>;
-
-
-// Removes the empty directory at the specified path.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn remove_dir(path: string) -> core::Result<void, fs::Error>;
-
-// Removes a directory and all of its contents recursively.
-// Use with caution.
-// [Intended API]
- pub fn remove_dir_all(path: string) -> core::Result<void, fs::Error>;
-
-
-// Renames a file or directory from `from` to `to`.
-// Returns Ok(void) on success or Err(Error) on failure.
-// [Intended API]
-pub fn rename(from: string, to: string) -> core::Result<void, fs::Error>;
-
-
-// Reads the contents of a directory.
-// Returns a Result containing an iterator over the directory entries
-// or an Error on failure.
-// [Intended API - requires Iterator trait and DirEntry type]
- pub fn read_dir(path: string) -> core::Result<Iterator<DirEntry>, fs::Error>;
- pub struct DirEntry; // Represents an entry found within a directory (name, file_type, path, etc.)
-
-
-// Gets the metadata for a file or directory.
-// Returns Ok(Metadata) struct or Err(Error) on failure.
-// [Intended API]
-pub fn metadata(path: string) -> core::Result<fs::Metadata, fs::Error>;
-
-
-// Simplified checks that return bool (less detailed error info)
-// These might be implemented using `metadata` internally and checking the Result.
-
-// Checks if a path exists.
-// Returns true if the path exists and the process has permissions to check, false otherwise.
-// [Intended API - simplified error handling]
-pub fn exists(path: string) -> bool;
-
-// Checks if a path points to a regular file.
-// [Intended API - simplified error handling]
-pub fn is_file(path: string) -> bool;
-
-// Checks if a path points to a directory.
-// [Intended API - simplified error handling]
-pub fn is_dir(path: string) -> bool;
-
-// Checks if a path points to a symbolic link.
-// [Intended API - simplified error handling]
-pub fn is_symlink(path: string) -> bool;
-
-
-// Note on Implementation:
-// The implementation of these functions will involve calling operating system APIs
-// (e.g., using FFI to libc or WinAPI). The Error enum should map OS-specific error
-// codes to these generic error kinds.
+// --- İstenirse Eklenebilecek Diğer Fonksiyonlar ---
+// - copy(from: &string, to: &string) -> Result<void, Error>; // Dosya kopyalama
+// - rename(old_path: &string, new_path: &string) -> Result<void, Error>; // Yeniden adlandırma/Taşıma
+// - read_dir(path: &string) -> Result<List<string>, Error>; // Bir dizindeki öğeleri listeleme
+// - metadata(path: &string) -> Result<Metadata, Error>; // Dosya/dizin meta verilerini alma (boyut, değiştirme tarihi vb.)
+// - current_dir() -> Result<string, Error>; // Mevcut çalışma dizinini alma
+// - set_current_dir(path: &string) -> Result<void, Error>; // Mevcut çalışma dizinini ayarlama
