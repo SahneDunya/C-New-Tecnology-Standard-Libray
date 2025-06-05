@@ -1,0 +1,282 @@
+// type_traits.cnt
+// Standart Tip Özellikleri Modülü
+// Derleme zamanında tipler hakkında bilgi sorgulama ve tip manipülasyonu için araçlar sağlar.
+
+// Not: Bu modülün çoğu, CNT'nin derleyici düzeyinde metaprogramlama yeteneklerine
+// (örneğin, `is_same`, `is_pointer`, `remove_const` gibi özelliklerin derleyici intrinsics'leri olması) bağlıdır.
+// Burada, bu yeteneklerin var olduğunu varsayarak bir arayüz tanımlıyoruz.
+// Tip özelliklerinin çoğu, `bool` bir değer veya dönüştürülmüş bir tip sağlar.
+
+// --- 1. Temel Tip Kategorileri Sorguları ---
+
+/// `is_void<T>`: `T` tipinin `void` ile aynı tip olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` void ise, `false` değilse.
+pub fn is_void<T>() -> bool {
+    // Bu, derleyici tarafından sağlanan bir intrinsics olmalıdır.
+    // pseudo-kod: compiler_is_void<T>()
+    false // Geçici placeholder
+}
+
+/// `is_integral<T>`: `T` tipinin bir integral (tam sayı) tipi olup olmadığını kontrol eder.
+/// (örn. `int`, `u64`, `char`, `bool`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` integral ise, `false` değilse.
+pub fn is_integral<T>() -> bool {
+    // pseudo-kod: compiler_is_integral<T>()
+    false // Geçici placeholder
+}
+
+/// `is_floating_point<T>`: `T` tipinin bir kayan nokta (float) tipi olup olmadığını kontrol eder.
+/// (örn. `float`, `double`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` kayan nokta ise, `false` değilse.
+pub fn is_floating_point<T>() -> bool {
+    // pseudo-kod: compiler_is_floating_point<T>()
+    false // Geçici placeholder
+}
+
+/// `is_arithmetic<T>`: `T` tipinin bir aritmetik (integral veya kayan nokta) tipi olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` aritmetik ise, `false` değilse.
+pub fn is_arithmetic<T>() -> bool {
+    is_integral::<T>() || is_floating_point::<T>()
+}
+
+/// `is_pointer<T>`: `T` tipinin bir işaretçi tipi olup olmadığını kontrol eder.
+/// (örn. `raw_ptr<int>`, `raw_ptr<void>`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` işaretçi ise, `false` değilse.
+pub fn is_pointer<T>() -> bool {
+    // pseudo-kod: compiler_is_pointer<T>()
+    false // Geçici placeholder
+}
+
+/// `is_reference<T>`: `T` tipinin bir referans tipi olup olmadığını kontrol eder.
+/// (örn. `&int`, `&mut string`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` referans ise, `false` değilse.
+pub fn is_reference<T>() -> bool {
+    // pseudo-kod: compiler_is_reference<T>()
+    false // Geçici placeholder
+}
+
+/// `is_array<T>`: `T` tipinin bir dizi tipi olup olmadığını kontrol eder.
+/// (örn. `[int; 5]`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` dizi ise, `false` değilse.
+pub fn is_array<T>() -> bool {
+    // pseudo-kod: compiler_is_array<T>()
+    false // Geçici placeholder
+}
+
+/// `is_struct<T>`: `T` tipinin bir struct (veya class) tipi olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` struct ise, `false` değilse.
+pub fn is_struct<T>() -> bool {
+    // pseudo-kod: compiler_is_struct<T>()
+    false // Geçici placeholder
+}
+
+// --- 2. Tip Karşılaştırma ve İlişki Sorguları ---
+
+/// `is_same<T1, T2>`: İki tipin (qualifier'lar dahil) aynı olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T1`: Birinci tip.
+/// - `T2`: İkinci tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T1` ve `T2` aynı tip ise, `false` değilse.
+pub fn is_same<T1, T2>() -> bool {
+    // Bu, derleyici tarafından sağlanan bir intrinsics olmalıdır.
+    // pseudo-kod: compiler_is_same<T1, T2>()
+    false // Geçici placeholder
+}
+
+/// `is_base_of<Base, Derived>`: `Base` tipinin `Derived` tipinin doğrudan veya dolaylı bir temel sınıfı olup olmadığını kontrol eder.
+/// (Eğer CNT'de kalıtım destekleniyorsa).
+///
+/// # Tip Parametreleri
+/// - `Base`: Temel sınıf adayı tip.
+/// - `Derived`: Türetilmiş sınıf adayı tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `Base`, `Derived`'ın temel sınıfı ise, `false` değilse.
+pub fn is_base_of<Base, Derived>() -> bool {
+    // pseudo-kod: compiler_is_base_of<Base, Derived>()
+    false // Geçici placeholder
+}
+
+// --- 3. Tip Nitelikleri Sorguları (Const, Volatile, Lvalue/Rvalue Referans) ---
+
+/// `is_const<T>`: `T` tipinin `const` niteliğine sahip olup olmadığını kontrol eder.
+/// (örn. `const int`, `&const string`).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` const ise, `false` değilse.
+pub fn is_const<T>() -> bool {
+    // pseudo-kod: compiler_is_const<T>()
+    false // Geçici placeholder
+}
+
+/// `is_volatile<T>`: `T` tipinin `volatile` niteliğine sahip olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` volatile ise, `false` değilse.
+pub fn is_volatile<T>() -> bool {
+    // pseudo-kod: compiler_is_volatile<T>()
+    false // Geçici placeholder
+}
+
+/// `is_lvalue_reference<T>`: `T` tipinin bir lvalue referansı olup olmadığını kontrol eder.
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` lvalue referans ise, `false` değilse.
+pub fn is_lvalue_reference<T>() -> bool {
+    // pseudo-kod: compiler_is_lvalue_reference<T>()
+    false // Geçici placeholder
+}
+
+/// `is_rvalue_reference<T>`: `T` tipinin bir rvalue referansı olup olmadığını kontrol eder.
+/// (Eğer CNT'de rvalue referanslar destekleniyorsa).
+///
+/// # Tip Parametreleri
+/// - `T`: Sorgulanacak tip.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer `T` rvalue referans ise, `false` değilse.
+pub fn is_rvalue_reference<T>() -> bool {
+    // pseudo-kod: compiler_is_rvalue_reference<T>()
+    false // Geçici placeholder
+}
+
+// --- 4. Tip Dönüşümleri (Type Transformations) ---
+
+/// `remove_const<T>`: `T` tipinden `const` niteliğini kaldırır.
+///
+/// # Tip Parametreleri
+/// - `T`: Dönüştürülecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: `const` niteliği kaldırılmış tip.
+pub type remove_const<T> = T; // pseudo-kod: compiler_remove_const<T>
+
+/// `remove_volatile<T>`: `T` tipinden `volatile` niteliğini kaldırır.
+///
+/// # Tip Parametreleri
+/// - `T`: Dönüştürülecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: `volatile` niteliği kaldırılmış tip.
+pub type remove_volatile<T> = T; // pseudo-kod: compiler_remove_volatile<T>
+
+/// `remove_cv<T>`: `T` tipinden hem `const` hem de `volatile` niteliklerini kaldırır.
+///
+/// # Tip Parametreleri
+/// - `T`: Dönüştürülecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: `const` ve `volatile` nitelikleri kaldırılmış tip.
+pub type remove_cv<T> = remove_volatile<remove_const<T>>;
+
+/// `remove_pointer<T>`: `T` tipinden işaretçi niteliğini kaldırır.
+/// (örn. `int*` -> `int`). Eğer T bir işaretçi değilse, T'yi döndürür.
+///
+/// # Tip Parametreleri
+/// - `T`: Dönüştürülecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: İşaretçi niteliği kaldırılmış tip.
+pub type remove_pointer<T> = T; // pseudo-kod: compiler_remove_pointer<T>
+
+/// `remove_reference<T>`: `T` tipinden referans niteliğini kaldırır.
+/// (örn. `&int` -> `int`). Eğer T bir referans değilse, T'yi döndürür.
+///
+/// # Tip Parametreleri
+/// - `T`: Dönüştürülecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: Referans niteliği kaldırılmış tip.
+pub type remove_reference<T> = T; // pseudo-kod: compiler_remove_reference<T>
+
+
+// --- 5. İlişkisel Özellikler (Compound Type Traits) ---
+
+/// `is_const_pointer<T>`: `T` tipinin `const` bir işaretçi olup olmadığını kontrol eder.
+/// (örn. `int* const` -> `true`, `const int*` -> `false`).
+/// **NOT**: C++'daki gibi karmaşık pointer const'luk kuralları için derleyici desteği gerekir.
+pub fn is_const_pointer<T>() -> bool {
+    // pointer'ın kendisi const mu?
+    false // pseudo-kod: compiler_is_const_pointer<T>()
+}
+
+/// `is_pointer_to_const<T>`: İşaretçinin işaret ettiği değerin `const` olup olmadığını kontrol eder.
+/// (örn. `const int*` -> `true`, `int* const` -> `false`).
+/// **NOT**: C++'daki gibi karmaşık pointer const'luk kuralları için derleyici desteği gerekir.
+pub fn is_pointer_to_const<T>() -> bool {
+    // pointer'ın işaret ettiği değer const mu?
+    false // pseudo-kod: compiler_is_pointer_to_const<T>()
+}
+
+// --- 6. Koşullu Tip Seçimi ---
+
+/// `conditional<B, T1, T2>`: `B` (boolean) doğru ise `T1` tipini, yanlış ise `T2` tipini seçer.
+///
+/// # Tip Parametreleri
+/// - `B`: Koşul (boolean).
+/// - `T1`: `B` doğru ise seçilecek tip.
+/// - `T2`: `B` yanlış ise seçilecek tip.
+///
+/// # Dönüş Değeri
+/// `Type`: Seçilen tip.
+pub type conditional<B: bool, T1, T2> = T1; // pseudo-kod: compiler_conditional<B, T1, T2>
+
+// `T1` varsayılan olarak döndürüldü. Derleyici B'ye göre T1 veya T2'yi seçmeli.
+// Bu, genellikle derleyici intrinsics'i olarak implemente edilir.
+// Örneğin:
+ #[cfg(B)]
+ pub type conditional<B, T1, T2> = T1;
+ #[cfg(not B)]
+ pub type conditional<B, T1, T2> = T2;
