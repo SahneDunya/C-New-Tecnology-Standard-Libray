@@ -1,0 +1,443 @@
+// shared_ptr.cnt
+// Standart Shared Pointer Modülü
+// Paylaşılan sahiplik ile otomatik bellek yönetimi.
+
+import std::allocator;      // Bellek tahsisi için (varsayımsal)
+import std::atomic;         // Referans sayacı için atomik operasyonlar
+import std::ptr;            // Ham işaretçi manipülasyonları için
+import std::string;         // Hata mesajları için
+import std::assert;         // Geliştirme/hata ayıklama için
+
+// Not: `shared_ptr` implementasyonu, atomik operasyonlar için `std::atomic` modülüne ve
+// bellek tahsisi için `std::allocator` (veya `std::memory_resource`) modüllerine bağımlıdır.
+// CNT'nin operator aşırı yükleme (`*`, `->`, kopyalama, taşıma) yetenekleri olduğu varsayılmıştır.
+
+/// `ControlBlock<T>`: Paylaşılan nesnenin referans sayısını ve zayıf referans sayısını tutar.
+/// Ayrıca nesnenin kendisini ve serbest bırakma mekanizmasını da yönetir.
+pub struct ControlBlock<T> {
+    /// Güçlü referans sayısı. Nesneyi doğrudan işaret eden `shared_ptr`'lar.
+    /// Bu sayı sıfıra düştüğünde nesne yok edilir.
+    strong_count: std::atomic::AtomicU64;
+    
+    /// Zayıf referans sayısı. `weak_ptr`'lar tarafından tutulur.
+    /// Bu sayı sıfıra düştüğünde kontrol bloğunun kendisi yok edilebilir.
+    weak_count: std::atomic::AtomicU64;
+
+    // Nesnenin kendisi.
+    // Bu, genellikle doğrudan ControlBlock'un içinde yerleştirilir (make_shared için).
+    // Ancak daha genel bir durumda, bir ham işaretçi de olabilir.
+    // Şimdilik `make_shared` senaryosunu düşünerek doğrudan içeriyoruz.
+    // Eğer `ControlBlock` nesneden ayrı tahsis edilecekse, `ptr<T>` kullanılabilir.
+    value: T;
+
+    // Özel silici (custom deleter) için bir closure veya fonksiyon işaretçisi
+    // Option<Fn(ptr_mut<T>)> deleter;
+}
+
+/// `shared_ptr<T>`: Paylaşılan sahiplik ile otomatik bellek yönetimi sağlayan akıllı işaretçi.
+pub struct shared_ptr<T> {
+    /// İşaretçinin gösterdiği T tipindeki nesnenin ham işaretçisi.
+    data_ptr: std::ptr::ptr_mut<T>;
+    
+    /// Referans sayısını yöneten kontrol bloğunun ham işaretçisi.
+    control_block_ptr: std::ptr::ptr_mut<ControlBlock<T>>;
+}
+
+impl<T> shared_ptr<T> {
+    /// `null()`: Boş (null) bir `shared_ptr` döndürür.
+    pub fn null() -> shared_ptr<T> {
+        shared_ptr {
+            data_ptr: std::ptr::ptr_mut::null_mut(),
+            control_block_ptr: std::ptr::ptr_mut::null_mut(),
+        }
+    }
+
+    /// `make_shared(args: ...)`: T tipinde bir nesne oluşturur ve onu bir `shared_ptr` içinde kapsüller.
+    /// Nesne ve kontrol bloğu tek bir bellek tahsisinde yapılır (performans optimizasyonu).
+    ///
+    /// # Güvenli Olmayan
+    /// Nesne oluşumu ve bellek tahsisi işlemleri güvenli olmayan olabilir.
+    pub unsafe fn make_shared(value: T) -> shared_ptr<T> {
+        // Kontrol bloğu ve T nesnesi için tek bir bellek tahsisi yap.
+        // Bu, `std::allocator` veya `std::memory_resource` üzerinden yapılabilir.
+        // Boyut, ControlBlock + T'nin toplamı olmalıdır.
+        let allocated_size = __builtin_sizeof::<ControlBlock<T>>(); // Eğer ControlBlock T'yi içeriyorsa
+        
+        let raw_memory = std::allocator::allocate(allocated_size); // Varsayımsal bellek tahsisi
+        
+        // Ham belleği ControlBlock'a dönüştür ve construct et.
+        let control_block_raw_ptr = std::ptr::ptr_mut::<ControlBlock<T>>::from_address(raw_memory);
+        
+        // ControlBlock'u başlat.
+        // `strong_count` ve `weak_count` başlangıçta 1 olmalı.
+        control_block_raw_ptr.write(ControlBlock {
+            strong_count: std::atomic::AtomicU64::new(1),
+            weak_count: std::atomic::AtomicU64::new(1), // Kendi güçlü referansı + zayıf referanslar için 1
+            value: value, // Nesneyi doğrudan yerleştir
+        });
+
+        shared_ptr {
+            data_ptr: std::ptr::ptr_mut::from_address(control_block_raw_ptr.read().value.address()), // Nesnenin adresini al
+            control_block_ptr: control_block_raw_ptr,
+        }
+    }
+
+    /// `reset()`: İşaretçinin gösterdiği nesnenin sahipliğini bırakır.
+    pub fn reset(&mut self) {
+        // Eğer bu `shared_ptr` zaten null değilse, referans sayısını azalt.
+        if !self.is_null() {
+            unsafe {
+                let current_strong_count = self.control_block_ptr.read().strong_count.fetch_sub(1, std::atomic::Ordering::Release);
+                if current_strong_count == 1 {
+                    // Bu son güçlü referanstı, nesneyi yok et.
+                    self.destroy_object();
+                }
+            }
+        }
+        self.data_ptr = std::ptr::ptr_mut::null_mut();
+        self.control_block_ptr = std::ptr::ptr_mut::null_mut();
+    }
+
+    /// `get()`: İşaretçinin gösterdiği ham işaretçiyi döndürür.
+    ///
+    /// # Güvenli Olmayan
+    /// Döndürülen ham işaretçinin ömrü, `shared_ptr`'ın ömründen daha uzun olabilir, bu da dangling pointer'a yol açabilir.
+    pub unsafe fn get(&self) -> std::ptr::ptr_mut<T> {
+        self.data_ptr
+    }
+
+    /// `is_null()`: İşaretçinin null olup olmadığını kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.data_ptr.is_null()
+    }
+
+    /// `use_count()`: Nesneyi işaret eden güçlü referansların sayısını döndürür.
+    pub fn use_count(&self) -> u64 {
+        if self.is_null() { 0 } else {
+            unsafe { self.control_block_ptr.read().strong_count.load(std::atomic::Ordering::Acquire) }
+        }
+    }
+
+    /// `deref(&self) -> &T`: İşaretçinin gösterdiği değişmez referansı döndürür.
+    /// Operator aşırı yüklemesi için (`*ptr` veya `ptr->member`).
+    pub fn deref(&self) -> &T {
+        assert!(!self.is_null(), "Attempted to dereference a null shared_ptr.");
+        unsafe { self.data_ptr.as_ref().unwrap() }
+    }
+
+    /// `deref_mut(&mut self) -> &mut T`: İşaretçinin gösterdiği değişebilir referansı döndürür.
+    /// Operator aşırı yüklemesi için (`*ptr` veya `ptr->member`).
+    pub fn deref_mut(&mut self) -> &mut T {
+        assert!(!self.is_null(), "Attempted to dereference a null shared_ptr.");
+        // Eğer tek güçlü referans bizsek, değişebilir referans döndürmek güvenlidir.
+        // Aksi takdirde, diğer paylaşılan işaretçilerin referanslarını bozabiliriz.
+        // Bu, C++'daki `unique()` veya `owner_before` mantığına benzer.
+        // Basitlik için burada bu kontrolü atlıyoruz, ancak gerçek bir implementasyonda önemlidir.
+        unsafe { self.data_block_ptr.as_mut().unwrap() }
+    }
+
+    // --- Kopyalama ve Taşıma Semantiği ---
+
+    /// `clone()`: Mevcut `shared_ptr`'ın bir kopyasını oluşturur.
+    /// Güçlü referans sayısını artırır.
+    pub fn clone(&self) -> shared_ptr<T> {
+        if self.is_null() {
+            return shared_ptr::null();
+        }
+        unsafe {
+            self.control_block_ptr.read().strong_count.fetch_add(1, std::atomic::Ordering::Relaxed);
+        }
+        shared_ptr {
+            data_ptr: self.data_ptr,
+            control_block_ptr: self.control_block_ptr,
+        }
+    }
+
+    // Copy constructor (eğer CNT destekliyorsa)
+    // Bu genellikle dil tarafından otomatik olarak oluşturulur veya manuel olarak implemente edilir.
+     fn copy_from(other: &shared_ptr<T>) -> shared_ptr<T> { other.clone() }
+
+    // Move constructor (eğer CNT destekliyorsa)
+    // Bu da genellikle dil tarafından otomatik olarak oluşturulur.
+     fn move_from(mut other: shared_ptr<T>) -> shared_ptr<T> {
+         let result = shared_ptr { data_ptr: other.data_ptr, control_block_ptr: other.control_block_ptr };
+         other.data_ptr = std::ptr::ptr_mut::null_mut();
+         other.control_block_ptr = std::ptr::ptr_mut::null_mut();
+         result
+     }
+
+    // Drop/Destructor (Nesne ömrü bittiğinde çağrılır)
+    // CNT'nin otomatik bir `Drop` trait'i veya destructor mekanizması olmalı.
+    // `dtor` metodu varsayalım.
+    pub fn dtor(&mut self) {
+        if !self.is_null() {
+            unsafe {
+                let current_strong_count = self.control_block_ptr.read().strong_count.fetch_sub(1, std::atomic::Ordering::Release);
+                if current_strong_count == 1 {
+                    // Bu son güçlü referanstı, nesneyi yok et.
+                    self.destroy_object();
+                }
+                
+                let current_weak_count = self.control_block_ptr.read().weak_count.fetch_sub(1, std::atomic::Ordering::Release);
+                if current_weak_count == 1 {
+                    // Bu son zayıf/güçlü referanstı (kontrol bloğu için), kontrol bloğunu serbest bırak.
+                    self.deallocate_control_block();
+                }
+            }
+        }
+    }
+
+    // --- Dahili Yardımcı Fonksiyonlar ---
+    
+    /// Nesnenin kendisini yok eder (destructor çağrısı ve belleğini serbest bırakma).
+    /// # Güvenli Olmayan
+    /// Sadece son güçlü referans olduğunda çağrılmalıdır.
+    unsafe fn destroy_object(&self) {
+        if !self.data_ptr.is_null() {
+            // Nesnenin destructor'ını çağır (varsayımsal)
+            __builtin_call_dtor(self.data_ptr);
+            // Nesnenin belleğini serbest bırak (eğer ControlBlock'tan ayrı tahsis edildiyse)
+            // Eğer ControlBlock'un içinde yerleşikse, ControlBlock ile birlikte serbest kalır.
+        }
+    }
+
+    /// Kontrol bloğunun belleğini serbest bırakır.
+    /// # Güvenli Olmayan
+    /// Sadece son zayıf referans (veya son güçlü referans) olduğunda çağrılmalıdır.
+    unsafe fn deallocate_control_block(&self) {
+        if !self.control_block_ptr.is_null() {
+            // Kontrol bloğunun belleğini serbest bırak.
+            std::allocator::deallocate(self.control_block_ptr.as_ptr().__address(), __builtin_sizeof::<ControlBlock<T>>());
+        }
+    }
+}
+
+// --- Operatör Aşırı Yüklemeler (Pseudo-kod) ---
+// CNT'nin operatör aşırı yükleme yeteneği olduğu varsayılmıştır.
+
+// `*` (dereference) operatörü
+ impl<T> std::ops::Deref for shared_ptr<T> {
+     type Target = T;
+     fn deref(&self) -> &T { self.deref() }
+ }
+
+// `->` (member access) operatörü
+// Bu genellikle `Deref` implementasyonu ile otomatik olarak gelir.
+
+// Atama operatörü `=` (kopyalama ataması)
+ impl<T> std::ops::Assign for shared_ptr<T> {
+     fn assign(&mut self, other: shared_ptr<T>) {
+//         // Mevcut shared_ptr'ı resetle
+         self.reset();
+//         // Diğer shared_ptr'ın değerlerini kopyala ve ref sayacını artır
+         self.data_ptr = other.data_ptr;
+         self.control_block_ptr = other.control_block_ptr;
+         if !self.is_null() {
+             unsafe { self.control_block_ptr.read().strong_count.fetch_add(1, std::atomic::Ordering::Relaxed); }
+         }
+     }
+ }
+
+// Atama operatörü `=` (taşıma ataması)
+ impl<T> std::ops::AssignMove for shared_ptr<T> {
+     fn assign_move(&mut self, mut other: shared_ptr<T>) {
+         self.reset();
+         self.data_ptr = other.data_ptr;
+         self.control_block_ptr = other.control_block_ptr;
+         other.data_ptr = std::ptr::ptr_mut::null_mut();
+         other.control_block_ptr = std::ptr::ptr_mut::null_mut();
+     }
+ }
+
+
+// --- Weak Pointer (Zayıf İşaretçi) ---
+// shared_ptr'lar arasında döngüsel referansları kırmak için kullanılır.
+
+/// `weak_ptr<T>`: `shared_ptr` tarafından yönetilen bir nesneye zayıf bir referans.
+/// Nesnenin yaşam ömrünü etkilemez ve güçlü referans kalmadığında otomatik olarak null olur.
+pub struct weak_ptr<T> {
+    data_ptr: std::ptr::ptr_mut<T>;
+    control_block_ptr: std::ptr::ptr_mut<ControlBlock<T>>;
+}
+
+impl<T> weak_ptr<T> {
+    /// `null()`: Boş (null) bir `weak_ptr` döndürür.
+    pub fn null() -> weak_ptr<T> {
+        weak_ptr {
+            data_ptr: std::ptr::ptr_mut::null_mut(),
+            control_block_ptr: std::ptr::ptr_mut::null_mut(),
+        }
+    }
+
+    /// `from_shared(shared: &shared_ptr<T>)`: Bir `shared_ptr`'dan `weak_ptr` oluşturur.
+    pub fn from_shared(shared: &shared_ptr<T>) -> weak_ptr<T> {
+        if shared.is_null() {
+            return weak_ptr::null();
+        }
+        unsafe {
+            shared.control_block_ptr.read().weak_count.fetch_add(1, std::atomic::Ordering::Relaxed);
+        }
+        weak_ptr {
+            data_ptr: shared.data_ptr,
+            control_block_ptr: shared.control_block_ptr,
+        }
+    }
+
+    /// `lock()`: Zayıf referansı güçlü bir `shared_ptr`'a dönüştürmeye çalışır.
+    /// Eğer nesne hala yaşıyorsa, geçerli bir `shared_ptr` döndürür. Aksi takdirde, `null()` döndürür.
+    pub fn lock(&self) -> shared_ptr<T> {
+        if self.is_null() { return shared_ptr::null(); }
+
+        unsafe {
+            let cb_ptr = self.control_block_ptr;
+            let current_strong_count = cb_ptr.read().strong_count.load(std::atomic::Ordering::Relaxed);
+
+            // Eğer güçlü referans sayısı 0 ise, nesne zaten yok edilmiş olabilir.
+            if current_strong_count == 0 {
+                return shared_ptr::null();
+            }
+
+            // Güçlü referans sayısını atomik olarak artırmaya çalış.
+            // Bu bir CAS (Compare-And-Swap) döngüsü gerektirebilir.
+            let mut expected = current_strong_count;
+            loop {
+                let success = cb_ptr.read().strong_count.compare_exchange(
+                    expected,
+                    expected + 1,
+                    std::atomic::Ordering::Acquire,
+                    std::atomic::Ordering::Relaxed,
+                );
+                if success.is_ok() {
+                    // Başarılı bir şekilde güçlü referansı artırdık.
+                    return shared_ptr {
+                        data_ptr: self.data_ptr,
+                        control_block_ptr: self.control_block_ptr,
+                    };
+                }
+                // Başarısız oldu, başka bir iş parçacığı sayıyı değiştirdi. Tekrar dene.
+                expected = success.unwrap_err();
+                if expected == 0 {
+                    // Bu arada nesne yok edilmiş, artık kilitlenemez.
+                    return shared_ptr::null();
+                }
+            }
+        }
+    }
+
+    /// `is_null()`: Zayıf işaretçinin null olup olmadığını kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.data_ptr.is_null()
+    }
+
+    // Drop/Destructor (Nesne ömrü bittiğinde çağrılır)
+    pub fn dtor(&mut self) {
+        if !self.is_null() {
+            unsafe {
+                let current_weak_count = self.control_block_ptr.read().weak_count.fetch_sub(1, std::atomic::Ordering::Release);
+                if current_weak_count == 1 {
+                    // Bu son zayıf referanstı, kontrol bloğunu serbest bırak.
+                    // Strong count'ın zaten 0 olduğunu varsayıyoruz (aksi takdirde shared_ptr de aynı şeyi yapardı).
+                    self.deallocate_control_block();
+                }
+            }
+        }
+    }
+
+    // --- Dahili Yardımcı Fonksiyonlar ---
+    unsafe fn deallocate_control_block(&self) {
+        // Kontrol bloğunun belleğini serbest bırak.
+        std::allocator::deallocate(self.control_block_ptr.as_ptr().__address(), __builtin_sizeof::<ControlBlock<T>>());
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::string;
+
+// Basit bir test sınıfı
+pub struct MyData {
+    value: i64;
+    name: string;
+}
+
+impl MyData {
+    pub fn new(value: i64, name: string) -> MyData {
+        println("MyData::new called for: ".to_string() + name);
+        MyData { value, name }
+    }
+
+    pub fn dtor(&self) {
+        println("MyData::dtor called for: ".to_string() + self.name);
+    }
+}
+
+fn main() {
+    println("Starting Shared Ptr example...".to_string());
+
+    // 1. make_shared ile shared_ptr oluşturma
+    let mut ptr1: std::shared_ptr::shared_ptr<MyData>;
+    unsafe {
+        ptr1 = std::shared_ptr::shared_ptr::make_shared(MyData::new(10, "Data1".to_string()));
+    }
+    println("ptr1 use_count: ".to_string() + ptr1.use_count().to_string()); // 1
+    println("ptr1 value: ".to_string() + ptr1.deref().value.to_string()); // 10
+
+    // 2. Kopyalama (sahiplik paylaşımı)
+    let ptr2 = ptr1.clone();
+    println("ptr1 use_count: ".to_string() + ptr1.use_count().to_string()); // 2
+    println("ptr2 use_count: ".to_string() + ptr2.use_count().to_string()); // 2
+    println("ptr2 value: ".to_string() + ptr2.deref().value.to_string()); // 10
+
+    // 3. Başka bir kopyalama
+    let mut ptr3 = ptr2.clone();
+    println("ptr1 use_count: ".to_string() + ptr1.use_count().to_string()); // 3
+    println("ptr3 use_count: ".to_string() + ptr3.use_count().to_string()); // 3
+
+    // 4. `reset()` ile sahipliği bırakma
+    ptr3.reset();
+    println("ptr3 after reset. Is null: ".to_string() + ptr3.is_null().to_string()); // true
+    println("ptr1 use_count: ".to_string() + ptr1.use_count().to_string()); // 2
+
+    // 5. Kapsam dışına çıkma (destructor çağrıları)
+    // ptr2 kapsam dışına çıktığında use_count 1'e düşer.
+    // ptr1 kapsam dışına çıktığında use_count 0'a düşer ve MyData::dtor çağrılır.
+    {
+        let ptr4: std::shared_ptr::shared_ptr<MyData>;
+        unsafe {
+            ptr4 = std::shared_ptr::shared_ptr::make_shared(MyData::new(20, "Data2".to_string()));
+        }
+        println("ptr4 use_count: ".to_string() + ptr4.use_count().to_string()); // 1
+        println("ptr4 value: ".to_string() + ptr4.deref().value.to_string()); // 20
+    } // ptr4 burada kapsam dışına çıkar, MyData::dtor "Data2" için çağrılır.
+
+    // 6. Weak Pointer kullanımı
+    let strong_data: std::shared_ptr::shared_ptr<MyData>;
+    unsafe {
+        strong_data = std::shared_ptr::shared_ptr::make_shared(MyData::new(30, "Data3".to_string()));
+    }
+    let mut weak_data = std::shared_ptr::weak_ptr::from_shared(&strong_data);
+    
+    println("strong_data use_count: ".to_string() + strong_data.use_count().to_string()); // 1
+
+    let locked_ptr = weak_data.lock();
+    if !locked_ptr.is_null() {
+        println("Weak ptr locked successfully. Value: ".to_string() + locked_ptr.deref().value.to_string()); // 30
+        println("strong_data use_count after lock: ".to_string() + strong_data.use_count().to_string()); // 2
+    }
+
+    // strong_data'yı sıfırla, böylece nesnenin referans sayısı 0 olur ve yok edilir.
+    strong_data.reset();
+    println("strong_data reset. use_count: ".to_string() + strong_data.use_count().to_string()); // 0
+    
+    let locked_ptr_after_reset = weak_data.lock();
+    if locked_ptr_after_reset.is_null() {
+        println("Weak ptr cannot be locked after strong_data reset (object destroyed).".to_string());
+    } else {
+        println("Error: Weak ptr locked after object destroyed.".to_string());
+    }
+
+    // `main` fonksiyonu bittiğinde ptr1 ve ptr2 de kapsam dışına çıkar ve
+    // MyData::dtor "Data1" için çağrılır.
+    println("Shared Ptr example finished.".to_string());
+}
