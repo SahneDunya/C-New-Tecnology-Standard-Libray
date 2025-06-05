@@ -1,0 +1,666 @@
+// asio.cnt
+// Asenkron Giriş/Çıkış Modülü (Asio)
+// Ağ iletişimi, zamanlayıcılar ve asenkron olaylar için temel altyapı.
+
+import std::rc;         // Referans sayımı için (Rc, Arc gibi)
+import std::shared_ptr; // Paylaşılan sahiplik için
+import std::string;     // Hata ve log mesajları için
+import std::io;         // Temel I/O işlemleri ve println için
+import std::atomic;     // İş parçacığı güvenliği için
+import std::thread;     // İş parçacığı yönetimi için
+import std::option;     // Opsiyonel değerler için
+import std::result;     // Hata yönetimi için (Ok, Err)
+import std::time;       // Zamanlayıcılar için (Duration, Instant)
+import std::ops;        // Fonksiyonel trait'ler için (Fn, FnMut, FnOnce)
+
+// Not: Bu implementasyon, CNT'nin düşük seviyeli ağ ve zamanlama API'larına
+// (varsayımsal `__builtin_socket_create`, `__builtin_bind`, `__builtin_listen`,
+// `__builtin_accept_async`, `__builtin_read_async`, `__builtin_write_async`,
+// `__builtin_timer_set`, `__builtin_io_run` gibi intrinsikler) erişebildiği varsayılmıştır.
+
+// --- 1. Hata Yönetimi ---
+pub struct ErrorCode {
+    value: i32,
+    message: string,
+}
+
+impl ErrorCode {
+    pub fn new(value: i32, message: string) -> ErrorCode {
+        ErrorCode { value, message }
+    }
+
+    pub fn ok() -> ErrorCode {
+        ErrorCode::new(0, "Success".to_string())
+    }
+
+    pub fn is_err(&self) -> bool {
+        self.value != 0
+    }
+
+    pub fn to_string(&self) -> string {
+        "Error[".to_string() + self.value.to_string() + "]: ".to_string() + self.message
+    }
+}
+
+// Global hata kodları (Örnekler)
+pub const ERR_SUCCESS: i32 = 0;
+pub const ERR_WOULD_BLOCK: i32 = 1; // Asenkron işlemin henüz tamamlanmadığı durum
+pub const ERR_INVALID_ARGUMENT: i32 = 2;
+pub const ERR_BAD_DESCRIPTOR: i32 = 3;
+pub const ERR_OPERATION_ABORTED: i32 = 4;
+// ... diğer hata kodları
+
+// --- 2. `io_context` (I/O Service) ---
+
+/// `io_context`: Asenkron I/O olaylarını ve zamanlayıcıları yöneten temel hizmet.
+/// Bir iş kuyruğu ve bir veya daha fazla iş parçacığı tarafından çalıştırılabilen bir olay döngüsü içerir.
+pub struct io_context {
+    // Dahili olarak, bu bir olay kuyruğunu ve iş parçacığı yönetimi için mekanizmaları içerecektir.
+    // Varsayımsal olarak, her io_context'in kendi yerel "işlemci" veya "poller" referansı vardır.
+    // Bu poller, temel işletim sistemi I/O çoklama (multiplexing) API'lerini (epoll, kqueue, IOCP) kullanır.
+    // İş parçacığı güvenliği için atomik sayılar veya kilitler kullanılabilir.
+    tasks: std::rc::Rc<std::sync::Mutex<std::collections::Vec<Box<dyn ops::FnOnce<() -> ()>>>>>,
+    // Bu, iş parçacıklarının çalışıp çalışmadığını kontrol etmek için bir atomik bayrak.
+    is_running: std::atomic::AtomicBool,
+    // Bu, CNT'nin işletim sistemiyle etkileşime giren düşük seviyeli olay döngüsü referansıdır.
+    // Gerçek bir implementasyonda bu, soyut bir "I/O Poller" nesnesine işaret edebilir.
+    // raw_io_poller_handle: u64,
+}
+
+impl io_context {
+    pub fn new() -> std::shared_ptr::SharedPtr<io_context> {
+        // io_context'i oluştur ve dahili kaynakları başlat.
+        // let handle = unsafe { __builtin_io_context_create() }; // Varsayımsal intrinsik
+        std::shared_ptr::SharedPtr::make_shared(
+            io_context {
+                tasks: std::rc::Rc::new(std::sync::Mutex::new(std::collections::Vec::new())),
+                is_running: std::atomic::AtomicBool::new(false),
+                // raw_io_poller_handle: handle,
+            }
+        )
+    }
+
+    /// `post<F>(handler: F)`: Bir işleyiciyi (lambda veya fonksiyon) io_context'in kuyruğuna ekler.
+    /// İşleyici, `run()` çağrıldığında yürütülecektir.
+    pub fn post<F>(&self, handler: F)
+    where F: ops::FnOnce<()> + std::marker::Send + 'static // Closure taşınabilir ve statik ömürlü olmalı
+    {
+        // Mutex kilitlemesi ile işleyiciyi kuyruğa ekle
+        let mut tasks_guard = self.tasks.lock(); // Varsayımsal Mutex.lock()
+        tasks_guard.push(Box::new(handler));
+    }
+
+    /// `run()`: io_context'in olay döngüsünü çalıştırır.
+    /// Kuyruktaki tüm işleyiciler tamamlanana kadar veya `stop()` çağrılana kadar bloklar.
+    /// Birden fazla iş parçacığından çağrılabilir (örneğin, bir thread havuzu içinde).
+    pub fn run(&self) -> u64 { // İşlenen olay sayısı
+        self.is_running.store(true, std::atomic::Ordering::SeqCst);
+        let mut handlers_processed: u64 = 0;
+
+        loop {
+            if !self.is_running.load(std::atomic::Ordering::SeqCst) {
+                break; // Stop çağrıldıysa döngüyü kır
+            }
+
+            let mut current_tasks_to_execute = std::collections::Vec::new();
+            {
+                let mut tasks_guard = self.tasks.lock();
+                // Kuyruktaki tüm işleri al
+                current_tasks_to_execute.extend(tasks_guard.drain()); // drain() tüm elemanları taşır
+            }
+
+            if current_tasks_to_execute.is_empty() {
+                // Eğer kuyruk boşsa ve başka bekleyen I/O olayı yoksa, durabiliriz.
+                // Gerçek bir Asio implementasyonunda, burada bloklayan bir I/O çoklama çağrısı olurdu.
+                // Örneğin: `unsafe { __builtin_io_run_one(self.raw_io_poller_handle) }`
+                // Şimdilik basitlik için küçük bir gecikme ekleyelim veya döngüden çıkalım.
+                // Eğer hiçbir şey yapılmıyorsa ve run() sürekli çağrılmıyorsa, bu deadlock'a yol açabilir.
+                // Daha gerçekçi bir senaryo, bu döngüye girmeden önce temel I/O olaylarını beklemektir.
+                if !self.is_running.load(std::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                // Eğer gerçekten hiçbir şey yoksa ve blocklamak istemiyorsak, break edebiliriz.
+                // Eğer bloklamak istiyorsak, burada işletim sistemi çağrısı beklerdik.
+                // Buradaki örnek basit bir busy-loop değil, gerçek bir olay döngüsü beklenir.
+                // Şimdilik, kuyruk boşsa ve hala çalışıyorsak biraz bekleme ekleyelim:
+                // std::thread::sleep(std::time::Duration::from_millis(1)); // Varsayımsal
+                if !self.is_running.load(std::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                if current_tasks_to_execute.is_empty() {
+                    if handlers_processed > 0 { // Eğer önceden işler yaptıysak ve şimdi boşsa, durabiliriz
+                        break;
+                    } else { // İlk çağrıda boşsa, bir şey yok demektir
+                        // Bu noktada gerçek bir asio implementasyonu işletim sistemi I/O olaylarını bekler.
+                        // Bizim modelimizde bu "bekleme" kısmı şu an eksik.
+                        // Ancak döngüden çıkmak için yeterli bir koşul yoksa, burada döngü devam eder.
+                        // Basitlik için bir mola verelim.
+                        break;
+                    }
+                }
+            }
+
+            for task in current_tasks_to_execute.into_iter() {
+                task.call_once(()); // FnOnce çağrısı
+                handlers_processed += 1;
+            }
+        }
+        self.is_running.store(false, std::atomic::Ordering::SeqCst);
+        handlers_processed
+    }
+
+    /// `stop()`: io_context'in `run()` döngüsünü durdurmasını işaret eder.
+    pub fn stop(&self) {
+        self.is_running.store(false, std::atomic::Ordering::SeqCst);
+    }
+}
+
+// --- 3. IP Protokolleri ve Adresler ---
+
+pub mod ip {
+    import super::string;
+    import super::result;
+    import super::ErrorCode;
+
+    // IP Adresi
+    pub struct Address {
+        // ipv4 veya ipv6 bilgisini tutar
+         union {
+             ipv4_addr: u32,
+             ipv6_addr: [u8; 16],
+         }
+        // type: AddressType (IPv4, IPv6)
+        // Basitlik için sadece string olarak temsil edelim
+        address_str: string,
+    }
+
+    impl Address {
+        pub fn from_string(addr: string) -> result::Result<Address, ErrorCode> {
+            // Basit IP adresi doğrulama
+            if addr.contains(":") { // Muhtemelen IPv6
+                // IPv6 doğrulama mantığı
+                result::Result::Ok(Address { address_str: addr })
+            } else if addr.contains(".") { // Muhtemelen IPv4
+                // IPv4 doğrulama mantığı
+                result::Result::Ok(Address { address_str: addr })
+            } else {
+                result::Result::Err(ErrorCode::new(super::ERR_INVALID_ARGUMENT, "Invalid IP address format.".to_string()))
+            }
+        }
+
+        pub fn to_string(&self) -> string {
+            self.address_str
+        }
+    }
+
+    // TCP Endpoint
+    pub struct TcpEndpoint {
+        pub address: Address,
+        pub port: u16,
+    }
+
+    impl TcpEndpoint {
+        pub fn new(addr: Address, port: u16) -> TcpEndpoint {
+            TcpEndpoint { address: addr, port }
+        }
+
+        pub fn to_string(&self) -> string {
+            self.address.to_string() + ":" + self.port.to_string()
+        }
+    }
+
+    // TCP Protokolü
+    pub mod tcp {
+        import super::super::io_context;
+        import super::super::ErrorCode;
+        import super::super::option;
+        import super::super::result;
+        import super::super::string;
+        import super::super::io;
+        import super::super::shared_ptr;
+        import super::super::rc;
+        import super::super::atomic;
+        import super::super::thread;
+        import super::TcpEndpoint;
+        import super::Address;
+        import super::super::ops;
+
+        // Varsayımsal soket tanımlayıcısı
+        type SocketDescriptor = u64;
+
+        /// `socket`: Bir TCP soketini temsil eder.
+        /// Asenkron okuma ve yazma işlemleri için kullanılır.
+        pub struct socket {
+            io_context: shared_ptr::SharedPtr<io_context>,
+            socket_fd: atomic::AtomicU64, // Gerçek dosya tanımlayıcısı/handle
+            is_open: atomic::AtomicBool,
+        }
+
+        impl socket {
+            pub fn new(io_context: shared_ptr::SharedPtr<io_context>) -> socket {
+                socket {
+                    io_context,
+                    socket_fd: atomic::AtomicU64::new(0), // 0 genellikle geçersiz bir FD'dir
+                    is_open: atomic::AtomicBool::new(false),
+                }
+            }
+
+            pub fn open(&self) -> result::Result<(), ErrorCode> {
+                if self.is_open.load(atomic::Ordering::SeqCst) {
+                    return result::Result::Err(ErrorCode::new(super::super::ERR_INVALID_ARGUMENT, "Socket already open.".to_string()));
+                }
+                unsafe {
+                    // Varsayımsal olarak, AF_INET ve SOCK_STREAM için bir socket oluştururuz
+                    let fd = __builtin_socket_create(2, 1, 0); // AF_INET, SOCK_STREAM, 0 (protokol)
+                    if fd == 0 { // Varsayımsal hata kodu
+                        return result::Result::Err(ErrorCode::new(super::super::ERR_BAD_DESCRIPTOR, "Failed to create socket.".to_string()));
+                    }
+                    self.socket_fd.store(fd, atomic::Ordering::SeqCst);
+                    self.is_open.store(true, atomic::Ordering::SeqCst);
+                    result::Result::Ok(())
+                }
+            }
+
+            pub fn close(&self) -> result::Result<(), ErrorCode> {
+                if !self.is_open.load(atomic::Ordering::SeqCst) {
+                    return result::Result::Err(ErrorCode::new(super::super::ERR_INVALID_ARGUMENT, "Socket not open.".to_string()));
+                }
+                unsafe {
+                    // Varsayımsal olarak soketi kapat
+                    __builtin_socket_close(self.socket_fd.load(atomic::Ordering::SeqCst));
+                    self.socket_fd.store(0, atomic::Ordering::SeqCst);
+                    self.is_open.store(false, atomic::Ordering::SeqCst);
+                    result::Result::Ok(())
+                }
+            }
+
+            /// `async_connect<F>(endpoint: &TcpEndpoint, handler: F)`: Asenkron olarak bir endpoint'e bağlanır.
+            ///
+            /// `handler`: `(ErrorCode)` imzalı bir callback fonksiyonudur.
+            pub fn async_connect<F>(&self, endpoint: &TcpEndpoint, handler: F)
+            where F: ops::FnOnce<(ErrorCode,)> + std::marker::Send + 'static
+            {
+                // `self`'in bir `Rc` veya `Arc` içinde olması gerekir ki lambda içinde yakalanabilsin.
+                let self_rc = rc::Rc::new(self); // Sahipliği paylaşmak için
+                let ep_addr = endpoint.address.address_str.clone(); // Klonlama gerekli
+                let ep_port = endpoint.port;
+
+                self.io_context.post(move || {
+                    io::println("Attempting to connect to ".to_string() + ep_addr + ":" + ep_port.to_string());
+                    // Simülasyon: Bağlantı gecikmesi
+                    thread::sleep(std::time::Duration::from_millis(100)); // Varsayımsal
+
+                    unsafe {
+                        let connect_result = __builtin_socket_connect(self_rc.socket_fd.load(atomic::Ordering::SeqCst), ep_addr.as_ptr(), ep_port);
+                        if connect_result == 0 { // Varsayımsal başarı kodu
+                            handler.call_once((ErrorCode::ok(),));
+                        } else {
+                            handler.call_once((ErrorCode::new(connect_result as i32, "Connect failed.".to_string()),));
+                        }
+                    }
+                });
+            }
+
+            /// `async_read_some<F>(buffer: &mut [u8], handler: F)`: Asenkron olarak soketten veri okur.
+            ///
+            /// `handler`: `(ErrorCode, u64)` imzalı bir callback'tir. Okunan bayt sayısını döndürür.
+            pub fn async_read_some<F>(&self, buffer: &mut [u8], handler: F)
+            where F: ops::FnOnce<(ErrorCode, u64)> + std::marker::Send + 'static
+            {
+                let self_rc = rc::Rc::new(self);
+                let buffer_ptr = buffer.as_ptr_mut().byte_offset(0) as std::ptr::ptr_mut<u8>;
+                let buffer_len = buffer.len() as u64;
+
+                self.io_context.post(move || {
+                    io::println("Attempting to read from socket...".to_string());
+                    // Simülasyon: Okuma gecikmesi
+                    thread::sleep(std::time::Duration::from_millis(50)); // Varsayımsal
+
+                    unsafe {
+                        let (read_len, err_code_val) = __builtin_socket_read_async(self_rc.socket_fd.load(atomic::Ordering::SeqCst), buffer_ptr, buffer_len);
+                        let err_code = if err_code_val == 0 { ErrorCode::ok() } else { ErrorCode::new(err_code_val as i32, "Read failed.".to_string()) };
+                        handler.call_once((err_code, read_len));
+                    }
+                });
+            }
+
+            /// `async_write_some<F>(buffer: &[u8], handler: F)`: Asenkron olarak sokete veri yazar.
+            ///
+            /// `handler`: `(ErrorCode, u64)` imzalı bir callback'tir. Yazılan bayt sayısını döndürür.
+            pub fn async_write_some<F>(&self, buffer: &[u8], handler: F)
+            where F: ops::FnOnce<(ErrorCode, u64)> + std::marker::Send + 'static
+            {
+                let self_rc = rc::Rc::new(self);
+                let buffer_ptr = buffer.as_ptr().byte_offset(0) as std::ptr::ptr_mut<u8>;
+                let buffer_len = buffer.len() as u64;
+
+                self.io_context.post(move || {
+                    io::println("Attempting to write to socket...".to_string());
+                    // Simülasyon: Yazma gecikmesi
+                    thread::sleep(std::time::Duration::from_millis(50)); // Varsayımsal
+
+                    unsafe {
+                        let (written_len, err_code_val) = __builtin_socket_write_async(self_rc.socket_fd.load(atomic::Ordering::SeqCst), buffer_ptr, buffer_len);
+                        let err_code = if err_code_val == 0 { ErrorCode::ok() } else { ErrorCode::new(err_code_val as i32, "Write failed.".to_string()) };
+                        handler.call_once((err_code, written_len));
+                    }
+                });
+            }
+        }
+
+        /// `acceptor`: Gelen TCP bağlantılarını kabul etmek için bir soket.
+        pub struct acceptor {
+            io_context: shared_ptr::SharedPtr<io_context>,
+            accept_fd: atomic::AtomicU64,
+            is_open: atomic::AtomicBool,
+        }
+
+        impl acceptor {
+            pub fn new(io_context: shared_ptr::SharedPtr<io_context>) -> acceptor {
+                acceptor {
+                    io_context,
+                    accept_fd: atomic::AtomicU64::new(0),
+                    is_open: atomic::AtomicBool::new(false),
+                }
+            }
+
+            pub fn open(&self) -> result::Result<(), ErrorCode> {
+                if self.is_open.load(atomic::Ordering::SeqCst) {
+                    return result::Result::Err(ErrorCode::new(super::super::ERR_INVALID_ARGUMENT, "Acceptor already open.".to_string()));
+                }
+                unsafe {
+                    let fd = __builtin_socket_create(2, 1, 0); // AF_INET, SOCK_STREAM
+                    if fd == 0 {
+                        return result::Result::Err(ErrorCode::new(super::super::ERR_BAD_DESCRIPTOR, "Failed to create acceptor socket.".to_string()));
+                    }
+                    self.accept_fd.store(fd, atomic::Ordering::SeqCst);
+                    self.is_open.store(true, atomic::Ordering::SeqCst);
+                    result::Result::Ok(())
+                }
+            }
+
+            pub fn bind(&self, endpoint: &TcpEndpoint) -> result::Result<(), ErrorCode> {
+                if !self.is_open.load(atomic::Ordering::SeqCst) {
+                    return result::Result::Err(ErrorCode::new(super::super::ERR_INVALID_ARGUMENT, "Acceptor not open.".to_string()));
+                }
+                unsafe {
+                    let bind_result = __builtin_bind(self.accept_fd.load(atomic::Ordering::SeqCst), endpoint.address.address_str.as_ptr(), endpoint.port);
+                    if bind_result == 0 {
+                        result::Result::Ok(())
+                    } else {
+                        result::Result::Err(ErrorCode::new(bind_result as i32, "Bind failed.".to_string()))
+                    }
+                }
+            }
+
+            pub fn listen(&self, backlog: i32) -> result::Result<(), ErrorCode> {
+                if !self.is_open.load(atomic::Ordering::SeqCst) {
+                    return result::Result::Err(ErrorCode::new(super::super::ERR_INVALID_ARGUMENT, "Acceptor not open.".to_string()));
+                }
+                unsafe {
+                    let listen_result = __builtin_listen(self.accept_fd.load(atomic::Ordering::SeqCst), backlog);
+                    if listen_result == 0 {
+                        result::Result::Ok(())
+                    } else {
+                        result::Result::Err(ErrorCode::new(listen_result as i32, "Listen failed.".to_string()))
+                    }
+                }
+            }
+
+            /// `async_accept<F>(peer_socket: &socket, handler: F)`: Asenkron olarak gelen bir bağlantıyı kabul eder.
+            ///
+            /// `peer_socket`: Kabul edilecek bağlantının yerleştirileceği soket nesnesi.
+            /// `handler`: `(ErrorCode)` imzalı bir callback'tir.
+            pub fn async_accept<F>(&self, peer_socket: &socket, handler: F)
+            where F: ops::FnOnce<(ErrorCode,)> + std::marker::Send + 'static
+            {
+                let self_rc = rc::Rc::new(self);
+                let peer_socket_rc = rc::Rc::new(peer_socket);
+
+                self.io_context.post(move || {
+                    io::println("Attempting to accept new connection...".to_string());
+                    // Simülasyon: Accept gecikmesi
+                    thread::sleep(std::time::Duration::from_millis(200)); // Varsayımsal
+
+                    unsafe {
+                        let (accepted_fd, err_code_val) = __builtin_accept_async(self_rc.accept_fd.load(atomic::Ordering::SeqCst));
+                        if err_code_val == 0 {
+                            peer_socket_rc.socket_fd.store(accepted_fd, atomic::Ordering::SeqCst);
+                            peer_socket_rc.is_open.store(true, atomic::Ordering::SeqCst);
+                            handler.call_once((ErrorCode::ok(),));
+                        } else {
+                            handler.call_once((ErrorCode::new(err_code_val as i32, "Accept failed.".to_string()),));
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+// --- 4. Zamanlayıcılar ---
+
+/// `steady_timer`: Tek seferlik veya periyodik asenkron zamanlayıcı.
+pub struct steady_timer {
+    io_context: std::shared_ptr::SharedPtr<io_context>,
+    // Zamanlayıcıyı takip etmek için bir ID veya handle
+    timer_id: u64, // Varsayımsal
+    is_active: atomic::AtomicBool,
+}
+
+impl steady_timer {
+    pub fn new(io_context: std::shared_ptr::SharedPtr<io_context>) -> steady_timer {
+        steady_timer {
+            io_context,
+            timer_id: 0, // Geçersiz ID
+            is_active: atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// `expires_after<F>(duration: std::time::Duration, handler: F)`: Belirli bir süre sonra bir kez tetiklenir.
+    ///
+    /// `handler`: `(ErrorCode)` imzalı bir callback'tir.
+    pub fn expires_after<F>(&mut self, duration: std::time::Duration, handler: F)
+    where F: ops::FnOnce<(ErrorCode,)> + std::marker::Send + 'static
+    {
+        let self_rc = rc::Rc::new(self); // Zamanlayıcının referansını yakala
+        self.is_active.store(true, atomic::Ordering::SeqCst);
+        let expiry_millis = duration.as_millis(); // Varsayımsal dönüşüm
+
+        self.io_context.post(move || {
+            io::println("Timer set for ".to_string() + expiry_millis.to_string() + "ms...".to_string());
+            thread::sleep(duration); // Simülasyon: Belirtilen süre kadar bekle
+
+            if self_rc.is_active.load(atomic::Ordering::SeqCst) {
+                handler.call_once((ErrorCode::ok(),));
+                self_rc.is_active.store(false, atomic::Ordering::SeqCst); // Tek seferlik timer
+            } else {
+                handler.call_once((ErrorCode::new(ERR_OPERATION_ABORTED, "Timer cancelled.".to_string()),));
+            }
+        });
+        // Gerçek bir implementasyonda, burada bir timer ID döndürülebilir ve `cancel()` için kullanılabilir.
+         self.timer_id = unsafe { __builtin_timer_set(expiry_millis) };
+    }
+
+    /// `cancel()`: Zamanlayıcıyı iptal etmeye çalışır.
+    pub fn cancel(&mut self) {
+        if self.is_active.load(atomic::Ordering::SeqCst) {
+            io::println("Timer cancelled.".to_string());
+            self.is_active.store(false, atomic::Ordering::SeqCst);
+            // unsafe { __builtin_timer_cancel(self.timer_id) }; // Varsayımsal
+        }
+    }
+}
+
+// --- Örnek Kullanım ---
+/*
+import std::string;
+import std::io;
+import std::asio;
+import std::thread;
+import std::time;
+
+// Basit bir HTTP istemcisi simülasyonu
+fn http_client_example(io_context: std::shared_ptr::SharedPtr<asio::io_context>) {
+    io::println("HTTP Client: Starting...".to_string());
+    let socket = asio::ip::tcp::socket::new(io_context.clone());
+
+    let conn_endpoint = asio::ip::TcpEndpoint::new(
+        asio::ip::Address::from_string("127.0.0.1".to_string()).unwrap(),
+        8080u16
+    );
+
+    let mut buf = [0u8; 1024]; // Okuma için buffer
+
+    // Asenkron Bağlan
+    socket.open().unwrap();
+    socket.async_connect(&conn_endpoint, |err: asio::ErrorCode| {
+        if err.is_err() {
+            io::println("HTTP Client: Connect Error: ".to_string() + err.to_string());
+            return;
+        }
+        io::println("HTTP Client: Connected.".to_string());
+
+        // Asenkron Yazma (HTTP GET isteği simülasyonu)
+        let request = "GET / HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n".to_string();
+        socket.async_write_some(request.as_bytes(), |err: asio::ErrorCode, bytes_transferred: u64| {
+            if err.is_err() {
+                io::println("HTTP Client: Write Error: ".to_string() + err.to_string());
+                return;
+            }
+            io::println("HTTP Client: Sent ".to_string() + bytes_transferred.to_string() + " bytes.".to_string());
+
+            // Asenkron Okuma
+            socket.async_read_some(&mut buf, |err: asio::ErrorCode, bytes_read: u64| {
+                if err.is_err() && err.value != asio::ERR_WOULD_BLOCK {
+                    io::println("HTTP Client: Read Error: ".to_string() + err.to_string());
+                    return;
+                }
+                if bytes_read > 0 {
+                    let received_data = std::string::from_utf8(&buf[0..bytes_read as usize]).unwrap_or("Invalid UTF-8".to_string());
+                    io::println("HTTP Client: Received ".to_string() + bytes_read.to_string() + " bytes:\n".to_string() + received_data);
+                } else {
+                    io::println("HTTP Client: No data received or connection closed.".to_string());
+                }
+                socket.close().unwrap();
+            });
+        });
+    });
+}
+
+// Basit bir HTTP sunucusu simülasyonu
+fn http_server_example(io_context: std::shared_ptr::SharedPtr<asio::io_context>) {
+    io::println("HTTP Server: Starting...".to_string());
+    let acceptor = asio::ip::tcp::acceptor::new(io_context.clone());
+    let endpoint = asio::ip::TcpEndpoint::new(
+        asio::ip::Address::from_string("0.0.0.0".to_string()).unwrap(),
+        8080u16
+    );
+
+    acceptor.open().unwrap();
+    acceptor.bind(&endpoint).unwrap();
+    acceptor.listen(10).unwrap();
+
+    io::println("HTTP Server: Listening on ".to_string() + endpoint.to_string());
+
+    // Sonsuz kabul döngüsü (gerçekte bir handle_accept fonksiyonu içinde özyinelemeli çağrı olur)
+    let io_context_clone = io_context.clone();
+    let acceptor_rc = std::rc::Rc::new(acceptor); // accept lambda'sında kullanılmak üzere
+
+    // Yeni bağlantıları kabul etmek için bir "recursive" lambda
+    let mut do_accept: Option<Box<dyn FnOnce<()>>> = None; // Option çünkü kendisini yakalayacak
+    
+    // Fonksiyonu kendisiyle bir closure içinde yakalamak biraz karmaşıktır.
+    // Rust'taki gibi `Rc<RefCell<dyn Fn...>>` veya `FnBox` benzeri bir yapıya ihtiyaç duyar.
+    // Basitlik için, kabul döngüsünü dışarıda bırakıp, her kabulde yeni bir işleme zinciri başlatalım.
+
+    io_context_clone.post(move || {
+        // Bu lambda sadece bir kez çalışacak ve ilk kabulü tetikleyecek.
+        // Daha sonra, her bağlantıdan sonra tekrar `async_accept` çağrısı yapmak gerekir.
+        let new_socket = asio::ip::tcp::socket::new(io_context_clone.clone());
+        acceptor_rc.async_accept(&new_socket, move |err: asio::ErrorCode| {
+            if err.is_err() {
+                io::println("HTTP Server: Accept Error: ".to_string() + err.to_string());
+                return;
+            }
+            io::println("HTTP Server: New connection accepted.".to_string());
+
+            // Yeni soket üzerinden veri okuma ve yanıt verme (basit echo server gibi)
+            let client_socket_rc = std::rc::Rc::new(new_socket);
+            let mut client_buf = [0u8; 1024];
+
+            client_socket_rc.async_read_some(&mut client_buf, move |err_read: asio::ErrorCode, bytes_read: u64| {
+                if err_read.is_err() {
+                    io::println("HTTP Server: Client Read Error: ".to_string() + err_read.to_string());
+                    client_socket_rc.close().unwrap();
+                    return;
+                }
+                if bytes_read > 0 {
+                    let request_str = std::string::from_utf8(&client_buf[0..bytes_read as usize]).unwrap_or("Invalid UTF-8".to_string());
+                    io::println("HTTP Server: Received request:\n".to_string() + request_str);
+
+                    // Basit HTTP yanıtı
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello, CNT!".to_string();
+                    client_socket_rc.async_write_some(response.as_bytes(), move |err_write: asio::ErrorCode, bytes_written: u64| {
+                        if err_write.is_err() {
+                            io::println("HTTP Server: Client Write Error: ".to_string() + err_write.to_string());
+                        } else {
+                            io::println("HTTP Server: Sent ".to_string() + bytes_written.to_string() + " bytes response.".to_string());
+                        }
+                        client_socket_rc.close().unwrap();
+                        // Gerçek bir sunucu burada kendini tekrar async_accept için post ederdi.
+                    });
+                } else {
+                    io::println("HTTP Server: Client disconnected.".to_string());
+                    client_socket_rc.close().unwrap();
+                }
+            });
+        });
+    });
+}
+
+
+fn main() {
+    io::println("Starting Asio example...".to_string());
+
+    let io_context = asio::io_context::new(); // Tek bir io_context örneği
+
+    // Sunucuyu ayrı bir iş parçacığında başlat
+    let server_io_context = io_context.clone();
+    let server_thread = std::thread::spawn(move || {
+        http_server_example(server_io_context);
+        // io_context'i çalıştırmak için bir döngü
+        let handlers_processed = server_io_context.run();
+        io::println("Server io_context finished. Processed handlers: ".to_string() + handlers_processed.to_string());
+    });
+
+    // Client'ı bir süre sonra başlat (sunucunun dinlemeye başlaması için)
+    std::thread::sleep(std::time::Duration::from_millis(500)); // Sunucunun başlaması için bekle
+
+    let client_io_context = io_context.clone();
+    let client_thread = std::thread::spawn(move || {
+        http_client_example(client_io_context);
+        // io_context'i çalıştırmak için bir döngü
+        let handlers_processed = client_io_context.run();
+        io::println("Client io_context finished. Processed handlers: ".to_string() + handlers_processed.to_string());
+    });
+    
+    // Bir zamanlayıcı örneği
+    let mut timer = asio::steady_timer::new(io_context.clone());
+    timer.expires_after(std::time::Duration::from_seconds(3), |err: asio::ErrorCode| {
+        if err.is_err() {
+            io::println("Timer Error: ".to_string() + err.to_string());
+        } else {
+            io::println("Timer triggered after 3 seconds!".to_string());
+        }
+    });
+
+    // Ana io_context'i çalıştır (timer gibi diğer olaylar için)
+    let main_handlers_processed = io_context.run();
+    io::println("Main io_context finished. Processed handlers: ".to_string() + main_handlers_processed.to_string());
+
+    server_thread.join().unwrap();
+    client_thread.join().unwrap();
+
+    io::println("Asio example finished.".to_string());
+}
