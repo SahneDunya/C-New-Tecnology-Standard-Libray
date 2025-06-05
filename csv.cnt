@@ -1,0 +1,207 @@
+// csv.cnt
+// Standart CSV Okuma ve Yazma modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<string> (satırları/kayıtları temsil etmek için) için
+
+// Harici C veya optimize edilmiş CSV ayrıştırma/oluşturma kütüphanelerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, ham CSV string'lerini List<List<string>> temsilimize dönüştürür ve tersini yapar.
+extern fn _cnt_csv_parse(csv_string: &string, delimiter: char, has_headers: bool) -> _cnt_Result_collections_List_collections_List_string_csv_Error;
+extern fn _cnt_csv_serialize(records: &collections::List<collections::List<string>>, delimiter: char, include_headers: bool) -> _cnt_Result_string_csv_Error;
+
+
+/// `Error` Enum'u: CSV işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz CSV formatı veya ayrıştırma hatası.
+    ParseError(string);
+    /// Geçersiz veri tipi veya dönüştürme hatası.
+    TypeError(string);
+    /// Dosya okuma/yazma hatası (eğer doğrudan dosya işlemleri eklenirse).
+    IoError(string); // string'den import edilen io::Error olabilir
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Reader` Struct'ı: Bir CSV string'inden kayıtları okumak için kullanılır.
+pub struct Reader {
+    records: collections::List<collections::List<string>>;
+    headers: collections::Option<collections::List<string>>; // Eğer başlıklar varsa
+    current_row_index: int;
+}
+
+/// `Writer` Struct'ı: CSV kayıtlarını string olarak oluşturmak için kullanılır.
+pub struct Writer {
+    records: collections::List<collections::List<string>>;
+    delimiter: char;
+    include_headers_on_serialize: bool;
+    // headers: Option<List<string>>; // Eğer yazıcıda başlıklar da tutulacaksa
+}
+
+/// CSV string'ini ayrıştırır ve bir `Reader` nesnesi döndürür.
+///
+/// # Parametreler
+/// - `csv_string`: Ayrıştırılacak CSV verisini içeren string referansı.
+/// - `delimiter`: Alanları ayıran karakter (örn. ',', ';', '\t').
+/// - `has_headers`: İlk satırın başlık içerip içermediği.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa yapılandırılmış `Reader` nesnesi içeren `Result::Ok(Reader)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn new_reader(csv_string: &string, delimiter: char, has_headers: bool) -> Result<Reader, Error> {
+    match _cnt_csv_parse(csv_string, delimiter, has_headers) {
+        Result::Ok(all_rows) => {
+            let mut headers: collections::Option<collections::List<string>> = collections::Option::None();
+            let mut data_rows = all_rows;
+
+            if has_headers && collections::len(&data_rows) > 0 {
+                // İlk satırı başlık olarak al ve veri satırlarından çıkar
+                headers = collections::Option::Some(collections::remove(&mut data_rows, 0).unwrap());
+            }
+
+            Result::Ok(Reader {
+                records: data_rows,
+                headers: headers,
+                current_row_index: 0,
+            })
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+/// CSV kayıtlarını yazmak için yeni bir `Writer` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `delimiter`: Alanları ayıran karakter (örn. ',', ';', '\t').
+/// - `include_headers`: Serileştirme sırasında başlıkların eklenip eklenmeyeceği.
+///
+/// # Dönüş Değeri
+/// Yeni `Writer` nesnesi.
+pub fn new_writer(delimiter: char, include_headers: bool) -> Writer {
+    Writer {
+        records: collections::List::new(),
+        delimiter: delimiter,
+        include_headers_on_serialize: include_headers,
+    }
+}
+
+// --- Reader Üzerinde İşlemler ---
+
+/// Okuyucunun bir sonraki kaydı olup olmadığını kontrol eder.
+pub fn reader_has_next(reader: &Reader) -> bool {
+    reader.current_row_index < collections::len(&reader.records)
+}
+
+/// Okuyucudan bir sonraki kaydı (satırı) alır.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa bir `List<string>` olarak kaydı içeren `collections::Option::Some`,
+/// başka kayıt yoksa `collections::Option::None`.
+pub fn reader_next_record(reader: &mut Reader) -> collections::Option<collections::List<string>> {
+    if reader_has_next(reader) {
+        let record = collections::get(&reader.records, reader.current_row_index).unwrap().clone(); // Clone veya move
+        reader.current_row_index = reader.current_row_index + 1;
+        collections::Option::Some(record)
+    } else {
+        collections::Option::None()
+    }
+}
+
+/// Okuyucunun başlıklarını döndürür, eğer varsa.
+pub fn reader_get_headers(reader: &Reader) -> &collections::Option<collections::List<string>> {
+    &reader.headers
+}
+
+/// Okuyucunun tüm kayıtlarını (başlıklar hariç) döndürür.
+pub fn reader_get_all_records(reader: &Reader) -> &collections::List<collections::List<string>> {
+    &reader.records
+}
+
+// --- Writer Üzerinde İşlemler ---
+
+/// Yazıcıya bir kayıt (satır) ekler.
+///
+/// # Parametreler
+/// - `writer`: Kaydın ekleneceği mutable yazar referansı.
+/// - `record`: Eklenecek alanların listesi (`List<string>`).
+pub fn writer_add_record(writer: &mut Writer, record: collections::List<string>) -> void {
+    collections::push(&mut writer.records, record);
+}
+
+/// Yazıcıdaki tüm kayıtları CSV string'i olarak serileştirir.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa CSV string'ini içeren `Result::Ok(string)`,
+/// hata oluşursa `Result::Err(Error)`.
+pub fn writer_serialize(writer: &Writer) -> Result<string, Error> {
+    // Burada writer.include_headers_on_serialize dikkate alınmalı
+    // Harici fonksiyonda headers parametresi de olmalı.
+    _cnt_csv_serialize(&writer.records, writer.delimiter, writer.include_headers_on_serialize)
+}
+
+
+// --- Ortak Yardımcı Fonksiyonlar ---
+
+/// Bir string listesini tek bir CSV satırı string'ine dönüştürür.
+/// Bu fonksiyon, tırnak işaretlerini ve sınırlayıcı karakterlerin kaçışını ele almalıdır.
+///
+/// # Parametreler
+/// - `fields`: CSV alanları listesi.
+/// - `delimiter`: Kullanılacak sınırlayıcı karakter.
+///
+/// # Dönüş Değeri
+/// CSV formatında tek bir satır string'i.
+pub fn format_csv_row(fields: &collections::List<string>, delimiter: char) -> string {
+    let mut row_parts = collections::List::new();
+    for field in collections::iter(fields) {
+        // Alanın içinde sınırlayıcı, tırnak işareti veya yeni satır varsa tırnak içine al ve kaçış yap
+        let needs_quoting = string::contains(field, delimiter) || string::contains(field, '"') || string::contains(field, '\n');
+        let mut formatted_field = field.to_string();
+        if needs_quoting {
+            // Mevcut tırnak işaretlerini ikiye katla
+            formatted_field = string::replace(&formatted_field, "\"", "\"\"");
+            // Tırnak içine al
+            formatted_field = "\"" + &formatted_field + "\"";
+        }
+        collections::push(&mut row_parts, formatted_field);
+    }
+    string::join(&row_parts, delimiter) // string::join varsayılır
+}
+
+/// Bir CSV satırı string'ini alanlara ayrıştırır.
+/// Bu fonksiyon, tırnak işaretlerini ve kaçış karakterlerini doğru bir şekilde ele almalıdır.
+///
+/// # Parametreler
+/// - `csv_row`: Ayrıştırılacak CSV satırı string'i.
+/// - `delimiter`: Kullanılan sınırlayıcı karakter.
+///
+/// # Dönüş Değeri
+/// Ayrıştırılmış alanların listesi (`List<string>`).
+pub fn parse_csv_row(csv_row: &string, delimiter: char) -> collections::List<string> {
+    // Bu, CSV parsing'in en karmaşık kısmıdır ve bir durum makinesi gerektirebilir.
+    // Şimdilik basit bir yer tutucu. Gerçek implementasyon çok daha sağlam olmalı.
+    let mut fields = collections::List::new();
+    let mut current_field = "".to_string();
+    let mut in_quote = false;
+
+    for char_code in string::chars_iter(csv_row) { // chars_iter varsayılır
+        let c = char::from_code(char_code); // char::from_code varsayılır
+
+        if c == '"' {
+            in_quote = !in_quote;
+        } else if c == delimiter && !in_quote {
+            collections::push(&mut fields, current_field);
+            current_field = "".to_string();
+        } else {
+            current_field = current_field + c;
+        }
+    }
+    collections::push(&mut fields, current_field); // Son alanı ekle
+    fields
+}
