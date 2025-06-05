@@ -1,0 +1,207 @@
+// chrono.cnt
+// Standart Zaman Modülü
+// Zamanı (süreler, zaman noktaları, saatler) modellemek ve işlemek için araçlar sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Chrono işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz argüman hatası.
+    InvalidArgument(string);
+    /// Saat okuma hatası.
+    ClockError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 1. Süreler (Durations) ---
+
+// Süreler, birimlerini temsil eden bir "oran" (ratio) ve bir "sayı" (count) ile tanımlanır.
+// Örneğin, `milliseconds` = <1/1000 saniye, long long>
+// CNT'de sabit oranlar için bir `Ratio` veya `TicksPerSecond` gibi bir mekanizma varsayılmaktadır.
+
+// Tip: `Rep` (Representation Type) - Sürenin değerini tutacak sayısal tip (örn. i64, u64).
+// Tip: `Period` (Periyot) - Sürenin birimini tanımlayan oran (örn. saniye başına tik sayısı).
+// Bu taslakta, basitleştirilmiş bir yaklaşımla, her birim için ayrı struct'lar tanımlayacağız.
+
+/// Süreler için temel birim: Nanoseconds (Nano saniye).
+/// En hassas birim olarak kabul edilir.
+pub type Nanoseconds = u64; // Nano saniye cinsinden değeri tutar
+
+/// Süreler için temel birim: Microseconds (Mikro saniye).
+pub type Microseconds = u64;
+
+/// Süreler için temel birim: Milliseconds (Mili saniye).
+pub type Milliseconds = u64;
+
+/// Süreler için temel birim: Seconds (Saniye).
+pub type Seconds = u64;
+
+/// Süreler için temel birim: Minutes (Dakika).
+pub type Minutes = u64;
+
+/// Süreler için temel birim: Hours (Saat).
+pub type Hours = u64;
+
+
+// --- Süre Dönüşüm Fonksiyonları ---
+
+/// Nanoseconds'tan Microseconds'a dönüştürür.
+pub fn nanoseconds_to_microseconds(ns: Nanoseconds) -> Microseconds { ns / 1_000 }
+/// Nanoseconds'tan Milliseconds'a dönüştürür.
+pub fn nanoseconds_to_milliseconds(ns: Nanoseconds) -> Milliseconds { ns / 1_000_000 }
+/// Nanoseconds'tan Seconds'a dönüştürür.
+pub fn nanoseconds_to_seconds(ns: Nanoseconds) -> Seconds { ns / 1_000_000_000 }
+
+/// Microseconds'tan Nanoseconds'a dönüştürür.
+pub fn microseconds_to_nanoseconds(us: Microseconds) -> Nanoseconds { us * 1_000 }
+// ... Diğer dönüşüm fonksiyonları (milisaniyeden saniyeye, saniyeden dakikaya vb.)
+
+// Bu dönüşümler, daha karmaşık ve tip-güvenli bir `Duration` struct'ı ile daha iyi yönetilebilir:
+
+pub struct Duration<Rep, Period> {
+    count: Rep;
+}
+
+// Örneğin:
+pub type Nanoseconds = Duration<u64, Ratio<1, 1_000_000_000>>;
+pub type Milliseconds = Duration<u64, Ratio<1, 1_000>>;
+
+// Ancak bu, CNT'nin metafunction'lar ve tür düzeyinde matematik yeteneklerine bağlıdır.
+// Şimdilik, basit tip alias'ları ve fonksiyonlar yeterli olacaktır.
+
+
+// --- 2. Zaman Noktaları (Time Points) ---
+
+/// `TimePoint<Clock>` Struct'ı: Bir saatin epoch'undan itibaren geçen bir süreyi temsil eden zaman noktası.
+///
+/// # Tip Parametreleri
+/// - `Clock`: Zaman noktasını sağlayan saat tipi (örn. `SystemClock`, `MonotonicClock`).
+pub struct TimePoint<Clock> {
+    /// Saatin başlangıcından (epoch) itibaren geçen süre (Nanoseconds cinsinden).
+    /// Daha genel bir `Duration` tipi kullanmak daha iyi olacaktır.
+    pub since_epoch_ns: Nanoseconds;
+}
+
+// --- 3. Saatler (Clocks) ---
+
+// Saatler, bir epoch'u ve `now()` metodunu sağlayan tip olarak tanımlanır.
+// Bu taslakta, doğrudan saat fonksiyonlarını tanımlayacağız.
+
+/// `SystemClock`: Sistem geneli gerçek zamanlı saati temsil eder.
+/// Değişebilir (kullanıcı tarafından ayarlanabilir, ağ senkronizasyonu vb.).
+///
+/// # Dönüş Değeri
+/// `Result<TimePoint<SystemClock>, Error>`: Şu anki sistem zamanı veya hata.
+///
+/// **NOT**: Altta yatan işletim sistemi API'leri burada çağrılmalıdır.
+/// Örneğin, Linux'ta `clock_gettime(CLOCK_REALTIME, ...)` veya Windows'ta `GetSystemTimeAsFileTime`.
+pub fn SystemClock_now() -> Result<TimePoint<SystemClock>, Error> {
+    // Pseudo-kod:
+     let mut raw_time_struct;
+     if os_get_system_time(&raw_time_struct) { // OS çağrısı
+        let ns_since_epoch = convert_os_time_to_nanoseconds(raw_time_struct);
+        return Result::Ok(TimePoint { since_epoch_ns: ns_since_epoch });
+     } else {
+        return Result::Err(Error::ClockError("Failed to read system clock".to_string()));
+     }
+    Result::Ok(TimePoint { since_epoch_ns: 0 as Nanoseconds }) // Geçici placeholder
+}
+
+/// `MonotonicClock`: Kesinlikle ilerleyen ve geriye gitmeyen bir saati temsil eder.
+/// Genellikle uygulamanın çalışma süresini ölçmek için kullanılır.
+/// Sistem saati ayarlarından etkilenmez.
+///
+/// # Dönüş Değeri
+/// `Result<TimePoint<MonotonicClock>, Error>`: Şu anki monokronik zaman veya hata.
+///
+/// **NOT**: Altta yatan işletim sistemi API'leri burada çağrılmalıdır.
+/// Örneğin, Linux'ta `clock_gettime(CLOCK_MONOTONIC, ...)` veya Windows'ta `QueryPerformanceCounter`.
+pub fn MonotonicClock_now() -> Result<TimePoint<MonotonicClock>, Error> {
+    // Pseudo-kod:
+     let mut raw_time_struct;
+     if os_get_monotonic_time(&raw_time_struct) { // OS çağrısı
+        let ns_since_epoch = convert_os_time_to_nanoseconds(raw_time_struct);
+        return Result::Ok(TimePoint { since_epoch_ns: ns_since_epoch });
+     } else {
+        return Result::Err(Error::ClockError("Failed to read monotonic clock".to_string()));
+     }
+    Result::Ok(TimePoint { since_epoch_ns: 0 as Nanoseconds }) // Geçici placeholder
+}
+
+
+// --- 4. Zaman Noktası ve Süre Aritmetiği ---
+
+// Zaman noktaları ve süreler üzerinde aritmetik işlemler.
+// Örneğin: Zaman noktasına süre ekleme, iki zaman noktası arasındaki süreyi bulma.
+
+/// Bir zaman noktasına bir süre ekler.
+///
+/// # Parametreler
+/// - `tp`: Zaman noktası.
+/// - `duration_ns`: Eklenecek süre (Nanoseconds cinsinden).
+///
+/// # Dönüş Değeri
+/// `TimePoint<Clock>`: Yeni zaman noktası.
+pub fn add_duration<Clock>(tp: TimePoint<Clock>, duration_ns: Nanoseconds) -> TimePoint<Clock> {
+    TimePoint {
+        since_epoch_ns: tp.since_epoch_ns + duration_ns
+    }
+}
+
+/// İki zaman noktası arasındaki süreyi hesaplar.
+///
+/// # Parametreler
+/// - `end_tp`: Bitiş zaman noktası.
+/// - `start_tp`: Başlangıç zaman noktası.
+///
+/// # Dönüş Değeri
+/// `Nanoseconds`: İki zaman noktası arasındaki süre (Nanoseconds cinsinden).
+/// Not: Sonuç negatif olabilir, bu durumda `i64` kullanmak daha uygun olurdu.
+/// Bu taslakta sadece pozitif süreler varsayılmıştır.
+pub fn duration_between<Clock>(end_tp: TimePoint<Clock>, start_tp: TimePoint<Clock>) -> Nanoseconds {
+    if end_tp.since_epoch_ns >= start_tp.since_epoch_ns {
+        end_tp.since_epoch_ns - start_tp.since_epoch_ns
+    } else {
+        0 as Nanoseconds // Negatif süreleri ele almak için `i64` veya `Result` gerekebilir.
+    }
+}
+
+
+// --- 5. Yardımcı Fonksiyonlar ---
+
+/// Bir `TimePoint`'ı okunabilir bir stringe dönüştürür.
+///
+/// # Parametreler
+/// - `tp`: Dönüştürülecek zaman noktası.
+///
+/// # Dönüş Değeri
+/// `string`: Zaman noktasının string temsili.
+///
+/// **NOT**: Tam tarih/saat formatlama, ayrı bir `datetime` veya `format` modülü gerektirebilir.
+/// Bu fonksiyon basit bir temsili döndürür.
+pub fn format_time_point<Clock>(tp: TimePoint<Clock>) -> string {
+    "TimePoint(ns: ".to_string() + tp.since_epoch_ns.to_string() + ")".to_string()
+}
+
+/// Bir `Nanoseconds` süresini okunabilir bir stringe dönüştürür.
+pub fn format_nanoseconds(ns: Nanoseconds) -> string {
+    ns.to_string() + "ns".to_string()
+}
+
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// Bu fonksiyonlar, raw_ptr ile çalışmak için CNT'nin runtime veya compiler tarafından
+// sağlandığı varsayılır.
+// `size_of<T>()` : T tipinin boyutunu byte cinsinden döndürür.
+// `null_ptr()`    : Boş bir raw_ptr döndürür.
+// `os_get_system_time`, `os_get_monotonic_time`, `convert_os_time_to_nanoseconds`:
+// Bu fonksiyonlar, işletim sisteminin alt seviye zaman API'leriyle etkileşimi simgeler.
+// CNT runtime veya FFI (Foreign Function Interface) aracılığıyla sağlanmalıdır.
