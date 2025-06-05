@@ -1,0 +1,274 @@
+// multi_index.cnt
+// Çoklu İndeksli Konteyner Modülü
+// Tek bir veri koleksiyonuna birden fazla indeks üzerinden erişim sağlar.
+
+import std::collections::HashMap; // Hash indeksler için
+import std::collections::BTreeMap; // Sıralı indeksler için
+import std::collections::Vec;      // Ana veri depolaması için (basitlik adına)
+import std::string;                // Metin işlemleri için
+import std::option;                // Option<T> dönüş tipleri için
+import std::vec;                   // Vec oluşturma için
+import std::io;                    // println için
+import std::ops;                   // Gerekli trait'ler için (Eq, Hash, Ord, Clone, etc.)
+
+// Not: Bu implementasyon, `std::collections::HashMap`, `std::collections::BTreeMap`
+// ve `std::collections::Vec`'in temel fonksiyonelliklerini içerdiği varsayılmıştır.
+// Ayrıca, `K: Eq + Hash + Clone` ve `V: Eq + Ord + Clone` gibi trait kısıtlamaları
+// ilgili indeks türleri için gereklidir.
+
+/// `EntryIndex`: MultiIndex konteynerindeki bir öğenin ana `Vec` içindeki indeksini temsil eder.
+/// Bu, veri öğelerinin kendilerine işaret eden "hafif" bir referanstır.
+type EntryIndex = u64;
+
+/// `Person` struct'ı: İndeksleyeceğimiz örnek veri türü.
+pub struct Person {
+    pub id: u64,
+    pub name: string,
+    pub age: u32,
+}
+
+impl Person {
+    pub fn new(id: u64, name: string, age: u32) -> Person {
+        Person { id, name, age }
+    }
+
+    pub fn to_string(&self) -> string {
+        "Person { id: ".to_string() + self.id.to_string() + ", name: \"" + self.name + "\", age: ".to_string() + self.age.to_string() + " }"
+    }
+}
+
+// Person için gerekli trait'ler (Örnekte id'yi Hash olarak kullanacağız)
+impl ops::Eq for Person {
+    fn eq(&self, other: &Person) -> bool {
+        self.id == other.id && self.name == other.name && self.age == other.age
+    }
+}
+impl ops::Hash for Person {
+    fn hash<H: ops::Hasher>(&self, state: &mut H) {
+        state.hash_u64(self.id);
+        state.hash_string(&self.name);
+        state.hash_u32(self.age);
+    }
+}
+impl ops::Clone for Person {
+    fn clone(&self) -> Person {
+        Person { id: self.id, name: self.name.clone(), age: self.age }
+    }
+}
+// Sıralı indeks için 'name' alanını kullanacağımızdan, String için Ord gereklidir.
+// CNT String muhtemelen Ord'u impl'eder.
+
+/// `MultiIndexContainer`: `Person` nesnelerini birden fazla indeks üzerinden yönetir.
+pub struct MultiIndexContainer {
+    // Ana veri depolaması: Veri öğelerinin kendileri burada saklanır.
+    // Varsayımsal olarak, `Vec`'in indeksleri stabil kalır veya
+    // öğe kaldırıldığında indeksler güncellenir.
+    // Gerçek bir implementasyonda, bu bir linked list veya daha karmaşık bir yapı olabilir
+    // ki öğelerin hafızadaki yerleri değişmesin. Basitlik adına `Vec<Option<Person>>` kullanacağız.
+    // `None` değerleri silinmiş öğeleri temsil eder ve `EntryIndex`'in geçerliliğini korur.
+    data: Vec<option::Option<Person>>,
+    next_available_index: EntryIndex,
+
+    // İndeks 1: ID'ye göre benzersiz Hash İndeksi
+    // Anahtar: Person.id, Değer: Ana veri Vec'indeki indeks (EntryIndex)
+    id_index: HashMap<u64, EntryIndex>,
+
+    // İndeks 2: İsme göre sıralı, benzersiz olmayan B-Tree İndeksi
+    // Anahtar: Person.name, Değer: Bu isimdeki kişilerin EntryIndex'lerinin listesi
+    name_index: BTreeMap<string, Vec<EntryIndex>>,
+}
+
+impl MultiIndexContainer {
+    pub fn new() -> MultiIndexContainer {
+        MultiIndexContainer {
+            data: Vec::new(),
+            next_available_index: 0,
+            id_index: HashMap::new(),
+            name_index: BTreeMap::new(),
+        }
+    }
+
+    /// `insert(&mut self, person: Person)`: Konteyner'a yeni bir `Person` ekler.
+    ///
+    /// Eğer aynı ID'ye sahip bir kişi zaten varsa, ekleme başarısız olur ve `None` döndürür.
+    /// Başarılı olursa, eklenen kişinin indeksini (EntryIndex) döndürür.
+    pub fn insert(&mut self, person: Person) -> option::Option<EntryIndex> {
+        // ID indeksinde zaten varsa ekleme
+        if self.id_index.contains_key(&person.id) {
+            io::println("Error: Person with ID ".to_string() + person.id.to_string() + " already exists.".to_string());
+            return option::Option::None;
+        }
+
+        let current_index = self.next_available_index;
+
+        // Ana veriye ekle
+        if current_index == self.data.len() as u64 {
+            self.data.push(option::Option::Some(person.clone()));
+        } else {
+            // Varolan bir None slotunu kullanmaya çalış (bu implementasyon için basitlik adına atlandı)
+            // Daha karmaşık bir senaryoda boş slotlar için bir free-list tutulabilir.
+            self.data[current_index as usize] = option::Option::Some(person.clone());
+        }
+        self.next_available_index += 1; // Yeni bir boş slot için indeksi artır
+
+        // ID indeksini güncelle
+        self.id_index.insert(person.id, current_index);
+
+        // İsim indeksini güncelle
+        let name_entry = self.name_index.entry(person.name).or_insert(Vec::new());
+        name_entry.push(current_index);
+
+        option::Option::Some(current_index)
+    }
+
+    /// `get_by_id(&self, id: u64) -> Option<&Person>`: ID'ye göre bir kişi döndürür.
+    pub fn get_by_id(&self, id: u64) -> option::Option<&Person> {
+        if let option::Option::Some(index) = self.id_index.get(&id) {
+            if let option::Option::Some(person) = &self.data[*index as usize] {
+                return option::Option::Some(person);
+            }
+        }
+        option::Option::None
+    }
+
+    /// `get_by_name(&self, name: &string) -> Vec<&Person>`: İsme göre kişileri döndürür.
+    ///
+    /// Aynı isimde birden fazla kişi olabileceği için bir `Vec` döndürür.
+    pub fn get_by_name(&self, name: &string) -> Vec<&Person> {
+        let mut results = Vec::new();
+        if let option::Option::Some(indices) = self.name_index.get(name) {
+            for index in indices.iter() {
+                if let option::Option::Some(person) = &self.data[*index as usize] {
+                    results.push(person);
+                }
+            }
+        }
+        results
+    }
+
+    /// `remove_by_id(&mut self, id: u64) -> Option<Person>`: ID'ye göre bir kişiyi kaldırır.
+    ///
+    /// Kaldırılan `Person` nesnesini döndürür.
+    pub fn remove_by_id(&mut self, id: u64) -> option::Option<Person> {
+        if let option::Option::Some(index) = self.id_index.remove(&id) {
+            // Ana veriden kaldır (None yaparak)
+            if let option::Option::Some(person) = self.data[index as usize].take() { // take() None yapar ve değeri döndürür
+                // İsim indeksinden de kaldır
+                if let option::Option::Some(indices) = self.name_index.get_mut(&person.name) {
+                    // İlgili indeksi Vec'ten bul ve kaldır
+                    let mut found_idx_in_name_vec = option::Option::None;
+                    for (i, &idx) in indices.iter().enumerate() {
+                        if idx == index {
+                            found_idx_in_name_vec = option::Option::Some(i);
+                            break;
+                        }
+                    }
+                    if let option::Option::Some(idx_to_remove) = found_idx_in_name_vec {
+                        indices.remove(idx_to_remove);
+                        if indices.is_empty() {
+                            self.name_index.remove(&person.name); // Eğer bu isimde başka kişi kalmadıysa, anahtarı kaldır
+                        }
+                    }
+                }
+                return option::Option::Some(person);
+            }
+        }
+        option::Option::None
+    }
+
+    /// `len(&self) -> u64`: Konteynerdeki aktif kişi sayısını döndürür.
+    pub fn len(&self) -> u64 {
+        self.id_index.len() // id_index her zaman aktif öğe sayısını yansıtır.
+    }
+
+    /// `is_empty(&self) -> bool`: Konteynerin boş olup olmadığını kontrol eder.
+    pub fn is_empty(&self) -> bool {
+        self.id_index.is_empty()
+    }
+}
+
+// --- Örnek Kullanım ---
+
+import std::collections::multi_index;
+import std::io;
+import std::string;
+import std::option;
+import std::vec;
+
+fn main() {
+    io::println("Starting MultiIndex example...".to_string());
+
+    let mut container = multi_index::MultiIndexContainer::new();
+
+    // 1. Öğeleri ekleme
+    io::println("\n--- Inserting Elements ---".to_string());
+    container.insert(multi_index::Person::new(1, "Alice".to_string(), 30));
+    container.insert(multi_index::Person::new(2, "Bob".to_string(), 25));
+    container.insert(multi_index::Person::new(3, "Charlie".to_string(), 35));
+    container.insert(multi_index::Person::new(4, "Alice".to_string(), 28)); // Aynı isimde başka bir Alice
+
+    io::println("Container size: ".to_string() + container.len().to_string()); // 4
+
+    // Aynı ID ile ekleme (başarısız olmalı)
+    container.insert(multi_index::Person::new(1, "David".to_string(), 40)); // Error çıktısı verir.
+    io::println("Container size: ".to_string() + container.len().to_string()); // Hala 4
+
+    // 2. ID'ye göre arama
+    io::println("\n--- Get by ID ---".to_string());
+    if let option::Option::Some(p) = container.get_by_id(1) {
+        io::println("Found by ID 1: ".to_string() + p.to_string()); // Alice, 30
+    }
+    if let option::Option::Some(p) = container.get_by_id(4) {
+        io::println("Found by ID 4: ".to_string() + p.to_string()); // Alice, 28
+    }
+    if let option::Option::None = container.get_by_id(99) {
+        io::println("Person with ID 99 not found.".to_string());
+    }
+
+    // 3. İsme göre arama
+    io::println("\n--- Get by Name ---".to_string());
+    let alices = container.get_by_name(&"Alice".to_string());
+    io::println("Found Alices (count: ".to_string() + alices.len().to_string() + "):".to_string());
+    for p in alices.iter() {
+        io::println("- ".to_string() + (*p).to_string()); // Alice, 30 ve Alice, 28
+    }
+
+    let bobs = container.get_by_name(&"Bob".to_string());
+    io::println("Found Bobs (count: ".to_string() + bobs.len().to_string() + "):".to_string());
+    for p in bobs.iter() {
+        io::println("- ".to_string() + (*p).to_string()); // Bob, 25
+    }
+
+    let unknown_name = container.get_by_name(&"Unknown".to_string());
+    io::println("Found Unknowns (count: ".to_string() + unknown_name.len().to_string() + "):".to_string()); // 0
+
+    // 4. Öğeleri kaldırma
+    io::println("\n--- Removing Elements ---".to_string());
+    if let option::Option::Some(removed_person) = container.remove_by_id(2) {
+        io::println("Removed person by ID 2: ".to_string() + removed_person.to_string()); // Bob, 25
+    } else {
+        io::println("Person with ID 2 not found for removal.".to_string());
+    }
+    io::println("Container size: ".to_string() + container.len().to_string()); // 3
+
+    // Tekrar Bob'u arama (bulunamamalı)
+    if let option::Option::None = container.get_by_id(2) {
+        io::println("Person with ID 2 not found after removal.".to_string());
+    }
+    let bobs_after_removal = container.get_by_name(&"Bob".to_string());
+    io::println("Found Bobs (count after removal: ".to_string() + bobs_after_removal.len().to_string() + "):".to_string()); // 0
+
+    // Alice'lerden birini kaldır
+    if let option::Option::Some(removed_alice) = container.remove_by_id(1) {
+        io::println("Removed person by ID 1: ".to_string() + removed_alice.to_string()); // Alice, 30
+    }
+    io::println("Container size: ".to_string() + container.len().to_string()); // 2
+
+    let remaining_alices = container.get_by_name(&"Alice".to_string());
+    io::println("Found Alices (count after removal: ".to_string() + remaining_alices.len().to_string() + "):".to_string()); // 1
+    for p in remaining_alices.iter() {
+        io::println("- ".to_string() + (*p).to_string()); // Alice, 28
+    }
+
+    io::println("MultiIndex example finished.".to_string());
+}
