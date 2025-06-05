@@ -1,0 +1,327 @@
+// rc.cnt
+// Standart Referans Sayımlı Akıllı İşaretçi Modülü (Rc)
+// Tek iş parçacıklı ortamlar için paylaşılan sahiplik sağlar.
+
+import std::mem;       // Bellek manipülasyonu için (örneğin, drop, ManuallyDrop)
+import std::ptr;       // Ham işaretçi işlemleri için (örneğin, addr_of_mut)
+import std::ops;       // Deref trait'i için
+import std::assert;    // Hata ayıklama için
+import std::option;    // Option<T> için
+import std::string;    // Hata mesajları için
+
+// Not: Bu implementasyon, CNT'nin ham işaretçiler, bellek tahsisi ve serbest bırakılması
+// (`__builtin_alloc`, `__builtin_dealloc`) ve `std::mem::drop` gibi dil intrinsiklerine sahip olduğu varsayılmıştır.
+
+/// Dahili olarak, `Rc<T>` ve `Weak<T>` tarafından kullanılan referans sayılarını tutan
+/// heap üzerinde ayrılmış kontrol bloğu.
+struct RcBox<T> {
+    /// Güçlü (strong) referans sayısı. Bu sayı sıfıra düştüğünde `T` serbest bırakılır.
+    strong_count: u64,
+    /// Zayıf (weak) referans sayısı. Güçlü sayı sıfıra düştükten sonra bile `RcBox`'ın
+    /// kendisinin (ve weak sayacının) yaşamasına izin verir.
+    weak_count: u64,
+    /// Saklanan veri.
+    value: T,
+}
+
+/// `Rc<T>`: Heap üzerinde tahsis edilmiş `T` değerine paylaşılan, referans sayımlı bir işaretçi.
+///
+/// Bir `Rc<T>`'nin referans sayısı sıfıra düştüğünde, `T` tipi otomatik olarak bellekten serbest bırakılır.
+/// `Rc<T>` tek iş parçacıklı ortamlar için tasarlanmıştır ve iş parçacıkları arasında güvenli değildir.
+///
+/// # Ömür Yönetimi:
+/// `Rc<T>` klonlandığında strong_count artırılır.
+/// `Rc<T>` düşürüldüğünde (drop edildiğinde) strong_count azaltılır.
+/// Strong_count sıfıra düştüğünde, `value` düşürülür.
+/// Hem strong_count hem de weak_count sıfıra düştüğünde, `RcBox`'ın kendisi düşürülür.
+pub struct Rc<T> {
+    ptr: std::ptr::NonZeroPtr<RcBox<T>>, // Null olmayan bir işaretçi garantisi
+}
+
+impl<T> Rc<T> {
+    /// `new(value: T)`: Yeni bir `Rc<T>` oluşturur ve `value`'yu heap'e taşır.
+    /// Strong count ve weak count'u 1 olarak başlatır.
+    pub fn new(value: T) -> Rc<T> {
+        let size = std::mem::size_of::<RcBox<T>>();
+        let align = std::mem::align_of::<RcBox<T>>();
+        
+        unsafe {
+            // `__builtin_alloc` varsayımsal olarak heap'ten bellek tahsis eder.
+            let raw_ptr = __builtin_alloc(size, align);
+            std::assert::assert_ne(raw_ptr, std::ptr::null_mut(), "Failed to allocate memory for RcBox".to_string());
+
+            let rc_box_ptr: std::ptr::ptr_mut<RcBox<T>> = raw_ptr as std::ptr::ptr_mut<RcBox<T>>;
+
+            // RcBox'ı doğrudan belleğe yerleştir (placement new gibi)
+            std::ptr::write(rc_box_ptr as std::ptr::ptr_mut<u64>, 1); // strong_count = 1
+            std::ptr::write((rc_box_ptr as std::ptr::ptr_mut<u64>).offset(1), 1); // weak_count = 1
+            std::ptr::write(std::ptr::addr_of_mut!((*rc_box_ptr).value), value); // value'yu yerleştir
+
+            Rc { ptr: std::ptr::NonZeroPtr::new(rc_box_ptr).unwrap() }
+        }
+    }
+
+    /// `strong_count(&self)`: Bu `Rc`'nin işaret ettiği değer için mevcut güçlü referans sayısını döndürür.
+    pub fn strong_count(&self) -> u64 {
+        unsafe {
+            (*self.ptr.as_ptr()).strong_count
+        }
+    }
+
+    /// `weak_count(&self)`: Bu `Rc`'nin işaret ettiği değer için mevcut zayıf referans sayısını döndürür.
+    pub fn weak_count(&self) -> u64 {
+        unsafe {
+            (*self.ptr.as_ptr()).weak_count
+        }
+    }
+
+    /// `downgrade(&self)`: Bu `Rc`'den yeni bir `Weak<T>` oluşturur.
+    /// `Rc`'nin güçlü referans sayısını etkilemez. Weak count'ı artırır.
+    pub fn downgrade(&self) -> Weak<T> {
+        unsafe {
+            // Weak count'ı atomik olmayan bir şekilde artır
+            (*self.ptr.as_ptr()).weak_count += 1;
+            Weak { ptr: self.ptr } // Weak de aynı RcBox'ı işaret eder
+        }
+    }
+}
+
+// `Rc<T>` için `Deref` implementasyonu, `Rc`'nin bir `T` referansı gibi davranmasını sağlar.
+impl<T> ops::Deref for Rc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe {
+            // RcBox'ın içindeki T değerine değişmez bir referans döndür.
+            &(*self.ptr.as_ptr()).value
+        }
+    }
+}
+
+// `Rc<T>` klonlandığında güçlü referans sayısını artırır.
+impl<T> Clone for Rc<T> {
+    fn clone(&self) -> Rc<T> {
+        unsafe {
+            // Strong count'ı atomik olmayan bir şekilde artır.
+            (*self.ptr.as_ptr()).strong_count += 1;
+            Rc { ptr: self.ptr }
+        }
+    }
+}
+
+// `Rc<T>` düşürüldüğünde güçlü referans sayısını azaltır ve bellek yönetimini yapar.
+impl<T> Drop for Rc<T> {
+    fn drop(&mut self) {
+        unsafe {
+            // Strong count'ı atomik olmayan bir şekilde azalt.
+            (*self.ptr.as_ptr()).strong_count -= 1;
+
+            if (*self.ptr.as_ptr()).strong_count == 0 {
+                // Eğer güçlü referans kalmadıysa, değeri düşür.
+                // `std::ptr::read` değeri alır ve belleği okumuş gibi yapar,
+                // böylece `std::mem::drop` doğru şekilde çağrılabilir.
+                std::mem::drop(std::ptr::read(std::ptr::addr_of_mut!((*self.ptr.as_ptr()).value)));
+
+                if (*self.ptr.as_ptr()).weak_count == 0 {
+                    // Eğer güçlü ve zayıf referans kalmadıysa, RcBox'ı serbest bırak.
+                    let size = std::mem::size_of::<RcBox<T>>();
+                    let align = std::mem::align_of::<RcBox<T>>();
+                    __builtin_dealloc(self.ptr.as_ptr() as std::ptr::ptr_mut<u8>, size, align);
+                }
+            }
+        }
+    }
+}
+
+/// `Weak<T>`: `Rc<T>` tarafından yönetilen bir değere zayıf referans veren bir akıllı işaretçi.
+///
+/// `Weak<T>`, güçlü referans sayısını artırmaz, bu da dairesel referans döngülerini kırmak için kullanılır.
+/// Bir `Weak<T>` referansı, `upgrade()` metodu aracılığıyla bir `Option<Rc<T>>`'ye yükseltilebilir.
+/// Eğer değer düşürülmüşse, `upgrade()` `None` döndürür.
+pub struct Weak<T> {
+    ptr: std::ptr::NonZeroPtr<RcBox<T>>,
+}
+
+impl<T> Weak<T> {
+    /// `upgrade(&self)`: Zayıf referansı bir `Rc<T>`'ye yükseltmeye çalışır.
+    ///
+    /// Eğer `Rc<T>`'nin işaret ettiği değer hala yaşıyorsa, `Some(Rc<T>)` döndürür
+    /// ve güçlü referans sayısını artırır. Aksi takdirde `None` döndürür.
+    pub fn upgrade(&self) -> std::option::Option<Rc<T>> {
+        unsafe {
+            if (*self.ptr.as_ptr()).strong_count == 0 {
+                // Değer zaten düşürüldüyse, None döndür.
+                std::option::Option::None
+            } else {
+                // Strong count'ı atomik olmayan bir şekilde artır ve yeni bir Rc döndür.
+                (*self.ptr.as_ptr()).strong_count += 1;
+                std::option::Option::Some(Rc { ptr: self.ptr })
+            }
+        }
+    }
+
+    /// `strong_count(&self)`: Bu `Weak`'in işaret ettiği değer için mevcut güçlü referans sayısını döndürür.
+    /// Değerin yaşamda olup olmadığını kontrol etmek için kullanışlıdır.
+    pub fn strong_count(&self) -> u64 {
+        unsafe {
+            (*self.ptr.as_ptr()).strong_count
+        }
+    }
+
+    /// `weak_count(&self)`: Bu `Weak`'in işaret ettiği değer için mevcut zayıf referans sayısını döndürür.
+    pub fn weak_count(&self) -> u64 {
+        unsafe {
+            (*self.ptr.as_ptr()).weak_count
+        }
+    }
+}
+
+// `Weak<T>` klonlandığında zayıf referans sayısını artırır.
+impl<T> Clone for Weak<T> {
+    fn clone(&self) -> Weak<T> {
+        unsafe {
+            // Weak count'ı atomik olmayan bir şekilde artır.
+            (*self.ptr.as_ptr()).weak_count += 1;
+            Weak { ptr: self.ptr }
+        }
+    }
+}
+
+// `Weak<T>` düşürüldüğünde zayıf referans sayısını azaltır ve bellek yönetimini yapar.
+impl<T> Drop for Weak<T> {
+    fn drop(&mut self) {
+        unsafe {
+            // Weak count'ı atomik olmayan bir şekilde azalt.
+            (*self.ptr.as_ptr()).weak_count -= 1;
+
+            if (*self.ptr.as_ptr()).strong_count == 0 && (*self.ptr.as_ptr()).weak_count == 0 {
+                // Eğer güçlü ve zayıf referans kalmadıysa, RcBox'ı serbest bırak.
+                let size = std::mem::size_of::<RcBox<T>>();
+                let align = std::mem::align_of::<RcBox<T>>();
+                __builtin_dealloc(self.ptr.as_ptr() as std::ptr::ptr_mut<u8>, size, align);
+            }
+        }
+    }
+}
+
+// --- Örnek Kullanım ---
+/*
+import std::rc;
+import std::io;
+import std::string;
+import std::option;
+
+// Bir düğüm yapısı (dairesel referans örneği için)
+pub struct Node {
+    pub value: i32,
+    pub next: option::Option<rc::Rc<Node>>,
+    pub prev: option::Option<rc::Weak<Node>>, // Weak referans döngüyü kırar
+}
+
+impl Node {
+    pub fn new(value: i32) -> Node {
+        Node {
+            value,
+            next: option::Option::None,
+            prev: option::Option::None,
+        }
+    }
+
+    pub fn to_string(&self) -> string {
+        "Node(value: ".to_string() + self.value.to_string() + ")".to_string()
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        io::println("Dropping Node with value: ".to_string() + self.value.to_string());
+    }
+}
+
+
+fn main() {
+    io::println("Starting Rc example...".to_string());
+
+    // 1. Temel Rc kullanımı
+    let rc_value = rc::Rc::new(123i32);
+    io::println("Initial strong count: ".to_string() + rc_value.strong_count().to_string()); // Çıktı: 1
+
+    let rc_clone1 = rc_value.clone();
+    io::println("After clone1 strong count: ".to_string() + rc_value.strong_count().to_string()); // Çıktı: 2
+
+    let rc_clone2 = rc_value.clone();
+    io::println("After clone2 strong count: ".to_string() + rc_value.strong_count().to_string()); // Çıktı: 3
+
+    // Deref trait'i sayesinde doğrudan erişim
+    io::println("Value: ".to_string() + (*rc_value).to_string()); // Çıktı: 123
+    io::println("Value through clone1: ".to_string() + (*rc_clone1).to_string()); // Çıktı: 123
+
+    // rc_clone1 kapsam dışına çıktığında veya drop edildiğinde strong_count azalır
+    drop(rc_clone1); // Manuel drop çağrısı
+    io::println("After dropping clone1 strong count: ".to_string() + rc_value.strong_count().to_string()); // Çıktı: 2
+
+    // rc_value ve rc_clone2 de düşürüldüğünde, 123 düşürülecek.
+    // main fonksiyonu sonunda düşürülecekler.
+
+
+    io::println("\n--- Weak Reference Example ---".to_string());
+
+    let strong_node = rc::Rc::new(Node::new(100));
+    io::println("Initial strong_node strong count: ".to_string() + strong_node.strong_count().to_string()); // Çıktı: 1
+
+    let weak_node = strong_node.downgrade();
+    io::println("After downgrade strong_node strong count: ".to_string() + strong_node.strong_count().to_string()); // Çıktı: 1
+    io::println("Weak_node weak count: ".to_string() + weak_node.weak_count().to_string()); // Çıktı: 1
+
+    // Weak referansı yükseltmeye çalış
+    let upgraded = weak_node.upgrade();
+    match upgraded {
+        option::Option::Some(n) => io::println("Upgraded weak_node: ".to_string() + n.to_string()), // Çıktı: Upgraded weak_node: Node(value: 100)
+        option::Option::None => io::println("Failed to upgrade weak_node.".to_string()),
+    }
+    io::println("After upgrade strong_node strong count: ".to_string() + strong_node.strong_count().to_string()); // Çıktı: 2 (çünkü upgrade yeni bir Rc oluşturdu)
+
+    drop(upgraded); // Yükseltilen Rc'yi düşür
+    io::println("After dropping upgraded Rc strong count: ".to_string() + strong_node.strong_count().to_string()); // Çıktı: 1
+
+    drop(strong_node); // Orijinal güçlü referansı düşür
+    io::println("After dropping strong_node strong count: ".to_string() + weak_node.strong_count().to_string()); // Çıktı: 0 (Değer düştü)
+
+    // Şimdi weak referansı yükseltmeye çalış, None almalıyız
+    let upgraded_after_drop = weak_node.upgrade();
+    match upgraded_after_drop {
+        option::Option::Some(n) => io::println("Upgraded weak_node (after strong drop): ".to_string() + n.to_string()),
+        option::Option::None => io::println("Failed to upgrade weak_node (expected after strong drop).".to_string()), // Çıktı: Failed to upgrade...
+    }
+
+
+    io::println("\n--- Circular Reference Example (with Weak) ---".to_string());
+
+    let mut node1 = rc::Rc::new(Node::new(1));
+    let mut node2 = rc::Rc::new(Node::new(2));
+
+    // node1 -> node2
+    // node2 -> node1 (prev ile zayıf)
+    unsafe {
+        // Node'un içindeki option alanlarına manuel erişim (varsayımsal)
+        // Eğer CNT'de struct alanlarına doğrudan erişim varsa
+        (*node1.ptr.as_ptr()).value.next = option::Option::Some(node2.clone());
+        (*node2.ptr.as_ptr()).value.prev = option::Option::Some(node1.downgrade());
+    }
+
+    io::println("Node1 strong count: ".to_string() + node1.strong_count().to_string()); // Çıktı: 2 (node2'deki next için)
+    io::println("Node2 strong count: ".to_string() + node2.strong_count().to_string()); // Çıktı: 1
+
+    io::println("Node1 weak count: ".to_string() + node1.weak_count().to_string()); // Çıktı: 1 (node2'deki prev için)
+    io::println("Node2 weak count: ".to_string() + node2.weak_count().to_string()); // Çıktı: 1
+
+    // node1 ve node2'yi düşürdüğümüzde dairesel referans kırılmalı
+    drop(node1);
+    drop(node2);
+    // Çıktı: Dropping Node with value: 1
+    // Çıktı: Dropping Node with value: 2
+    // Eğer Weak kullanılmasaydı, bu Node'lar asla düşürülmezdi ve bellek sızıntısı olurdu.
+
+
+    io::println("Rc example finished.".to_string());
+}
