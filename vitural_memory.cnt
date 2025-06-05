@@ -1,0 +1,243 @@
+// virtual_memory.cnt
+// Standard Virtual Memory Management Module
+// Provides functions for interacting with the operating system's virtual memory.
+
+import std::string;     // For error messages
+import std::collections; // For List<u8> and other potential data structures for info
+import std::alloc;      // Potentially integrates with the default allocator
+
+// Assume low-level external C functions that interact with OS-specific virtual memory APIs
+// (e.g., mmap, VirtualAlloc, mprotect, VirtualProtect, etc.)
+extern fn _cnt_vm_reserve_address_space(size: u64) -> _cnt_Result_u6t_virtual_memory_Error; // Returns base address or error
+extern fn _cnt_vm_commit_pages(address: u64, size: u64, protection: int) -> _cnt_Result_void_virtual_memory_Error;
+extern fn _cnt_vm_decommit_pages(address: u64, size: u64) -> _cnt_Result_void_virtual_memory_Error;
+extern fn _cnt_vm_release_address_space(address: u64, size: u64) -> _cnt_Result_void_virtual_memory_Error;
+extern fn _cnt_vm_set_protection(address: u64, size: u64, protection: int) -> _cnt_Result_void_virtual_memory_Error;
+extern fn _cnt_vm_query_info(address: u64) -> _cnt_Result_MemoryRegionInfo_virtual_memory_Error;
+extern fn _cnt_vm_map_file(file_path: &string, offset: u64, size: u64, protection: int) -> _cnt_Result_u64_virtual_memory_Error; // Returns mapped address
+extern fn _cnt_vm_unmap_file(address: u64, size: u64) -> _cnt_Result_void_virtual_memory_Error;
+
+
+/// `MemoryProtection` Enum: Defines the access permissions for a virtual memory region.
+/// These flags can often be combined using bitwise OR.
+pub enum MemoryProtection {
+    /// No access allowed. Any access will cause an access violation.
+    NoAccess = 0;
+    /// Read-only access.
+    ReadOnly = 1;
+    /// Read and write access.
+    ReadWrite = 2;
+    /// Read and execute access.
+    ReadExecute = 4;
+    /// Read, write, and execute access.
+    ReadWriteExecute = 8;
+    /// Copy-on-write access (e.g., for mapped files).
+    CopyOnWrite = 16;
+}
+
+/// `MemoryRegionInfo` Struct: Contains information about a virtual memory region.
+pub struct MemoryRegionInfo {
+    /// The base address of the region.
+    base_address: u64;
+    /// The size of the region in bytes.
+    region_size: u64;
+    /// The current protection settings for the region.
+    current_protection: MemoryProtection;
+    /// The initial protection settings for the region.
+    initial_protection: MemoryProtection;
+    /// True if the region is committed (backed by physical storage), false if reserved.
+    is_committed: bool;
+    /// True if the region is private to the process, false if shared (e.g., mapped file).
+    is_private: bool;
+    /// Additional OS-specific flags or type information (e.g., MEM_IMAGE, MEM_MAPPED).
+    // os_specific_flags: u64; // Can be added if needed for platform-specific details
+}
+
+/// `Error` Enum: Represents errors that can occur during virtual memory operations.
+pub enum Error {
+    /// Operating system call failed.
+    OsError(string);
+    /// Invalid address or size provided.
+    InvalidArgument(string);
+    /// Insufficient memory available.
+    OutOfMemory(string);
+    /// Attempted operation not supported by the OS or current state.
+    UnsupportedOperation(string);
+    /// Unknown or unhandled error.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum: Represents either a successful outcome (`Ok(T)`) or an error (`Err(E)`).
+/// Consistent with other std modules.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+// --- 1. Memory Allocation and Deallocation ---
+
+/// Reserves a region of virtual address space without immediately committing physical storage.
+/// This can be useful for allocating large, contiguous blocks of virtual memory that
+/// might not all be used, or will be committed in stages.
+///
+/// # Parameters
+/// - `size`: The size of the virtual address space to reserve, in bytes.
+///           This will typically be rounded up to the system's allocation granularity.
+///
+/// # Returns
+/// `Result::Ok(u64)` containing the base address of the reserved region on success,
+/// or `Result::Err(Error)` on failure.
+pub fn reserve_address_space(size: u64) -> Result<u64, Error> {
+    if size == 0 {
+        return Result::Err(Error::InvalidArgument("Size must be greater than 0".to_string()));
+    }
+    _cnt_vm_reserve_address_space(size)
+}
+
+/// Commits pages within a previously reserved virtual memory region, making them accessible
+/// and backed by physical storage.
+///
+/// # Parameters
+/// - `address`: The base address of the reserved region (or a sub-region within it).
+/// - `size`: The size of the region to commit, in bytes.
+/// - `protection`: The desired memory protection for the committed pages (e.g., `MemoryProtection::ReadWrite`).
+///
+/// # Returns
+/// `Result::Ok(())` on success, or `Result::Err(Error)` on failure.
+pub fn commit_pages(address: u64, size: u64, protection: MemoryProtection) -> Result<void, Error> {
+    if address == 0 || size == 0 {
+        return Result::Err(Error::InvalidArgument("Address and size must be valid".to_string()));
+    }
+    _cnt_vm_commit_pages(address, size, protection as int)
+}
+
+/// Decommits pages within a virtual memory region, releasing their physical storage
+/// but keeping the virtual address space reserved.
+///
+/// # Parameters
+/// - `address`: The base address of the region to decommit.
+/// - `size`: The size of the region to decommit, in bytes.
+///
+/// # Returns
+/// `Result::Ok(())` on success, or `Result::Err(Error)` on failure.
+pub fn decommit_pages(address: u64, size: u64) -> Result<void, Error> {
+    if address == 0 || size == 0 {
+        return Result::Err(Error::InvalidArgument("Address and size must be valid".to_string()));
+    }
+    _cnt_vm_decommit_pages(address, size)
+}
+
+/// Releases a reserved or committed region of virtual address space, making it available
+/// for other allocations.
+///
+/// # Parameters
+/// - `address`: The base address of the region to release. This must be the base address
+///              returned by `reserve_address_space` or `map_file`.
+/// - `size`: The size of the region to release. This must typically be the same size
+///           as originally reserved or mapped.
+///
+/// # Returns
+/// `Result::Ok(())` on success, or `Result::Err(Error)` on failure.
+pub fn release_address_space(address: u64, size: u64) -> Result<void, Error> {
+    if address == 0 || size == 0 {
+        return Result::Err(Error::InvalidArgument("Address and size must be valid".to_string()));
+    }
+    _cnt_vm_release_address_space(address, size)
+}
+
+
+// --- 2. Memory Protection ---
+
+/// Changes the access protection for a region of committed virtual memory.
+///
+/// # Parameters
+/// - `address`: The base address of the region to modify.
+/// - `size`: The size of the region to modify, in bytes.
+/// - `protection`: The new desired memory protection (e.g., `MemoryProtection::ReadOnly`).
+///
+/// # Returns
+/// `Result::Ok(())` on success, or `Result::Err(Error)` on failure.
+pub fn set_protection(address: u64, size: u64, protection: MemoryProtection) -> Result<void, Error> {
+    if address == 0 || size == 0 {
+        return Result::Err(Error::InvalidArgument("Address and size must be valid".to_string()));
+    }
+    _cnt_vm_set_protection(address, size, protection as int)
+}
+
+/// A convenience function to make a memory region read-only.
+pub fn make_read_only(address: u64, size: u64) -> Result<void, Error> {
+    set_protection(address, size, MemoryProtection::ReadOnly)
+}
+
+/// A convenience function to make a memory region read-write.
+pub fn make_read_write(address: u64, size: u64) -> Result<void, Error> {
+    set_protection(address, size, MemoryProtection::ReadWrite)
+}
+
+/// A convenience function to make a memory region executable.
+pub fn make_executable(address: u64, size: u64) -> Result<void, Error> {
+    set_protection(address, size, MemoryProtection::ReadExecute)
+}
+
+
+// --- 3. Memory Mapping (Memory-mapped Files) ---
+
+/// Maps a view of a file into the virtual address space of the calling process.
+/// This allows direct memory access to file contents, bypassing traditional file I/O.
+///
+/// # Parameters
+/// - `file_path`: The path to the file to map.
+/// - `offset`: The offset from the beginning of the file to start mapping.
+/// - `size`: The number of bytes to map from the file. If 0, maps the entire file.
+/// - `protection`: The desired memory protection for the mapped region.
+///
+/// # Returns
+/// `Result::Ok(u64)` containing the base address of the mapped region on success,
+/// or `Result::Err(Error)` on failure.
+pub fn map_file(file_path: &string, offset: u64, size: u64, protection: MemoryProtection) -> Result<u64, Error> {
+    if collections::len(file_path) == 0 {
+        return Result::Err(Error::InvalidArgument("File path cannot be empty".to_string()));
+    }
+    _cnt_vm_map_file(file_path, offset, size, protection as int)
+}
+
+/// Unmaps a previously mapped file view from the process's virtual address space.
+///
+/// # Parameters
+/// - `address`: The base address of the mapped region returned by `map_file`.
+/// - `size`: The size of the mapped region to unmap. This must be the same size
+///           as originally mapped.
+///
+/// # Returns
+/// `Result::Ok(())` on success, or `Result::Err(Error)` on failure.
+pub fn unmap_file(address: u64, size: u64) -> Result<void, Error> {
+    if address == 0 || size == 0 {
+        return Result::Err(Error::InvalidArgument("Address and size must be valid".to_string()));
+    }
+    _cnt_vm_unmap_file(address, size)
+}
+
+
+// --- 4. Querying Memory Information ---
+
+/// Retrieves information about a region of virtual memory starting at a specified address.
+///
+/// # Parameters
+/// - `address`: The address within the virtual memory region to query.
+///
+/// # Returns
+/// `Result::Ok(MemoryRegionInfo)` containing details about the memory region on success,
+/// or `Result::Err(Error)` on failure (e.g., invalid address).
+pub fn query_region_info(address: u64) -> Result<MemoryRegionInfo, Error> {
+    if address == 0 {
+        return Result::Err(Error::InvalidArgument("Address must be greater than 0".to_string()));
+    }
+    _cnt_vm_query_info(address)
+}
+
+// --- Platform-Specific Constants/Helpers (Internal or separate platform modules) ---
+
+// These might be provided by a lower-level `std::sys` or `std::platform` module.
+ pub fn get_page_size() -> u64;
+ pub fn get_allocation_granularity() -> u64;
