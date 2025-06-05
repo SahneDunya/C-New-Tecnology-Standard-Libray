@@ -1,0 +1,341 @@
+// coroutine.cnt
+// Standart Coroutine Modülü
+// Asenkron ve ertelemeli (lazy) hesaplamalar için temel yapı taşları.
+
+import std::ptr;        // İşaretçi manipülasyonları için
+import std::memory_resource; // Coroutine durumunu tahsis etmek için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::option;     // Opsiyonel değerler için
+
+// Not: Bu modülün çoğu işlevselliği derleyici tarafından dahili olarak sağlanır.
+// Burada tanımlanan tipler ve trait'ler, bu derleyici desteğini kullanıcılara açan API'lerdir.
+
+// --- 1. Coroutine Durumu ve Handle'lar ---
+
+/// `coroutine_handle<P>`: Duraklatılmış bir coroutine'in durum nesnesine işaretçi.
+/// Bir coroutine'i devam ettirmek, yok etmek veya promise_type'ına erişmek için kullanılır.
+///
+/// # Şablon Parametreleri
+/// - `P`: Bu handle'ın bağlı olduğu `promise_type`'ın tipi.
+pub struct coroutine_handle<P> {
+    // Dahili olarak, bu muhtemelen coroutine'in durum nesnesinin başlangıcına bir işaretçidir.
+    // Derleyici tarafından oluşturulur ve yönetilir.
+    // Örneğin: `ptr<void>`
+    __internal_ptr: ptr<void>;
+}
+
+impl<P> coroutine_handle<P> {
+    /// `from_promise(promise_ptr: ptr<P>)`: Bir promise nesnesinden coroutine handle'ı oluşturur.
+    /// Derleyici tarafından dahili olarak kullanılır.
+    pub fn from_promise(promise_ptr: ptr<P>) -> coroutine_handle<P> {
+        // Derleyici özel fonksiyonu varsayımı
+        coroutine_handle { __internal_ptr: __builtin_coroutine_handle_from_promise(promise_ptr) }
+    }
+
+    /// `promise()`: Bu handle'ın bağlı olduğu promise nesnesine referans döndürür.
+    pub fn promise(&self) -> &'mut P { // mutable referans çünkü promise state'i değişebilir
+        // Derleyici özel fonksiyonu varsayımı
+        __builtin_coroutine_handle_to_promise(self.__internal_ptr)
+    }
+
+    /// `resume()`: Coroutine'in yürütülmesini duraklatıldığı yerden devam ettirir.
+    /// Coroutine tamamlandıysa veya halihazırda çalışıyorsa tanımsız davranıştır.
+    pub fn resume(&self) {
+        // Coroutine'in duraklatılmış durumunu kontrol etmek önemlidir.
+        // Genellikle `done()` metodu ile birlikte kullanılır.
+        // Derleyici özel fonksiyonu varsayımı
+        __builtin_coroutine_resume(self.__internal_ptr);
+    }
+
+    /// `destroy()`: Coroutine'in durum nesnesini yok eder ve ilişkili belleği serbest bırakır.
+    /// Coroutine'i devam ettirmeden önce veya sonra çağrılabilir.
+    pub fn destroy(&self) {
+        // Derleyici özel fonksiyonu varsayımı
+        __builtin_coroutine_destroy(self.__internal_ptr);
+    }
+
+    /// `done()`: Coroutine'in tamamlanıp tamamlanmadığını kontrol eder.
+    /// Eğer coroutine `co_return` yapmışsa `true` döndürür.
+    pub fn done(&self) -> bool {
+        // Derleyici özel fonksiyonu varsayımı
+        __builtin_coroutine_done(self.__internal_ptr)
+    }
+
+    /// `is_null()`: Handle'ın geçerli bir coroutine'i temsil edip etmediğini kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.__internal_ptr.is_null()
+    }
+
+    /// `null()`: Boş (null) bir coroutine handle'ı döndürür.
+    pub fn null() -> coroutine_handle<P> {
+        coroutine_handle { __internal_ptr: std::ptr::null() }
+    }
+}
+
+// --- 2. `promise_type` Trait'i ---
+// Her coroutine'in kendi promise_type'ı olmalıdır.
+// Bu trait, coroutine'in yaşam döngüsü hook'larını ve değer üretimini tanımlar.
+// C++'daki `std::coroutine_traits<ReturnType, Args...>::promise_type` ile benzerdir.
+
+/// `promise_type` Trait'i: Bir coroutine'in yaşam döngüsünü ve davranışını tanımlar.
+/// Coroutine'in dönüş tipi (`ReturnT`) ile ilişkilidir.
+///
+/// # Şablon Parametreleri
+/// - `ReturnT`: Coroutine'in co_return ile döndüreceği tip.
+pub trait promise_type<ReturnT> {
+    /// `get_return_object()`: Coroutine'in başlatılmasından hemen önce çağrılır.
+    /// Coroutine'i çağıranın alacağı "return object" (örn. `Task<T>`, `Generator<T>`) oluşturur.
+    fn get_return_object(&mut self) -> ReturnT;
+
+    /// `initial_suspend()`: Coroutine'in gövdesi çalıştırılmadan önce çağrılır.
+    /// Coroutine'in hemen duraklayıp duraklamayacağını belirler.
+    ///
+    /// # Dönüş Değeri
+    /// `suspend_always` veya `suspend_never`.
+    fn initial_suspend(&mut self) -> suspend_always; // Varsayılan olarak her zaman duraklat
+
+    /// `final_suspend()`: Coroutine `co_return` ile tamamlandıktan veya bir istisna fırlattıktan sonra çağrılır.
+    /// Coroutine'in tamamlandıktan sonra duraklayıp duraklamayacağını belirler.
+    ///
+    /// # Dönüş Değeri
+    /// `suspend_always` veya `suspend_never`.
+    fn final_suspend(&mut self) -> suspend_always; // Varsayılan olarak her zaman duraklat
+
+    /// `unhandled_exception()`: Coroutine içinde bir istisna fırlatıldığında çağrılır.
+    /// Hata durumunda ne yapılacağını tanımlar.
+    fn unhandled_exception(&mut self);
+
+    /// `return_value(value: ReturnT)`: Coroutine `co_return value` ile tamamlandığında çağrılır.
+    /// Döndürülen değeri promise'in içinde saklamak için kullanılır.
+    fn return_value(&mut self, value: ReturnT);
+
+    // Not: `co_yield` için `yield_value` metodu, generator coroutine'leri için eklenir.
+    // Bu, `GeneratorPromiseType` gibi ayrı bir promise_type veya trait'te ele alınabilir.
+}
+
+// --- 3. Awaitable Türleri ve Awaiter Trait'i ---
+// `co_await` ile beklenebilen nesneleri tanımlar.
+// C++'daki `operator co_await` ve `await_ready`, `await_suspend`, `await_resume` ile benzer.
+
+/// `await_ready()`: awaitable nesne hemen hazır mı? (duraklamaya gerek yok mu?)
+///
+/// # Dönüş Değeri
+/// `bool`: Eğer `true` ise `await_suspend` atlanır ve `await_resume` hemen çağrılır.
+/// Eğer `false` ise coroutine duraklatılır ve `await_suspend` çağrılır.
+pub trait awaitable {
+    fn await_ready(&self) -> bool;
+
+    /// `await_suspend(handle: coroutine_handle<P>)`: Coroutine duraklatıldığında çağrılır.
+    /// Genellikle asenkron işlemi başlatır ve coroutine'i devam ettirmek için bir mekanizma ayarlar.
+    ///
+    /// # Dönüş Değeri
+    /// `void`: Coroutine'in durakladığını ve daha sonra devam ettirileceğini belirtir.
+    /// (Rust'taki Future'ların `Poll::Pending` benzeri)
+    fn await_suspend(&self, handle: coroutine_handle<Self::PromiseType>); // PromiseType'ı awaitable'dan almalı
+
+    /// `await_resume()`: Coroutine devam ettirildiğinde çağrılır.
+    /// Asenkron işlemin sonucunu döndürür.
+    ///
+    /// # Dönüş Değeri
+    /// `Self::ResultType`: Beklenen operasyonun sonucu.
+    fn await_resume(&self) -> Self::ResultType;
+
+    // Associated types for clearer definition
+    type PromiseType; // `promise_type`'ı belirtmek için
+    type ResultType;  // `await_resume`'dan dönecek tipi belirtmek için
+}
+
+// `suspend_always`: Her zaman duraklatan bir awaitable.
+pub struct suspend_always;
+
+impl awaitable for suspend_always {
+    fn await_ready(&self) -> bool { false } // Her zaman durakla
+    fn await_suspend(&self, handle: coroutine_handle<Self::PromiseType>) {
+        // Hiçbir şey yapma, sadece coroutine'in duraklamasına izin ver.
+        // Bu boş bir body olsa da, derleyici bunu özel olarak işler.
+        // handle.resume() burada çağrılmaz, başka bir yerde çağrılır.
+    }
+    fn await_resume(&self) -> Self::ResultType { /* return void/unit */ }
+
+    type PromiseType = /* Generic P for any promise_type */; // Bu biraz karmaşık, derleyici çözer.
+    type ResultType = (); // `void` veya `unit` (işlem yok)
+}
+
+// `suspend_never`: Asla duraklamayan bir awaitable.
+pub struct suspend_never;
+
+impl awaitable for suspend_never {
+    fn await_ready(&self) -> bool { true } // Asla duraklama, hemen devam et
+    fn await_suspend(&self, handle: coroutine_handle<Self::PromiseType>) {
+        // Bu metot çağrılmaz çünkü `await_ready` true döner.
+        // assert!(false, "suspend_never::await_suspend should not be called.");
+    }
+    fn await_resume(&self) -> Self::ResultType { /* return void/unit */ }
+
+    type PromiseType = /* Generic P for any promise_type */;
+    type ResultType = ();
+}
+
+// --- 4. Basit Bir `Task` (Coroutine Return Object) Örneği ---
+// Coroutine'in döndüreceği nesne. Bu nesne coroutine'i yönetir.
+// C++'daki `std::future` veya Rust'taki `std::pin::Pin<Box<dyn Future>>`'a benzer.
+
+/// `Task<T>`: Bir coroutine'in sonucunu temsil eden asenkron görev.
+/// Sonuç hazır olana kadar beklenebilir.
+pub struct Task<T> {
+    handle: coroutine_handle<TaskPromise<T>>;
+    // Task'ın durumunu veya sonucunu tutmak için ek alanlar olabilir.
+    // Option<T> result;
+}
+
+/// `TaskPromise<T>`: `Task<T>` coroutine'leri için promise_type implementasyonu.
+pub struct TaskPromise<T> {
+    // Coroutine sonucunu saklamak için alan.
+    result: std::option::Option<T>;
+    exception: std::option::Option<string>; // Basit hata mesajı
+}
+
+impl<T> promise_type<Task<T>> for TaskPromise<T> {
+    fn get_return_object(&mut self) -> Task<T> {
+        // Coroutine'in handle'ını oluşturmak için bir yol olmalı.
+        // Bu, `coroutine_handle<TaskPromise<T>>::from_promise(self)` gibi olabilir.
+        // Ancak bu, `this` işaretçisinin nasıl alındığına bağlı.
+        // Derleyici tarafından dahili olarak sağlanan bir mekanizma beklenir.
+        // Pseudo-kod: `let handle = __builtin_current_coroutine_handle();`
+        Task { handle: __builtin_current_coroutine_handle() }
+    }
+
+    fn initial_suspend(&mut self) -> suspend_always {
+        // `Task`lar genellikle hemen duraklatılır ve daha sonra bir executor tarafından devam ettirilir.
+        suspend_always {}
+    }
+
+    fn final_suspend(&mut self) -> suspend_always {
+        // `Task` tamamlandığında duraklatılır ve sonucu alınabilir hale gelir.
+        suspend_always {}
+    }
+
+    fn unhandled_exception(&mut self) {
+        // Hata durumunu kaydet
+        self.exception = std::option::Option::Some("Coroutine threw an unhandled exception.".to_string());
+        // Daha karmaşık hata işleme burada yapılabilir.
+    }
+
+    fn return_value(&mut self, value: T) {
+        self.result = std::option::Option::Some(value);
+    }
+}
+
+impl<T> Task<T> {
+    /// `await_ready()`: Görev hemen hazır mı?
+    pub fn await_ready(&self) -> bool {
+        self.handle.done() // Coroutine bittiyse hazırız demektir.
+    }
+
+    /// `await_suspend()`: Görev duraklatıldığında çağrılır.
+    /// Bir executor'a handle'ı kaydedebilir veya işlemi başlatabilir.
+    pub fn await_suspend(&self, waiting_handle: coroutine_handle<Self::PromiseType>) {
+        // Bu kısım bir asenkron çalışma zamanı/executor kütüphanesi ile etkileşim kurar.
+        // Örneğin: `executor.schedule(waiting_handle);`
+        // Bu örnek için basit bir dummy implementasyon.
+        println("Task::await_suspend called. Coroutine suspended.".to_string());
+    }
+
+    /// `await_resume()`: Görev devam ettirildiğinde çağrılır.
+    /// Görevin sonucunu döndürür.
+    pub fn await_resume(&self) -> T {
+        // Coroutine tamamlanmış olmalı.
+        assert!(self.handle.done(), "Task must be done before await_resume.");
+        // Sonucu promise'den al
+        let promise = self.handle.promise();
+        if promise.exception.is_some() {
+            std::assert::panic("Task completed with exception: ".to_string() + promise.exception.unwrap());
+        }
+        promise.result.unwrap() // Sonucu al ve panikleme
+    }
+}
+
+// --- Coroutine Helper Makroları / Keyword'ler ---
+// `co_await`, `co_yield`, `co_return` CNT'de anahtar kelimeler olmalıdır.
+
+// --- Örnek Kullanım (Pseudo-kod) ---
+
+// Bu kod, CNT'nin coroutine özelliklerini desteklediği varsayılarak çalışır.
+/*
+// Basit bir asenkron fonksiyon
+fn async_add(a: i64, b: i64) -> Task<i64> {
+    // co_await ile asenkron bir gecikme bekleniyor
+    co_await SomeAsyncDelay::new(100); // Varsayımsal asenkron gecikme
+    co_return a + b;
+}
+
+// Bir coroutine'i çalıştıran ana fonksiyon
+fn main() {
+    println("Starting Coroutine example...".to_string());
+
+    // Bir task oluştur
+    let my_task = async_add(5, 7);
+
+    // Coroutine'i çalıştırmak için bir executor'a ihtiyacımız var.
+    // Bu, CNT'nin standart kütüphanesinin dışında, async/await runtime'ı tarafından sağlanır.
+    // Simplistic executor (asenkron runtime) for demonstration:
+    // This part requires a separate runtime to poll/resume coroutines.
+    // For this example, we'll manually resume until done, which is blocking and not truly async.
+
+    println("Task created. Manually resuming...".to_string());
+    while !my_task.handle.done() {
+        my_task.handle.resume(); // Coroutine'i devam ettir
+        // Normalde burada başka bir iş yapılabilir veya event loop'a dönülebilir.
+    }
+    
+    let result = my_task.await_resume(); // Sonucu al
+    println("Result of async_add: ".to_string() + result.to_string()); // 12
+
+    // Coroutine handle'ı yok et
+    my_task.handle.destroy();
+    println("Coroutine handle destroyed.".to_string());
+
+
+    // Generator coroutine (co_yield kullanan)
+    // Bu, `Generator<T>` gibi farklı bir `ReturnT` ve `promise_type` gerektirir.
+    
+    pub struct Generator<T> {
+        handle: coroutine_handle<GeneratorPromise<T>>;
+    }
+
+    pub struct GeneratorPromise<T> {
+        value: std::option::Option<T>;
+        // ... (diğer promise_type metotları)
+        fn yield_value(&mut self, value: T) -> suspend_always { // co_yield için
+            self.value = std::option::Some(value);
+            suspend_always {}
+        }
+    }
+
+    impl<T> Generator<T> {
+        // ... (iterator arayüzü, next() metodu gibi)
+        fn next(&self) -> Option<T> {
+            if self.handle.done() { return Option::None; }
+            self.handle.resume(); // Yield'den sonra devam etmesini sağla
+            let promise = self.handle.promise();
+            promise.value.take() // Değeri al ve sıfırla
+        }
+    }
+
+    fn count_up_to(limit: i64) -> Generator<i64> {
+        for i in 0..limit {
+            co_yield i;
+        }
+        co_return; // Veya co_return unit
+    }
+
+    let counter = count_up_to(3);
+    println("\nCounting up to 3:".to_string());
+    while let Some(n) = counter.next() {
+        println("Yielded: ".to_string() + n.to_string());
+    }
+    counter.handle.destroy();
+    
+
+    println("Coroutine example finished.".to_string());
+}
