@@ -1,0 +1,257 @@
+// optional.cnt
+// Standart Optional Modülü
+// Bir değerin var olabileceği veya var olmayabileceği durumları tip-güvenli bir şekilde temsil eder.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::alloc;      // Eğer değer dinamik olarak depolanacaksa veya özel bir tahsisçi gerekirse
+
+/// `Error` Enum'u: Optional işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Optional nesnesinde değer yokken erişim hatası.
+    BadOptionalAccess(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// Not: Optional<T> genellikle T'nin kendisi kadar + 1 boolean (veya bayrak) kadar yer kaplar.
+// Bu, union'lar veya özel bir bellek düzeni gerektirebilir.
+// Basitlik adına, burada bir bayrak ve T tipinde bir alan kullanacağız,
+// ancak T'nin default constructible olması veya copy/move semantics'in doğru ele alınması gerekir.
+// CNT'de union veya `MaybeUninit` benzeri bir yapı varsa, daha verimli bir implementasyon yapılabilir.
+
+/// `Optional<T>` Struct'ı: Bir `T` tipindeki değeri kapsar veya değerin olmadığını belirtir.
+///
+/// # Tip Parametreleri
+/// - `T`: Kapsanacak değerin tipi.
+pub struct Optional<T> {
+    // Bu bayrak, bir değerin var olup olmadığını belirtir.
+    has_value: bool;
+    // Değerin depolandığı alan.
+    // Eğer T, varsayılan bir kurucuya sahip değilse veya büyükse, burası
+    // 'raw_ptr<T>' ve dinamik tahsis veya 'union' daha iyi olabilir.
+    // Şimdilik T'nin basit bir değer tipi olduğunu varsayıyoruz.
+    value: T; // Eğer has_value false ise bu alanın içeriği tanımsızdır.
+}
+
+// --- 1. Optional Nesnesi Oluşturma ---
+
+/// Boş (değer içermeyen) bir `Optional` nesnesi oluşturur.
+///
+/// # Tip Parametreleri
+/// - `T`: Optional'ın kapsayacağı tip.
+///
+/// # Dönüş Değeri
+/// `Optional<T>`: Boş bir Optional nesnesi.
+pub fn none<T>() -> Optional<T> {
+    // Not: 'value' alanı burada varsayılan bir değerle başlatılmalıdır
+    // veya CNT'nin `MaybeUninit` gibi bir mekanizması kullanılmalıdır.
+    // Şu anki taslakta, T'nin varsayılan bir kurucusunun olduğu varsayılıyor.
+    Optional {
+        has_value: false,
+        value: T::default(), // Varsayılan kurucu çağrısı varsayılmıştır.
+    }
+}
+
+/// Bir değeri kapsayan `Optional` nesnesi oluşturur.
+///
+/// # Parametreler
+/// - `val`: Kapsanacak değer.
+///
+/// # Tip Parametreleri
+/// - `T`: Optional'ın kapsayacağı tip.
+///
+/// # Dönüş Değeri
+/// `Optional<T>`: Verilen değeri kapsayan bir Optional nesnesi.
+pub fn some<T>(val: T) -> Optional<T> {
+    Optional {
+        has_value: true,
+        value: val,
+    }
+}
+
+// --- 2. Optional Nesnesini Sorgulama ---
+
+/// Optional nesnesinin bir değer içerip içermediğini kontrol eder.
+///
+/// # Parametreler
+/// - `opt`: Kontrol edilecek Optional nesnesi.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer bir değer içeriyorsa, `false` değilse.
+pub fn has_value<T>(opt: &Optional<T>) -> bool {
+    opt.has_value
+}
+
+/// Optional nesnesinin boş olup olmadığını kontrol eder.
+///
+/// # Parametreler
+/// - `opt`: Kontrol edilecek Optional nesnesi.
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer boş ise, `false` değilse.
+pub fn is_none<T>(opt: &Optional<T>) -> bool {
+    !opt.has_value
+}
+
+// --- 3. Optional Nesnesindeki Değere Erişim ---
+
+/// Optional nesnesindeki değeri döndürür. Eğer değer yoksa hata (`BadOptionalAccess`) verir.
+///
+/// # Parametreler
+/// - `opt`: Değerine erişilecek Optional nesnesi.
+///
+/// # Dönüş Değeri
+/// `Result<&T, Error>`: Değerin referansı (`Ok(&value)`) veya hata.
+pub fn value<T>(opt: &Optional<T>) -> Result<&T, Error> {
+    if opt.has_value {
+        Result::Ok(&opt.value)
+    } else {
+        Result::Err(Error::BadOptionalAccess("Attempted to access value from an empty Optional".to_string()))
+    }
+}
+
+/// Optional nesnesindeki değeri döndürür veya eğer değer yoksa varsayılan bir değer döndürür.
+///
+/// # Parametreler
+/// - `opt`: Değerine erişilecek Optional nesnesi.
+/// - `default_val`: Optional boşsa döndürülecek varsayılan değer.
+///
+/// # Dönüş Değeri
+/// `T`: Optional'ın değeri veya varsayılan değer.
+pub fn value_or<T>(opt: &Optional<T>, default_val: T) -> T {
+    if opt.has_value {
+        // Değerin kopyalanması gerekiyorsa burada `*opt.value` olmalıydı,
+        // ancak struct içinde doğrudan erişim için böyle yazdık.
+        // Eğer `value` bir referans olsaydı `*opt.value` ya da `opt.value.clone()`
+        // gibi işlemler gerekecekti.
+        opt.value // Doğrudan değer döndürüldü (muhtemelen kopyalama ile)
+    } else {
+        default_val
+    }
+}
+
+// --- 4. Optional Nesnesine Yazma ve Temizleme ---
+
+/// Optional nesnesine yeni bir değer atar.
+///
+/// # Parametreler
+/// - `opt`: Değerin atanacağı Optional nesnesi (mutable).
+/// - `val`: Atanacak yeni değer.
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn assign<T>(opt: &mut Optional<T>, val: T) -> void {
+    opt.value = val;
+    opt.has_value = true;
+}
+
+/// Optional nesnesindeki değeri temizler, böylece boş hale gelir.
+///
+/// # Parametreler
+/// - `opt`: Temizlenecek Optional nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `void`
+pub fn reset<T>(opt: &mut Optional<T>) -> void {
+    opt.has_value = false;
+    // Eğer T'nin yıkıcısı (destructor) varsa burada çağrılmalıdır.
+    // Varsayılan olarak T::default() ile "temizledik".
+    opt.value = T::default(); // Değeri varsayılana sıfırla (eğer mümkünse)
+}
+
+// --- 5. İlişkisel Operatörler (Opsiyonel) ---
+
+// Optional'lar arasında karşılaştırma, içerdiği değerlerin karşılaştırılmasına dayanır.
+
+/// İki Optional nesnesinin eşit olup olmadığını kontrol eder.
+/// Hem varlık durumlarını hem de değerlerini karşılaştırır.
+///
+/// # Parametreler
+/// - `lhs`: Sol Optional.
+/// - `rhs`: Sağ Optional.
+///
+/// # Tip Parametreleri
+/// - `T`: Karşılaştırılabilir tip (`==` operatörü tanımlı olmalı).
+///
+/// # Dönüş Değeri
+/// `bool`: `true` eğer eşitlerse, `false` değilse.
+pub fn equals<T>(lhs: &Optional<T>, rhs: &Optional<T>) -> bool {
+    if lhs.has_value != rhs.has_value {
+        return false; // Biri dolu, diğeri boşsa eşit değiller.
+    }
+    if !lhs.has_value {
+        return true; // İkisi de boşsa eşitler.
+    }
+    // İkisi de doluysa, değerlerini karşılaştır.
+    lhs.value == rhs.value
+}
+
+// Daha fazla karşılaştırma operatörü: less_than, greater_than vb.
+ pub fn less_than<T>(lhs: &Optional<T>, rhs: &Optional<T>) -> bool { ... }
+
+// --- 6. Monadik Operasyonlar (Map, AndThen - Gelişmiş) ---
+// Bu operasyonlar, Optional'ı bir konteyner gibi ele alarak fonksiyonel programlama tarzı zincirleme sağlar.
+
+/// Optional'ın içindeki değeri (eğer varsa) bir fonksiyondan geçirir ve yeni bir Optional döndürür.
+/// Eğer Optional boşsa, boş bir Optional döndürür.
+///
+/// # Parametreler
+/// - `opt`: Üzerinde işlem yapılacak Optional nesnesi.
+/// - `f`: Optional'ın içindeki değeri alıp yeni bir değer döndüren fonksiyon (closure/lambda).
+///
+/// # Tip Parametreleri
+/// - `T`: Orijinal Optional'ın değeri tipi.
+/// - `U`: Fonksiyonun döndürdüğü yeni değer tipi.
+/// - `F`: Dönüşüm fonksiyonunun tipi.
+///
+/// # Dönüş Değeri
+/// `Optional<U>`: Yeni bir Optional nesnesi.
+///
+/// **NOT**: `f` bir closure/lambda olabilir ve CNT'nin fonksiyonel programlama desteğine bağlıdır.
+
+pub fn map<T, U, F>(opt: &Optional<T>, f: &F) -> Optional<U>
+where F: Fn(&T) -> U { // `Fn` trait'i veya benzeri varsayılmıştır.
+    if opt.has_value {
+        some(f(&opt.value))
+    } else {
+        none()
+    }
+}
+
+
+/// Optional'ın içindeki değeri (eğer varsa) bir fonksiyondan geçirir.
+/// Bu fonksiyonun da bir Optional döndürmesi beklenir.
+/// `and_then` (flatMap) zincirleme işlemler için kullanılır.
+///
+/// # Parametreler
+/// - `opt`: Üzerinde işlem yapılacak Optional nesnesi.
+/// - `f`: Optional'ın içindeki değeri alıp bir `Optional<U>` döndüren fonksiyon.
+///
+/// # Tip Parametreleri
+/// - `T`: Orijinal Optional'ın değeri tipi.
+/// - `U`: Fonksiyonun döndürdüğü Optional'ın değeri tipi.
+/// - `F`: Dönüşüm fonksiyonunun tipi.
+///
+/// # Dönüş Değeri
+/// `Optional<U>`: Yeni bir Optional nesnesi.
+
+pub fn and_then<T, U, F>(opt: &Optional<T>, f: &F) -> Optional<U>
+where F: Fn(&T) -> Optional<U> {
+    if opt.has_value {
+        f(&opt.value)
+    } else {
+        none()
+    }
+}
+
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// `T::default()`: T tipinin varsayılan bir kurucusuna sahip olduğu varsayılmıştır.
+// Eğer T'nin varsayılan bir kurucusu yoksa veya karmaşık tipler için `MaybeUninit` benzeri bir yaklaşım gereklidir.
