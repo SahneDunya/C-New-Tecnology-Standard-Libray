@@ -1,0 +1,193 @@
+// condition_variable.cnt
+// Standart Koşul Değişkeni Modülü
+// İş parçacıklarının belirli bir koşul doğru olana kadar beklemesini ve uyarılmasını sağlar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+import std::mutex;      // Mutex ile birlikte kullanılır
+import std::chrono;     // Süreli bekleme fonksiyonları için
+import std::alloc;      // Eğer koşul değişkeni nesnesi dinamik tahsis gerektiriyorsa
+
+// Not: Bu modülün implementasyonu, CNT'nin işletim sistemi senkronizasyon API'lerine
+// (pthreads condition variables, Windows condition variables) FFI veya runtime desteğine bağlıdır.
+// Burada, bu tür alt seviye fonksiyonların 'os::cond_var_init', 'os::cond_var_wait' vb.
+// adlandırmalarla var olduğu varsayılacaktır.
+
+/// `Error` Enum'u: Koşul değişkeni işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Koşul değişkeni başlatma başarısız oldu.
+    CondVarInitError(string);
+    /// Koşul değişkeni bekleme başarısız oldu.
+    CondVarWaitError(string);
+    /// Koşul değişkeni uyarma başarısız oldu.
+    CondVarNotifyError(string);
+    /// Geçersiz koşul değişkeni durumu.
+    InvalidCondVarState(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- Dahili OS API Wrapparları (CNT Runtime/Compiler Tarafından Sağlanmalı) ---
+// Bu fonksiyonlar, altta yatan OS API'lerini çağıran CNT'nin runtime'ına veya FFI'sına aittir.
+
+// İşletim sistemi seviyesi koşul değişkeni handle'ı (örneğin, pthread_cond_t* veya CONDITION_VARIABLE*)
+pub type OsCondVarHandle = raw_ptr<void>;
+
+ pub fn os_cond_var_init() -> Result<OsCondVarHandle, string>;
+ pub fn os_cond_var_destroy(handle: OsCondVarHandle) -> Result<void, string>;
+ pub fn os_cond_var_wait(handle: OsCondVarHandle, mutex_handle: raw_ptr<void>) -> Result<void, string>;
+ pub fn os_cond_var_timed_wait(handle: OsCondVarHandle, mutex_handle: raw_ptr<void>, timeout_nanos: u64) -> Result<bool, string>; // true: signalled, false: timeout
+ pub fn os_cond_var_notify_one(handle: OsCondVarHandle) -> Result<void, string>;
+ pub fn os_cond_var_notify_all(handle: OsCondVarHandle) -> Result<void, string>;
+
+
+// --- 1. ConditionVariable Yapısı ---
+
+/// `ConditionVariable` Struct'ı: İş parçacıklarının koşullara göre beklemesini ve uyarılmasını sağlayan bir senkronizasyon nesnesi.
+pub struct ConditionVariable {
+    // İşletim sistemi seviyesi koşul değişkeni için dahili handle.
+    os_handle: OsCondVarHandle;
+    // Koşul değişkeninin zaten başlatılıp başlatılmadığını kontrol etmek için bayrak.
+    is_initialized: bool;
+}
+
+/// Yeni bir `ConditionVariable` nesnesi oluşturur ve başlatır.
+///
+/// # Dönüş Değeri
+/// `Result<ConditionVariable, Error>`: Başlatılan `ConditionVariable` nesnesi veya hata.
+pub fn new_condition_variable() -> Result<ConditionVariable, Error> {
+    match os_cond_var_init() {
+        Result::Ok(handle) => Result::Ok(ConditionVariable {
+            os_handle: handle,
+            is_initialized: true,
+        }),
+        Result::Err(msg) => Result::Err(Error::CondVarInitError("Failed to initialize condition variable: ".to_string() + msg)),
+    }
+}
+
+/// `destroy_condition_variable`: Bir `ConditionVariable` nesnesinin kaynaklarını serbest bırakır.
+/// Bu fonksiyon, `ConditionVariable` nesnesi kapsam dışına çıktığında veya artık kullanılmadığında
+/// otomatik olarak çağrılmalıdır (eğer CNT'de yıkıcılar varsa).
+///
+/// # Parametreler
+/// - `cv`: Yok edilecek koşul değişkeni nesnesi (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn destroy_condition_variable(mut cv: ConditionVariable) -> Result<void, Error> {
+    if !cv.is_initialized {
+        return Result::Err(Error::InvalidCondVarState("Attempted to destroy uninitialized condition variable.".to_string()));
+    }
+    match os_cond_var_destroy(cv.os_handle) {
+        Result::Ok(_) => {
+            cv.is_initialized = false;
+            cv.os_handle = null_ptr::<void>();
+            Result::Ok(())
+        },
+        Result::Err(msg) => Result::Err(Error::Other("Failed to destroy condition variable: ".to_string() + msg)),
+    }
+}
+
+// --- 2. Bekleme Fonksiyonları ---
+
+/// `wait()`: Mutex kilidini atomik olarak serbest bırakır ve mevcut iş parçacığını koşul değişkeni üzerinde uyandırılana kadar beklemeye alır.
+///
+/// # Parametreler
+/// - `cv`: Bekleyecek koşul değişkeni (mutable).
+/// - `lk`: Mutex'in kilit koruyucusu (`LockGuard`). Bu, mutex'in atomik olarak serbest bırakılmasını sağlar.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn wait(cv: &mut ConditionVariable, lk: &mut mutex::LockGuard) -> Result<void, Error> {
+    if !cv.is_initialized {
+        return Result::Err(Error::InvalidCondVarState("Attempted to wait on uninitialized condition variable.".to_string()));
+    }
+    // `lk.mutex.os_handle`'a erişim, LockGuard'ın mutex'inin public olması veya özel bir erişim fonksiyonu olması gerekir.
+    // Varsayımsal olarak, `lk.get_mutex_handle()` gibi bir şey.
+    match os_cond_var_wait(cv.os_handle, lk.get_underlying_mutex_handle()) { // `get_underlying_mutex_handle` varsayılmıştır.
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::CondVarWaitError("Failed to wait on condition variable: ".to_string() + msg)),
+    }
+}
+
+/// `wait_for()`: Mutex kilidini atomik olarak serbest bırakır ve mevcut iş parçacığını belirli bir süre veya koşul karşılanana kadar beklemeye alır.
+/// Süre dolarsa veya koşul karşılanırsa geri döner.
+///
+/// # Parametreler
+/// - `cv`: Bekleyecek koşul değişkeni (mutable).
+/// - `lk`: Mutex'in kilit koruyucusu (`LockGuard`).
+/// - `timeout_nanos`: Maksimum bekleme süresi (nanosaniye cinsinden).
+///
+/// # Dönüş Değeri
+/// `Result<bool, Error>`: Başarılı olursa `Ok(true)` (uyarıldı) veya `Ok(false)` (zaman aşımı),
+/// hata olursa `Err`.
+pub fn wait_for_nanos(cv: &mut ConditionVariable, lk: &mut mutex::LockGuard, timeout_nanos: u64) -> Result<bool, Error> {
+    if !cv.is_initialized {
+        return Result::Err(Error::InvalidCondVarState("Attempted to wait_for on uninitialized condition variable.".to_string()));
+    }
+    match os_cond_var_timed_wait(cv.os_handle, lk.get_underlying_mutex_handle(), timeout_nanos) {
+        Result::Ok(signalled) => Result::Ok(signalled),
+        Result::Err(msg) => Result::Err(Error::CondVarWaitError("Failed to wait_for on condition variable: ".to_string() + msg)),
+    }
+}
+
+// `wait_until` veya generic `wait_for` (chrono duration ile) de eklenebilir.
+
+pub fn wait_for<D>(cv: &mut ConditionVariable, lk: &mut mutex::LockGuard, duration: D) -> Result<bool, Error>
+where D: chrono::DurationTrait {
+    wait_for_nanos(cv, lk, duration.to_nanos())
+}
+
+
+// --- 3. Uyarma Fonksiyonları ---
+
+/// `notify_one()`: Koşul değişkeni üzerinde bekleyen iş parçacıklarından birini uyandırır.
+///
+/// # Parametreler
+/// - `cv`: Uyarma yapılacak koşul değişkeni (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn notify_one(cv: &mut ConditionVariable) -> Result<void, Error> {
+    if !cv.is_initialized {
+        return Result::Err(Error::InvalidCondVarState("Attempted to notify_one on uninitialized condition variable.".to_string()));
+    }
+    match os_cond_var_notify_one(cv.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::CondVarNotifyError("Failed to notify_one on condition variable: ".to_string() + msg)),
+    }
+}
+
+/// `notify_all()`: Koşul değişkeni üzerinde bekleyen tüm iş parçacıklarını uyandırır.
+///
+/// # Parametreler
+/// - `cv`: Uyarma yapılacak koşul değişkeni (mutable).
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn notify_all(cv: &mut ConditionVariable) -> Result<void, Error> {
+    if !cv.is_initialized {
+        return Result::Err(Error::InvalidCondVarState("Attempted to notify_all on uninitialized condition variable.".to_string()));
+    }
+    match os_cond_var_notify_all(cv.os_handle) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(msg) => Result::Err(Error::CondVarNotifyError("Failed to notify_all on condition variable: ".to_string() + msg)),
+    }
+}
+
+// --- Dahili Yardımcı Fonksiyonlar (Tekrar eden not) ---
+// `os_cond_var_init`, `os_cond_var_destroy`, `os_cond_var_wait`, `os_cond_var_timed_wait`,
+// `os_cond_var_notify_one`, `os_cond_var_notify_all`:
+// Bu fonksiyonlar, işletim sisteminin alt seviye koşul değişkeni API'leriyle etkileşimi simgeler.
+// CNT runtime veya FFI aracılığıyla sağlanmalıdır.
+
+// `mutex::LockGuard`'ın içindeki mutex handle'ına erişim için varsayımsal fonksiyon.
+// Bu, `mutex.cnt` dosyasında `LockGuard`'a eklenmesi gereken bir yöntemdir.
+// Örneğin: `pub fn get_underlying_mutex_handle(&self) -> raw_ptr<void> { self.mutex.os_handle }`
+// Veya `LockGuard`'ın `mutex` alanını `public` yapmak.
