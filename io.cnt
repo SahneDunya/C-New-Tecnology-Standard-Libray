@@ -1,50 +1,63 @@
-// std/io.cnt
-// Standard library I/O module
-// This file declares the public interface for input/output operations.
-// The actual implementation is provided elsewhere (e.g., linked from a compiled library).
+// io.cnt
+// Standart Girdi/Çıktı (Input/Output) modülü
 
-// --- Console Output Functions ---
+// Harici C veya sistem fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonların gerçek implementasyonları CNT derleyicisi veya runtime tarafından sağlanacaktır.
+// Örneğin, "external_print_string" C'deki `printf` veya Rust'taki `libc::puts` gibi bir fonksiyona denk gelebilir.
+extern fn _cnt_print_string(s: &string) -> void;
+extern fn _cnt_read_line() -> string;
+extern fn _cnt_read_char() -> char;
+extern fn _cnt_read_int() -> int;
+extern fn _cnt_read_float() -> float;
+extern fn _cnt_new_line() -> void; // Yeni satır basmak için
 
-// Prints a string slice to standard output.
-// This function does not append a newline.
-// Implementation typically interfaces with the operating system.
-pub fn print(message: string) -> void;
+/// Konsola bir dize yazdırır.
+/// Dize sahipliği aktarılmaz, sadece ödünç alınır.
+pub fn print(message: &string) -> void {
+    _cnt_print_string(message);
+}
 
-// Prints a string slice to standard output, followed by a newline character.
-pub fn println(message: string) -> void;
+/// Konsola bir dize yazdırır ve ardından yeni bir satıra geçer.
+/// Dize sahipliği aktarılmaz, sadece ödünç alınır.
+pub fn println(message: &string) -> void {
+    _cnt_print_string(message);
+    _cnt_new_line();
+}
 
+/// Konsoldan bir satır metin okur ve okunan dizeyi döndürür.
+/// Döndürülen dize yeni oluşturulur ve bu fonksiyonun çağrıldığı yere sahipliği aktarılır.
+pub fn read_line() -> string {
+    _cnt_read_line()
+}
 
-// --- Console Input Functions ---
+/// Konsoldan tek bir karakter okur ve döndürür.
+pub fn read_char() -> char {
+    _cnt_read_char()
+}
 
-// Reads a single line from standard input until a newline character is encountered
-// or the end of the input stream is reached (EOF).
-// Returns the read line as a string.
-// Note: This is a simplified declaration. A real-world implementation would
-// likely return a Result<string, io::Error> to handle potential input errors
-// or the case of reading an empty line/EOF at the beginning.
-pub fn read_line() -> string;
+/// Konsoldan bir tam sayı okur ve döndürür.
+/// Geçersiz giriş durumunda hata yönetimi (örn. Result enum'u) burada düşünülmelidir.
+/// Şimdilik, sadece ham int döndürdüğü varsayılıyor.
+pub fn read_int() -> int {
+    _cnt_read_int()
+}
 
+/// Konsoldan bir ondalık sayı (float) okur ve döndürür.
+/// Geçersiz giriş durumunda hata yönetimi burada düşünülmelidir.
+pub fn read_float() -> float {
+    _cnt_read_float()
+}
 
-// --- File I/O Concepts (Declarations - Full implementation is complex) ---
-// File operations require more complex types for file handles and errors.
-// These types would likely be defined within the 'io' module itself or imported from 'core'.
+// İstenirse, farklı tipleri string'e dönüştürmek için yardımcı fonksiyonlar eklenebilir.
+// Örneğin:
+ pub fn print_int(value: int) -> void {
+     print(&value.toString());
+ }
+ pub fn println_int(value: int) -> void {
+     println(&value.toString());
+ }
 
-// Example declarations (commented out as full implementation is not covered yet):
- pub struct File; // Represents an open file handle
- pub enum Error { /* ... variants like NotFound, PermissionDenied, IoError ... */ } // I/O error types
-
- pub fn open(path: string, mode: string) -> Result<File, io::Error>; // Open a file, returns File handle or Error
- pub fn read(file: &mut File, buffer: &mut [u8]) -> Result<int, io::Error>; // Read into buffer, return bytes read or Error
- pub fn write(file: &mut File, data: &[u8]) -> Result<int, io::Error>; // Write from slice, return bytes written or Error
- pub fn close(file: File) -> Result<void, io::Error>; // Close a file (consumes the File handle) - Note: Drop often handles closing
-
-
-// --- Other potentially useful I/O functions ---
- pub fn flush_stdout() -> void; // Ensure buffered output is written
-
-
-// Note on `string` type: In CNT, `string` is currently described as a slice (`&str` like).
-// Input functions like `read_line` might need to return an owned string type
-// (e.g., `std::collections::string::String` if implemented) or use mutable buffers.
-// The `string` type in this declaration assumes it works for both passing and returning.
-// A more precise implementation might require a dedicated 'OwnedString' type.
+// CNT'nin "toString()" metodunun yerleşik olduğu varsayımıyla,
+// yukarıdaki `print` ve `println` fonksiyonları çoğu temel tip için yeterli olacaktır.
+// string.cnt gibi başka bir modülde `int.toString()` veya `float.toString()` gibi metotların
+// tanımlanması beklenebilir.
