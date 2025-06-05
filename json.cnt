@@ -1,0 +1,234 @@
+// json.cnt
+// Standart JSON Ayrıştırma ve Oluşturma modülü
+
+import std::string;     // String manipülasyonu için
+import std::collections; // List<JsonValue>, Map<string, JsonValue> için
+
+// Harici C veya optimize edilmiş JSON ayrıştırma/oluşturma kütüphanelerine bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, ham JSON string'lerini dahili JsonValue temsilimize dönüştürür ve tersini yapar.
+extern fn _cnt_json_parse(json_string: &string) -> _cnt_Result_JsonValue_json_Error;
+extern fn _cnt_json_serialize(json_value: &JsonValue) -> _cnt_Result_string_json_Error;
+
+
+/// `JsonValue` Enum'u: JSON veri tiplerini temsil eder.
+/// Bu enum, bir JSON belgesinin tüm olası yapılarını (nesne, dizi, string, sayı, boolean, null) kapsar.
+pub enum JsonValue {
+    /// JSON Nesnesi: Anahtar-değer çiftlerinden oluşan bir Map<string, JsonValue>.
+    Object(collections::Map<string, JsonValue>);
+    /// JSON Dizisi: JsonValue'lerden oluşan bir List<JsonValue>.
+    Array(collections::List<JsonValue>);
+    /// JSON String: Bir string değeri.
+    String(string);
+    /// JSON Sayı: int veya float olarak temsil edilebilir.
+    Number(float); // Float kullanmak, hem tam sayıları hem ondalık sayıları kapsar.
+    /// JSON Boolean: true veya false.
+    Boolean(bool);
+    /// JSON Null: Boş değeri temsil eder.
+    Null;
+}
+
+/// `Error` Enum'u: JSON ayrıştırma veya oluşturma sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Geçersiz JSON formatı.
+    ParseError(string);
+    /// Geçersiz veri tipi veya dönüştürme hatası.
+    TypeError(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+
+/// Bir JSON string'ini ayrıştırır ve bir `JsonValue` nesnesine dönüştürür.
+///
+/// # Parametreler
+/// - `json_string`: Ayrıştırılacak JSON verisini içeren string referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa ayrıştırılmış `JsonValue` içeren `Result::Ok(JsonValue)`,
+/// ayrıştırma hatası oluşursa `Result::Err(Error::ParseError)`.
+pub fn parse(json_string: &string) -> Result<JsonValue, Error> {
+    _cnt_json_parse(json_string)
+}
+
+/// Bir `JsonValue` nesnesini JSON formatında bir string'e dönüştürür (serileştirir).
+///
+/// # Parametreler
+/// - `json_value`: Serileştirilecek `JsonValue` nesnesinin referansı.
+///
+/// # Dönüş Değeri
+/// Başarılı olursa JSON string'ini içeren `Result::Ok(string)`,
+/// serileştirme hatası oluşursa `Result::Err(Error)`.
+pub fn serialize(json_value: &JsonValue) -> Result<string, Error> {
+    _cnt_json_serialize(json_value)
+}
+
+// --- JsonValue için Yardımcı Fonksiyonlar ve Tip Kontrolleri ---
+
+// Bu fonksiyonlar, ayrıştırılmış JsonValue üzerinde çalışırken kullanışlı erişim ve tip kontrolü sağlar.
+
+/// Bir `JsonValue`'nin bir JSON Nesnesi olup olmadığını kontrol eder.
+pub fn is_object(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Object(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'nin bir JSON Dizisi olup olmadığını kontrol eder.
+pub fn is_array(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Array(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'nin bir JSON String olup olmadığını kontrol eder.
+pub fn is_string(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::String(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'nin bir JSON Sayı olup olmadığını kontrol eder.
+pub fn is_number(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Number(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'nin bir JSON Boolean olup olmadığını kontrol eder.
+pub fn is_boolean(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Boolean(_) => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'nin JSON Null olup olmadığını kontrol eder.
+pub fn is_null(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Null => true,
+        _ => false,
+    }
+}
+
+/// Bir `JsonValue`'yi bir Nesneye dönüştürmeye çalışır ve bir `Map<string, JsonValue>` referansı döndürür.
+/// Eğer değer bir nesne değilse hata döndürür.
+pub fn as_object(value: &JsonValue) -> Result<&collections::Map<string, JsonValue>, Error> {
+    match value {
+        JsonValue::Object(map) => Result::Ok(map),
+        _ => Result::Err(Error::TypeError("Value is not a JSON object".to_string())),
+    }
+}
+
+/// Bir `JsonValue`'yi bir Diziye dönüştürmeye çalışır ve bir `List<JsonValue>` referansı döndürür.
+/// Eğer değer bir dizi değilse hata döndürür.
+pub fn as_array(value: &JsonValue) -> Result<&collections::List<JsonValue>, Error> {
+    match value {
+        JsonValue::Array(list) => Result::Ok(list),
+        _ => Result::Err(Error::TypeError("Value is not a JSON array".to_string())),
+    }
+}
+
+/// Bir `JsonValue`'yi bir String'e dönüştürmeye çalışır ve bir `string` referansı döndürür.
+/// Eğer değer bir string değilse hata döndürür.
+pub fn as_string(value: &JsonValue) -> Result<&string, Error> {
+    match value {
+        JsonValue::String(s) => Result::Ok(s),
+        _ => Result::Err(Error::TypeError("Value is not a JSON string".to_string())),
+    }
+}
+
+/// Bir `JsonValue`'yi bir Sayıya dönüştürmeye çalışır ve bir `float` döndürür.
+/// Eğer değer bir sayı değilse hata döndürür.
+pub fn as_number(value: &JsonValue) -> Result<float, Error> {
+    match value {
+        JsonValue::Number(f) => Result::Ok(*f), // Dereference float
+        _ => Result::Err(Error::TypeError("Value is not a JSON number".to_string())),
+    }
+}
+
+/// Bir `JsonValue`'yi bir Boolean'a dönüştürmeye çalışır ve bir `bool` döndürür.
+/// Eğer değer bir boolean değilse hata döndürür.
+pub fn as_boolean(value: &JsonValue) -> Result<bool, Error> {
+    match value {
+        JsonValue::Boolean(b) => Result::Ok(*b), // Dereference bool
+        _ => Result::Err(Error::TypeError("Value is not a JSON boolean".to_string())),
+    }
+}
+
+// --- JsonValue Oluşturma Yardımcıları ---
+
+/// Verilen string'den bir `JsonValue::String` oluşturur.
+pub fn from_string(s: string) -> JsonValue {
+    JsonValue::String(s)
+}
+
+/// Verilen int'den bir `JsonValue::Number` oluşturur.
+pub fn from_int(i: int) -> JsonValue {
+    JsonValue::Number(i as float) // int'i float'a dönüştür
+}
+
+/// Verilen float'dan bir `JsonValue::Number` oluşturur.
+pub fn from_float(f: float) -> JsonValue {
+    JsonValue::Number(f)
+}
+
+/// Verilen bool'dan bir `JsonValue::Boolean` oluşturur.
+pub fn from_boolean(b: bool) -> JsonValue {
+    JsonValue::Boolean(b)
+}
+
+/// Boş bir `JsonValue::Null` değeri döndürür.
+pub fn from_null() -> JsonValue {
+    JsonValue::Null
+}
+
+/// Boş bir `JsonValue::Object` oluşturur.
+pub fn new_object() -> JsonValue {
+    JsonValue::Object(collections::Map::new())
+}
+
+/// Boş bir `JsonValue::Array` oluşturur.
+pub fn new_array() -> JsonValue {
+    JsonValue::Array(collections::List::new())
+}
+
+// Bir nesneye alan ekleme
+// Bu fonksiyonlar, JsonValue::Object veya JsonValue::Array varyantlarının mutable referansını
+// kullanarak içindeki Map veya List'e eleman eklemeyi kolaylaştırır.
+// CNT'de enum varyantlarına doğrudan erişim ve değişiklik desteği gerekir.
+
+// Not: CNT'nin enum varyantlarına mutable erişim sağlama şekline bağlı olarak
+// bu fonksiyonlar doğrudan `JsonValue` üzerinde metot olarak da tanımlanabilir
+// veya `collections::Map::insert` ve `collections::List::push` çağrılarını
+// basitleştiren harici yardımcı fonksiyonlar olabilir.
+
+ pub fn object_insert(obj_value: &mut JsonValue, key: string, value: JsonValue) -> Result<void, Error> {
+     match obj_value {
+         JsonValue::Object(map) => {
+             collections::insert(map, key, value);
+             Result::Ok(())
+         },
+         _ => Result::Err(Error::TypeError("Target is not a JSON object".to_string())),
+     }
+ }
+
+ pub fn array_push(arr_value: &mut JsonValue, item: JsonValue) -> Result<void, Error> {
+     match arr_value {
+         JsonValue::Array(list) => {
+             collections::push(list, item);
+             Result::Ok(())
+         },
+         _ => Result::Err(Error::TypeError("Target is not a JSON array".to_string())),
+     }
+ }
