@@ -1,0 +1,273 @@
+// option.cnt
+// Standart Option Modülü
+// Bir değerin varlığını veya yokluğunu açıkça ifade etmek için Option enum'ı.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Option<T>` Enum'ı: Bir `T` tipinin değerinin varlığını veya yokluğunu temsil eder.
+///
+/// # Şablon Parametreleri
+/// - `T`: Opsiyonel olarak içerebileceği değerin tipi.
+pub enum Option<T> {
+    /// Bir değerin mevcut olduğunu ve `T` tipinde bir değer içerdiğini belirtir.
+    Some(T);
+    /// Bir değerin mevcut olmadığını belirtir.
+    None;
+}
+
+// --- 1. Option Üzerindeki Metotlar ---
+
+impl<T> Option<T> {
+    /// `is_some()`: `Option`'ın `Some` varyantı olup olmadığını kontrol eder.
+    ///
+    /// # Dönüş Değeri
+    /// `bool`: `Option` `Some` ise `true`, aksi halde `false`.
+    pub fn is_some(&self) -> bool {
+        match self {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    /// `is_none()`: `Option`'ın `None` varyantı olup olmadığını kontrol eder.
+    ///
+    /// # Dönüş Değeri
+    /// `bool`: `Option` `None` ise `true`, aksi halde `false`.
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+
+    /// `unwrap()`: Eğer `Option` `Some(T)` ise `T` değerini döndürür.
+    /// Eğer `Option` `None` ise, programı panikletir (crash eder).
+    /// Hızlı prototipleme veya değerin kesinlikle var olması beklenen durumlarda kullanılır.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Some` değeri.
+    ///
+    /// # Panik
+    /// `Option` `None` ise panikletir.
+    pub fn unwrap(&self) -> T {
+        match self {
+            Option::Some(val) => val.clone(), // Klonlama gerekli olabilir
+            Option::None => {
+                // CNT'nin panic/assertion mekanizması
+                std::assert::panic("called `Option::unwrap()` on a `None` value.".to_string());
+            }
+        }
+    }
+
+    /// `expect()`: `unwrap()` ile aynıdır ancak panik mesajını özelleştirmenize olanak tanır.
+    ///
+    /// # Parametreler
+    /// - `msg`: `None` durumunda panikleyecek özel mesaj.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Some` değeri.
+    ///
+    /// # Panik
+    /// `Option` `None` ise belirtilen mesajla panikletir.
+    pub fn expect(&self, msg: string) -> T {
+        match self {
+            Option::Some(val) => val.clone(), // Klonlama gerekli olabilir
+            Option::None => {
+                std::assert::panic(msg);
+            }
+        }
+    }
+
+    /// `map()`: Eğer `Option` `Some(T)` ise, verilen closure'ı `T` değerine uygular ve `Some(U)` döndürür.
+    /// Eğer `Option` `None` ise, `None`'ı olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `T` tipinden `U` tipine dönüşen bir closure (`Fn(T) -> U`).
+    ///
+    /// # Dönüş Değeri
+    /// `Option<U>`: Dönüştürülmüş `Some` değeri veya orijinal `None`.
+    pub fn map<U, F: FnOnce(T) -> U>(&self, f: F) -> Option<U> {
+        match self {
+            Option::Some(val) => Option::Some(f(val.clone())),
+            Option::None => Option::None,
+        }
+    }
+
+    /// `and_then()`: Monadik bağlama. Eğer `Option` `Some(T)` ise, verilen closure'ı `T` değerine uygular
+    /// ve yeni bir `Option<U>` döndürür. Bu, bir `Option` içinde başka bir `Option` döndürmek için kullanışlıdır.
+    /// Eğer `Option` `None` ise, `None`'ı olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `T` tipinden `Option<U>` tipine dönüşen bir closure (`Fn(T) -> Option<U>`).
+    ///
+    /// # Dönüş Değeri
+    /// `Option<U>`: Closure'dan dönen `Option` veya orijinal `None`.
+    pub fn and_then<U, F_closure: FnOnce(T) -> Option<U>>(&self, f: F_closure) -> Option<U> {
+        match self {
+            Option::Some(val) => f(val.clone()),
+            Option::None => Option::None,
+        }
+    }
+
+    /// `or_else()`: Eğer `Option` `None` ise, verilen closure'ın sonucunu döndürür.
+    /// Eğer `Option` `Some(T)` ise, `Some(T)`'yi olduğu gibi döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `None` durumunda çağrılacak ve `Option<T>` döndürecek bir closure (`FnOnce() -> Option<T>`).
+    ///
+    /// # Dönüş Değeri
+    /// `Option<T>`: Orijinal `Some` değeri veya closure'dan dönen `Option`.
+    pub fn or_else<F_closure: FnOnce() -> Option<T>>(&self, f: F_closure) -> Option<T> {
+        match self {
+            Option::Some(val) => Option::Some(val.clone()),
+            Option::None => f(),
+        }
+    }
+
+    /// `unwrap_or()`: Eğer `Option` `Some(T)` ise `T` değerini döndürür.
+    /// Eğer `Option` `None` ise, verilen varsayılan değeri döndürür.
+    ///
+    /// # Parametreler
+    /// - `default_value`: `None` durumunda döndürülecek varsayılan `T` değeri.
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Some` değeri veya varsayılan değer.
+    pub fn unwrap_or(&self, default_value: T) -> T {
+        match self {
+            Option::Some(val) => val.clone(),
+            Option::None => default_value,
+        }
+    }
+
+    /// `unwrap_or_else()`: Eğer `Option` `Some(T)` ise `T` değerini döndürür.
+    /// Eğer `Option` `None` ise, verilen closure'ın sonucunu döndürür.
+    ///
+    /// # Parametreler
+    /// - `f`: `None` durumunda çağrılacak ve `T` döndürecek bir closure (`FnOnce() -> T`).
+    ///
+    /// # Dönüş Değeri
+    /// `T`: `Some` değeri veya closure'dan dönen değer.
+    pub fn unwrap_or_else<F_closure: FnOnce() -> T>(&self, f: F_closure) -> T {
+        match self {
+            Option::Some(val) => val.clone(),
+            Option::None => f(),
+        }
+    }
+}
+
+// --- Örnek Kullanım ---
+
+// İsimden yaş döndüren örnek bir fonksiyon (bulamayabilir)
+fn get_age(name: string) -> Option<i64> {
+    if name == "Alice".to_string() {
+        Option::Some(30i64)
+    } else if name == "Bob".to_string() {
+        Option::Some(25i64)
+    } else {
+        Option::None
+    }
+}
+
+// Bir string'in ilk karakterini döndüren örnek fonksiyon
+fn first_char(s: string) -> Option<char> {
+    if s.is_empty() {
+        Option::None
+    } else {
+        Option::Some(s.char_at(0))
+    }
+}
+
+fn main() {
+    println("Starting Option example...".to_string());
+
+    // 1. `Some` durumu
+    let alice_age = get_age("Alice".to_string());
+    if alice_age.is_some() {
+        println("Alice's age: ".to_string() + alice_age.unwrap().to_string()); // unwrap güvenli
+    } else {
+        println("Alice's age not found.".to_string());
+    }
+    assert!(alice_age.is_some(), "Alice's age should be Some");
+    assert!(alice_age.unwrap() == 30, "Alice's age should be 30");
+
+    // 2. `None` durumu
+    let charlie_age = get_age("Charlie".to_string());
+    if charlie_age.is_none() {
+        println("Charlie's age not found.".to_string());
+    } else {
+        println("Charlie's age: ".to_string() + charlie_age.unwrap().to_string());
+    }
+    assert!(charlie_age.is_none(), "Charlie's age should be None");
+
+    // 3. `map` kullanımı
+    let age_plus_five = get_age("Bob".to_string())
+                            .map(|age| age + 5);
+    println("Bob's age + 5: ".to_string() + age_plus_five.unwrap().to_string()); // 25 + 5 = 30
+    assert!(age_plus_five.is_some(), "Bob's age + 5 should be Some");
+    assert!(age_plus_five.unwrap() == 30, "Bob's age + 5 should be 30");
+
+    let no_age_plus_five = get_age("David".to_string())
+                               .map(|age| age + 5);
+    assert!(no_age_plus_five.is_none(), "No age + 5 should be None");
+    println("David's age + 5: Not found (as expected).".to_string());
+
+
+    // 4. `and_then` kullanımı (zincirleme opsiyonel işlemler)
+    fn get_age_and_double_it(name: string) -> Option<i64> {
+        get_age(name).and_then(|age| {
+            if age > 20 {
+                Option::Some(age * 2)
+            } else {
+                Option::None // 20 yaşından küçükse veya belirli bir koşul sağlanmazsa None döndür
+            }
+        })
+    }
+
+    let double_age_alice = get_age_and_double_it("Alice".to_string()); // 30 -> 60
+    println("Alice's double age: ".to_string() + double_age_alice.unwrap().to_string());
+    assert!(double_age_alice.is_some(), "Alice's double age should be Some");
+    assert!(double_age_alice.unwrap() == 60, "Alice's double age should be 60");
+
+    let double_age_bob = get_age_and_double_it("Bob".to_string()); // 25 -> 50
+    println("Bob's double age: ".to_string() + double_age_bob.unwrap().to_string());
+    assert!(double_age_bob.is_some(), "Bob's double age should be Some");
+    assert!(double_age_bob.unwrap() == 50, "Bob's double age should be 50");
+
+    let double_age_charlie = get_age_and_double_it("Charlie".to_string()); // None -> None
+    assert!(double_age_charlie.is_none(), "Charlie's double age should be None");
+    println("Charlie's double age: Not found (as expected).".to_string());
+
+    let double_age_teen = get_age_and_double_it("Teenager".to_string()); // (Varsayımsal olarak) 15 -> None (çünkü >20 değil)
+    // Eğer get_age("Teenager") Option::Some(15) dönseydi bile and_then içindeki koşul nedeniyle None dönerdi.
+    assert!(double_age_teen.is_none(), "Teenager's double age should be None");
+    println("Teenager's double age (hypothetical): Not found (as expected).".to_string());
+
+    // 5. `or_else` kullanımı (yedek değer veya başka bir opsiyonel çağrı)
+    let unknown_age = get_age("Unknown".to_string())
+                        .or_else(|| get_age("Guest".to_string())) // Guest de yoksa None
+                        .or_else(|| Option::Some(18i64)); // İkisi de yoksa 18 varsayılan
+    println("Unknown/Guest age (or default 18): ".to_string() + unknown_age.unwrap().to_string()); // 18
+    assert!(unknown_age.unwrap() == 18, "Unknown age should be 18");
+
+
+    // 6. `unwrap_or` ve `unwrap_or_else` kullanımı
+    let first_char_of_hello = first_char("Hello".to_string()).unwrap_or('?');
+    println("First char of 'Hello' or '?': ".to_string() + first_char_of_hello.to_string());
+    assert!(first_char_of_hello == 'H', "First char of 'Hello' should be 'H'");
+
+    let first_char_of_empty = first_char("".to_string()).unwrap_or('!');
+    println("First char of '' or '!': ".to_string() + first_char_of_empty.to_string());
+    assert!(first_char_of_empty == '!', "First char of '' should be '!'");
+
+    let first_char_of_empty_else = first_char("".to_string()).unwrap_or_else(|| {
+        println("Calculating default char...");
+        'X'
+    });
+    println("First char of '' or else 'X': ".to_string() + first_char_of_empty_else.to_string());
+    assert!(first_char_of_empty_else == 'X', "First char of '' or else should be 'X'");
+
+    // 7. `expect` ile panikleme örneği (yorum satırına alınmıştır, çünkü programı durdurur)
+    // println("Trying to unwrap a None value with expect (will panic)...".to_string());
+    // let dangerous_value = get_age("Nobody".to_string()).expect("Age should exist for Nobody!");
+    // println("This line will not be reached: ".to_string() + dangerous_value.to_string());
+
+    println("Option example finished.".to_string());
+}
