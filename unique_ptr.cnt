@@ -1,0 +1,296 @@
+// unique_ptr.cnt
+// Standart Unique Pointer Modülü
+// Tekil sahiplik ile otomatik bellek yönetimi.
+
+import std::allocator;      // Bellek tahsisi için
+import std::ptr;            // Ham işaretçi manipülasyonları için
+import std::string;         // Hata mesajları için
+import std::assert;         // Geliştirme/hata ayıklama için
+
+// Not: CNT'nin operator aşırı yükleme (`*`, `->`, taşıma ataması) ve
+// `Drop` trait'i (veya destructor mekanizması) yetenekleri olduğu varsayılmıştır.
+
+/// `DefaultDeleter<T>`: `unique_ptr` için varsayılan silici.
+/// Temel olarak `std::allocator::deallocate` kullanarak bellek serbest bırakır.
+pub struct DefaultDeleter<T> {}
+
+impl<T> FnMut(std::ptr::ptr_mut<T>) for DefaultDeleter<T> {
+    /// `call_mut(ptr: std::ptr::ptr_mut<T>)`: İşaretçinin gösterdiği nesneyi yok eder ve belleğini serbest bırakır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bu işlem, işaretçinin geçerli ve daha önce tahsis edilmiş bir belleği işaret ettiğini varsayar.
+    pub unsafe fn call_mut(&mut self, ptr: std::ptr::ptr_mut<T>) {
+        if !ptr.is_null() {
+            // Nesnenin destructor'ını çağır (varsayımsal)
+            __builtin_call_dtor(ptr);
+            // Belleği serbest bırak
+            std::allocator::deallocate(ptr, 1); // Tek bir eleman için
+        }
+    }
+}
+
+/// `unique_ptr<T, D = DefaultDeleter<T>>`: Tekil sahiplik sağlayan akıllı işaretçi.
+/// Yönetilen nesneyi yalnızca bir `unique_ptr` işaret edebilir. Kopyalanamaz, taşınabilir.
+///
+/// `D`: Özelleştirilmiş bir silici tipi. Varsayılan olarak `DefaultDeleter<T>` kullanılır.
+pub struct unique_ptr<T, D = DefaultDeleter<T>> {
+    /// İşaretçinin gösterdiği T tipindeki nesnenin ham işaretçisi.
+    data_ptr: std::ptr::ptr_mut<T>;
+    /// Özel silici. Boş bir struct olabilir veya durum bilgisi içerebilir (örneğin, dosya tanıtıcısı).
+    deleter: D;
+}
+
+impl<T, D: FnMut(std::ptr::ptr_mut<T>)> unique_ptr<T, D> {
+    /// `null()`: Boş (null) bir `unique_ptr` döndürür.
+    pub fn null() -> unique_ptr<T, D> {
+        unique_ptr {
+            data_ptr: std::ptr::ptr_mut::null_mut(),
+            deleter: D::new(), // Varsayılan constructor varsayımı
+        }
+    }
+
+    /// `new(value: T)`: Yeni bir `unique_ptr` oluşturur ve `value` nesnesinin sahipliğini alır.
+    /// Varsayılan `DefaultDeleter` kullanılır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bellek tahsisi başarısız olabilir.
+    pub unsafe fn new(value: T) -> unique_ptr<T> {
+        let ptr = std::allocator::allocate::<T>(1);
+        if ptr.is_null() {
+            // Hata yönetimi
+            std::assert::panic("Failed to allocate memory for unique_ptr.".to_string());
+        }
+        ptr.write(value);
+        unique_ptr {
+            data_ptr: ptr,
+            deleter: DefaultDeleter::new(), // Varsayılan deleter
+        }
+    }
+
+    /// `from_raw(ptr: std::ptr::ptr_mut<T>)`: Mevcut bir ham işaretçiden `unique_ptr` oluşturur.
+    /// Sahipliği `ptr`'dan alır. `ptr`'ın `unique_ptr`'dan sonra serbest bırakılmaması gerekir.
+    /// Varsayılan `DefaultDeleter` kullanılır.
+    ///
+    /// # Güvenli Olmayan
+    /// `ptr`'ın gerçekten yönetilmesi gereken ve henüz sahip olunmayan bir bellek bloğu olması gerekir.
+    pub unsafe fn from_raw(ptr: std::ptr::ptr_mut<T>) -> unique_ptr<T> {
+        unique_ptr {
+            data_ptr: ptr,
+            deleter: DefaultDeleter::new(),
+        }
+    }
+
+    /// `with_deleter(ptr: std::ptr::ptr_mut<T>, deleter_fn: D)`:
+    /// Mevcut bir ham işaretçiden ve özel bir silici ile `unique_ptr` oluşturur.
+    /// Sahipliği `ptr`'dan alır.
+    ///
+    /// # Güvenli Olmayan
+    /// `ptr`'ın ve `deleter_fn`'in geçerli olması gerekir.
+    pub unsafe fn with_deleter(ptr: std::ptr::ptr_mut<T>, deleter_fn: D) -> unique_ptr<T, D> {
+        unique_ptr {
+            data_ptr: ptr,
+            deleter: deleter_fn,
+        }
+    }
+
+
+    /// `reset()`: İşaretçinin gösterdiği nesnenin sahipliğini bırakır.
+    /// Mevcut nesne yok edilir ve bellek serbest bırakılır. İşaretçi null olur.
+    pub fn reset(&mut self) {
+        if !self.data_ptr.is_null() {
+            unsafe {
+                (self.deleter)(self.data_ptr); // Deleter'ı çağır
+            }
+        }
+        self.data_ptr = std::ptr::ptr_mut::null_mut();
+    }
+
+    /// `reset_with_value(value: T)`: Mevcut nesneyi yok eder ve `value`'nun sahipliğini alır.
+    ///
+    /// # Güvenli Olmayan
+    /// Bellek tahsisi başarısız olabilir.
+    pub unsafe fn reset_with_value(&mut self, value: T) {
+        self.reset(); // Önce mevcut nesneyi yok et
+        let ptr = std::allocator::allocate::<T>(1);
+        if ptr.is_null() {
+            std::assert::panic("Failed to allocate memory for unique_ptr during reset_with_value.".to_string());
+        }
+        ptr.write(value);
+        self.data_ptr = ptr;
+    }
+
+    /// `get()`: İşaretçinin gösterdiği ham işaretçiyi döndürür.
+    ///
+    /// # Güvenli Olmayan
+    /// Döndürülen ham işaretçinin ömrü, `unique_ptr`'ın ömründen daha uzun olabilir, bu da dangling pointer'a yol açabilir.
+    pub unsafe fn get(&self) -> std::ptr::ptr_mut<T> {
+        self.data_ptr
+    }
+
+    /// `release()`: İşaretçinin yönettiği ham işaretçiyi döndürür ve `unique_ptr`'ın sahipliğini bırakır.
+    /// `unique_ptr` null olur ve yönetilen nesne otomatik olarak serbest bırakılmaz.
+    /// Çağıran, döndürülen ham işaretçiyi manuel olarak serbest bırakmaktan sorumludur.
+    pub fn release(&mut self) -> std::ptr::ptr_mut<T> {
+        let old_ptr = self.data_ptr;
+        self.data_ptr = std::ptr::ptr_mut::null_mut();
+        old_ptr
+    }
+
+    /// `is_null()`: İşaretçinin null olup olmadığını kontrol eder.
+    pub fn is_null(&self) -> bool {
+        self.data_ptr.is_null()
+    }
+
+    /// `deref(&self) -> &T`: İşaretçinin gösterdiği değişmez referansı döndürür.
+    /// Operator aşırı yüklemesi için (`*ptr` veya `ptr->member`).
+    pub fn deref(&self) -> &T {
+        assert!(!self.is_null(), "Attempted to dereference a null unique_ptr.");
+        unsafe { self.data_ptr.as_ref().unwrap() }
+    }
+
+    /// `deref_mut(&mut self) -> &mut T`: İşaretçinin gösterdiği değişebilir referansı döndürür.
+    /// Operator aşırı yüklemesi için (`*ptr` veya `ptr->member`).
+    pub fn deref_mut(&mut self) -> &mut T {
+        assert!(!self.is_null(), "Attempted to dereference a null unique_ptr.");
+        unsafe { self.data_ptr.as_mut().unwrap() }
+    }
+
+    // --- Taşıma Semantiği ---
+
+    // Taşıma constructor (eğer CNT destekliyorsa)
+    // `unique_ptr` kopyalanamaz, ancak taşınabilir (move).
+    // Bu genellikle dil tarafından otomatik olarak oluşturulur veya manuel olarak implemente edilir.
+     fn move_from(mut other: unique_ptr<T, D>) -> unique_ptr<T, D> {
+         let result = unique_ptr { data_ptr: other.data_ptr, deleter: other.deleter };
+         other.data_ptr = std::ptr::ptr_mut::null_mut(); // Eski işaretçiyi null yap
+         result
+     }
+
+    // Atama operatörü `=` (taşıma ataması)
+     impl<T, D: FnMut(std::ptr::ptr_mut<T>)> std::ops::AssignMove for unique_ptr<T, D> {
+         fn assign_move(&mut self, mut other: unique_ptr<T, D>) {
+             self.reset(); // Mevcut nesneyi yok et
+             self.data_ptr = other.data_ptr;
+             self.deleter = other.deleter; // Deleter'ı da taşı
+             other.data_ptr = std::ptr::ptr_mut::null_mut();
+         }
+     }
+
+    // Drop/Destructor (Nesne ömrü bittiğinde çağrılır)
+    // CNT'nin otomatik bir `Drop` trait'i veya destructor mekanizması olmalı.
+    // `dtor` metodu varsayalım.
+    pub fn dtor(&mut self) {
+        self.reset(); // Mevcut nesneyi yok et ve işaretçiyi null yap
+    }
+}
+
+// --- Örnek Kullanım ---
+
+import std::string;
+import std::io; // Dosya işlemleri için varsayımsal modül
+
+// Basit bir test sınıfı
+pub struct MyResource {
+    id: i64;
+    message: string;
+}
+
+impl MyResource {
+    pub fn new(id: i64, message: string) -> MyResource {
+        println("MyResource::new called for: ".to_string() + message);
+        MyResource { id, message }
+    }
+
+    pub fn dtor(&self) {
+        println("MyResource::dtor called for: ".to_string() + self.message);
+    }
+}
+
+// Özel bir silici örneği: Dosya kapatıcı
+pub struct FileCloser {}
+
+impl FnMut(std::ptr::ptr_mut<std::io::FileHandle>) for FileCloser {
+    // `FileHandle`'ın bir T olmadığını varsayıyoruz, doğrudan adresini alalım.
+    // veya T bir ffi türü olabilir.
+    unsafe fn call_mut(&mut self, ptr: std::ptr::ptr_mut<std::io::FileHandle>) {
+        if !ptr.is_null() {
+            println("FileCloser: Closing file handle.".to_string());
+            // Varsayımsal dosya kapatma fonksiyonu
+            std::io::close_file_handle(ptr.read());
+            // FileHandle'ın kendisinin belleğini serbest bırakma.
+            std::allocator::deallocate(ptr, 1);
+        }
+    }
+}
+
+
+fn main() {
+    println("Starting Unique Ptr example...".to_string());
+
+    // 1. Varsayılan silici ile unique_ptr oluşturma
+    let mut ptr1: std::unique_ptr::unique_ptr<MyResource>;
+    unsafe {
+        ptr1 = std::unique_ptr::unique_ptr::new(MyResource::new(1, "Resource A".to_string()));
+    }
+    println("ptr1 value: ".to_string() + ptr1.deref().message); // Resource A
+
+    // 2. Sahipliği devretme (move)
+    let mut ptr2 = ptr1; // ptr1 artık null olur, sahiplik ptr2'ye geçer
+    println("ptr1 is null after move: ".to_string() + ptr1.is_null().to_string()); // true
+    println("ptr2 value: ".to_string() + ptr2.deref().message); // Resource A
+
+    // 3. Resetleme
+    ptr2.reset(); // MyResource::dtor "Resource A" için çağrılır.
+    println("ptr2 is null after reset: ".to_string() + ptr2.is_null().to_string()); // true
+
+    // 4. Yeni bir değerle resetleme
+    unsafe {
+        ptr2.reset_with_value(MyResource::new(2, "Resource B".to_string()));
+    }
+    println("ptr2 new value: ".to_string() + ptr2.deref().message); // Resource B
+
+    // 5. `release()` ile ham işaretçiyi alma ve manuel serbest bırakma
+    let raw_ptr_from_unique: std::ptr::ptr_mut<MyResource>;
+    unsafe {
+        raw_ptr_from_unique = ptr2.release(); // ptr2 null olur, sahiplik kaybedilir
+    }
+    println("ptr2 is null after release: ".to_string() + ptr2.is_null().to_string()); // true
+
+    // Şimdi `raw_ptr_from_unique`'ı manuel olarak yönetmemiz gerekiyor.
+    unsafe {
+        println("Raw ptr value: ".to_string() + raw_ptr_from_unique.read().message);
+        // MyResource'ı ve belleğini manuel olarak yok et
+        __builtin_call_dtor(raw_ptr_from_unique);
+        std::allocator::deallocate::<MyResource>(raw_ptr_from_unique, 1);
+    }
+    println("Manually deallocated raw ptr.".to_string());
+
+
+    println("--- Custom Deleter Example ---".to_string());
+
+    // 6. Özel silici ile unique_ptr kullanma (Dosya İşlemleri)
+    // Varsayımsal olarak bir dosya açalım ve bir FileHandle alalım.
+    let mut file_handle_ptr: std::ptr::ptr_mut<std::io::FileHandle>;
+    unsafe {
+        file_handle_ptr = std::allocator::allocate::<std::io::FileHandle>(1);
+        if file_handle_ptr.is_null() {
+            println("Failed to allocate memory for FileHandle.".to_string());
+            return;
+        }
+        file_handle_ptr.write(std::io::open_file("my_log.txt".to_string())); // Varsayımsal open_file
+    }
+
+    let mut file_unique_ptr: std::unique_ptr::unique_ptr<std::io::FileHandle, FileCloser>;
+    unsafe {
+        file_unique_ptr = std::unique_ptr::unique_ptr::with_deleter(file_handle_ptr, FileCloser::new());
+    }
+    
+    println("File unique ptr created.".to_string());
+
+    // `file_unique_ptr` kapsam dışına çıktığında veya `reset()` çağrıldığında
+    // `FileCloser` çağrılır ve dosya kapatılır.
+    file_unique_ptr.reset(); // FileCloser tarafından dosya kapatılır.
+    println("File unique ptr reset, file closed by custom deleter.".to_string());
+
+    println("Unique Ptr example finished.".to_string());
+}
