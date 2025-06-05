@@ -1,0 +1,372 @@
+// iterator.cnt
+// Standart Iterator (Yineleyici) Modülü
+// Kapsayıcı öğelerine tekdüze erişim sağlayan soyutlamalar ve yardımcılar.
+
+import std::string;     // Hata mesajları için
+import std::assert;     // Geliştirme/hata ayıklama için
+
+/// `Error` Enum'u: Iterator işlemleri sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Iteratör geçerli bir konuma işaret etmiyor (örn. end iteratörü).
+    InvalidIteratorPosition(string);
+    /// Desteklenmeyen operasyon (örn. ileri iteratörde geri gitme).
+    UnsupportedOperation(string);
+    /// Geçersiz parametreler.
+    InvalidParameters(string);
+    /// Genel bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+// --- 1. Iterator Kategorileri (Trait'ler) ---
+// Bu trait'ler, iteratörün hangi operasyonları desteklediğini belirtir.
+// `associated_type` ve `default_implementation` gibi gelişmiş trait özellikleri varsayılmıştır.
+
+/// `IteratorTraits` Trait'i: Tüm iteratörler için ortak tip tanımlamalarını sağlar.
+/// C++'daki `std::iterator_traits` yapısına benzer.
+pub trait IteratorTraits {
+    /// `Value`: Iteratörün işaret ettiği elemanın tipi.
+    type Value;
+    /// `Difference`: İki iteratör arasındaki mesafeyi temsil eden tamsayı tipi.
+    type Difference = i64;
+    /// `Pointer`: Elemana bir işaretçi tipi. (opsiyonel, CNT'nin işaretçi kavramına bağlı)
+    type Pointer;
+    /// `Reference`: Elemana bir referans tipi.
+    type Reference;
+}
+
+/// `InputIterator` Trait'i: Tek geçişli, sadece okunabilir iteratörler için.
+/// `==`, `!=`, `*` (dereference), `++` (ileri gitme) operasyonlarını destekler.
+pub trait InputIterator: IteratorTraits {
+    /// `dereference()`: Iteratörün işaret ettiği değeri döndürür (salt okunur).
+    fn dereference(&self) -> Result<Self::Reference, Error>;
+    /// `increment()`: Iteratörü bir adım ileriye taşır.
+    fn increment(&mut self) -> Result<void, Error>;
+    /// `equal()`: İki iteratörün aynı konumu işaret edip etmediğini kontrol eder.
+    fn equal(&self, other: &Self) -> bool;
+    /// `not_equal()`: İki iteratörün farklı konumu işaret edip etmediğini kontrol eder.
+    fn not_equal(&self, other: &Self) -> bool {
+        !self.equal(other)
+    }
+    /// `clone()`: Iteratörün bir kopyasını döndürür.
+    fn clone(&self) -> Self;
+}
+
+/// `OutputIterator` Trait'i: Tek geçişli, sadece yazılabilir iteratörler için.
+/// `*` (dereference ile atama), `++` (ileri gitme) operasyonlarını destekler.
+pub trait OutputIterator: IteratorTraits {
+    /// `assign_dereferenced()`: Iteratörün işaret ettiği konuma bir değer atar.
+    fn assign_dereferenced(&mut self, value: Self::Value) -> Result<void, Error>;
+    /// `increment()`: Iteratörü bir adım ileriye taşır.
+    fn increment(&mut self) -> Result<void, Error>;
+}
+
+/// `ForwardIterator` Trait'i: Çok geçişli, hem okunabilir hem yazılabilir.
+/// `InputIterator` ve `OutputIterator` operasyonlarını destekler.
+/// Kopyalanabilir ve kopyaları bağımsız olarak ilerletilebilir.
+pub trait ForwardIterator: InputIterator + OutputIterator {
+    // InputIterator ve OutputIterator'dan operasyonları miras alır.
+    // Varsayılan olarak `clone()` methodu da `InputIterator`'dan gelir.
+}
+
+/// `BidirectionalIterator` Trait'i: `ForwardIterator`'ın yanı sıra geri gitme (`--`) operasyonunu da destekler.
+pub trait BidirectionalIterator: ForwardIterator {
+    /// `decrement()`: Iteratörü bir adım geriye taşır.
+    fn decrement(&mut self) -> Result<void, Error>;
+}
+
+/// `RandomAccessIterator` Trait'i: `BidirectionalIterator`'ın yanı sıra
+/// doğrudan indeksleme (`[]`), arbitary ileri/geri gitme (`+`, `-`, `+=`, `-=`) ve
+/// karşılaştırma operasyonlarını (`<`, `>`, `<=`, `>=`) destekler.
+pub trait RandomAccessIterator: BidirectionalIterator {
+    /// `advance_by()`: Iteratörü `n` adım ileriye/geriye taşır.
+    fn advance_by(&mut self, n: Self::Difference) -> Result<void, Error>;
+    /// `difference()`: İki iteratör arasındaki mesafeyi hesaplar.
+    fn difference(&self, other: &Self) -> Result<Self::Difference, Error>;
+    /// `less_than()`: Bir iteratörün diğerinden önce gelip gelmediğini kontrol eder.
+    fn less_than(&self, other: &Self) -> bool;
+    /// `less_than_or_equal()`: Bir iteratörün diğerinden önce veya ona eşit olup olmadığını kontrol eder.
+    fn less_than_or_equal(&self, other: &Self) -> bool;
+    /// `greater_than()`: Bir iteratörün diğerinden sonra gelip gelmediğini kontrol eder.
+    fn greater_than(&self, other: &Self) -> bool;
+    /// `greater_than_or_equal()`: Bir iteratörün diğerinden sonra veya ona eşit olup olmadığını kontrol eder.
+    fn greater_than_or_equal(&self, other: &Self) -> bool;
+
+    // Direct indexing (örn. iterator[n]) için opsiyonel metod:
+    // fn index_access(&self, n: Self::Difference) -> Result<Self::Reference, Error>;
+}
+
+// --- 2. Yardımcı Fonksiyonlar (Iterator Algoritmaları) ---
+// Bu fonksiyonlar, herhangi bir iteratör kategorisiyle çalışabilir.
+
+/// `advance()`: Bir iteratörü belirli bir miktar ileriye taşır.
+///
+/// # Parametreler
+/// - `it`: İlerletilecek iteratör (mutable).
+/// - `n`: İlerletilecek adım sayısı. Pozitif veya negatif olabilir.
+///
+/// # Tip Parametreleri
+/// - `It`: `RandomAccessIterator` (n negatifse veya büyük atlamalar için)
+///         veya `InputIterator` (n pozitifse ve tek tek ilerletiliyorsa).
+///         Bu implementasyon, en genel RandomAccessIterator'ı kullanır.
+///
+/// # Dönüş Değeri
+/// `Result<void, Error>`: Başarılı olursa `Ok(())`, hata olursa `Err`.
+pub fn advance<It: RandomAccessIterator>(it: &mut It, n: It::Difference) -> Result<void, Error> {
+    it.advance_by(n)
+}
+
+/// `distance()`: İki iteratör arasındaki mesafeyi hesaplar.
+///
+/// # Parametreler
+/// - `first`: Başlangıç iteratörü.
+/// - `last`: Bitiş iteratörü.
+///
+/// # Tip Parametreleri
+/// - `It`: `InputIterator` (tek geçişli) veya `RandomAccessIterator`.
+///         RandomAccessIterator için daha verimlidir.
+///
+/// # Dönüş Değeri
+/// `Result<It::Difference, Error>`: Mesafe veya hata.
+pub fn distance<It: RandomAccessIterator>(first: &It, last: &It) -> Result<It::Difference, Error> {
+    first.difference(last)
+}
+
+/// `next()`: Bir iteratörün `n` adım ilerideki bir kopyasını döndürür. Orijinal iteratörü değiştirmez.
+///
+/// # Parametreler
+/// - `it`: Referans iteratör.
+/// - `n`: İlerletilecek adım sayısı (varsayılan 1).
+///
+/// # Tip Parametreleri
+/// - `It`: `InputIterator` (n pozitifse) veya `RandomAccessIterator`.
+///
+/// # Dönüş Değeri
+/// `Result<It, Error>`: Yeni iteratör kopyası veya hata.
+pub fn next<It: RandomAccessIterator>(it: &It, n: It::Difference) -> Result<It, Error> {
+    let mut temp = it.clone();
+    advance(&mut temp, n)?;
+    Result::Ok(temp)
+}
+
+/// `prev()`: Bir iteratörün `n` adım gerisindeki bir kopyasını döndürür. Orijinal iteratörü değiştirmez.
+/// Yalnızca `BidirectionalIterator` veya `RandomAccessIterator` için geçerlidir.
+///
+/// # Parametreler
+/// - `it`: Referans iteratör.
+/// - `n`: Geriye gidilecek adım sayısı (varsayılan 1).
+///
+/// # Tip Parametreleri
+/// - `It`: `BidirectionalIterator` veya `RandomAccessIterator`.
+///
+/// # Dönüş Değeri
+/// `Result<It, Error>`: Yeni iteratör kopyası veya hata.
+pub fn prev<It: BidirectionalIterator>(it: &It, n: It::Difference) -> Result<It, Error> {
+    let mut temp = it.clone();
+    if n > 0 { // Advance n kadar geriye gitmek demek (negatif advance)
+        // Eğer It RandomAccessIterator ise, advance kullanabiliriz.
+        // Aksi takdirde, BidirectionalIterator için n kez decrement çağırmalıyız.
+        if let Some(ra_it) = It.as_random_access() { // Varsayımsal downcasting veya trait methodu
+            advance(&mut temp, -n)?;
+        } else {
+            for _ in 0..n {
+                temp.decrement()?;
+            }
+        }
+    }
+    Result::Ok(temp)
+}
+
+// --- 3. Örnek Bir Kapsayıcı Iteratörünün Implementasyonu ---
+// `std::vector` için basit bir RandomAccessIterator implementasyonu.
+// Bu, `std::vector` modülünün içinde veya ayrı bir dosyada olabilir.
+// Amaç, iteratör trait'lerinin nasıl kullanılacağını göstermek.
+
+pub struct VectorIterator<T> {
+    // Iteratörün işaret ettiği vektöre mutable referans.
+    // Eğer iteratör sadece okuma içinse &Vector<T> olabilir.
+    data_ref: &mut std::vector::Vector<T>;
+    // Mevcut indeks.
+    current_index: u64;
+    // Vektörün sonundaki iteratörü temsil etmek için geçerli boyutu tutar.
+    // Bu, `end()` iteratörü için önemlidir.
+    vector_len: u64;
+}
+
+// `IteratorTraits` implementasyonu for `VectorIterator`
+impl<T> IteratorTraits for VectorIterator<T> {
+    type Value = T;
+    type Difference = i64;
+    type Pointer = &T; // CNT'nin işaretçi kavramına göre ayarlanmalı
+    type Reference = &T; // Salt okunur referans
+}
+
+// `InputIterator` implementasyonu for `VectorIterator`
+impl<T> InputIterator for VectorIterator<T>
+where T: Copy { // Dereferencing için T'nin kopyalanabilir olması varsayılır.
+    fn dereference(&self) -> Result<Self::Reference, Error> {
+        if self.current_index >= self.vector_len {
+            return Result::Err(Error::InvalidIteratorPosition("Attempted to dereference end iterator.".to_string()));
+        }
+        std::vector::get(self.data_ref, self.current_index)
+            .map_err(|e| Error::Other("Internal vector access error during dereference: ".to_string() + e.to_string()))
+    }
+
+    fn increment(&mut self) -> Result<void, Error> {
+        if self.current_index >= self.vector_len {
+            return Result::Err(Error::InvalidIteratorPosition("Attempted to increment end iterator.".to_string()));
+        }
+        self.current_index += 1;
+        Result::Ok(())
+    }
+
+    fn equal(&self, other: &Self) -> bool {
+        // İki iteratörün aynı vektöre işaret ettiğini ve aynı indekste olduğunu kontrol et.
+        // `data_ref`'in adreslerinin karşılaştırılması veya bir ID mekanizması gerekebilir.
+        // Şimdilik sadece indeks karşılaştırması yapalım, aynı kapsayıcıdan olduklarını varsayarak.
+        self.current_index == other.current_index
+    }
+
+    fn clone(&self) -> Self {
+        VectorIterator {
+            data_ref: self.data_ref, // Referans kopyalanır
+            current_index: self.current_index,
+            vector_len: self.vector_len,
+        }
+    }
+}
+
+// `OutputIterator` implementasyonu for `VectorIterator` (mutable erişim için)
+impl<T> OutputIterator for VectorIterator<T>
+where T: Copy {
+    fn assign_dereferenced(&mut self, value: Self::Value) -> Result<void, Error> {
+        if self.current_index >= self.vector_len {
+            return Result::Err(Error::InvalidIteratorPosition("Attempted to assign to end iterator.".to_string()));
+        }
+        std::vector::set(self.data_ref, self.current_index, value)
+            .map_err(|e| Error::Other("Internal vector set error during assignment: ".to_string() + e.to_string()))
+    }
+    // `increment` InputIterator'dan miras alınır.
+}
+
+// `ForwardIterator` implementasyonu for `VectorIterator`
+impl<T> ForwardIterator for VectorIterator<T> where T: Copy {}
+
+// `BidirectionalIterator` implementasyonu for `VectorIterator`
+impl<T> BidirectionalIterator for VectorIterator<T>
+where T: Copy {
+    fn decrement(&mut self) -> Result<void, Error> {
+        if self.current_index == 0 {
+            return Result::Err(Error::InvalidIteratorPosition("Attempted to decrement past beginning of vector.".to_string()));
+        }
+        self.current_index -= 1;
+        Result::Ok(())
+    }
+}
+
+// `RandomAccessIterator` implementasyonu for `VectorIterator`
+impl<T> RandomAccessIterator for VectorIterator<T>
+where T: Copy {
+    fn advance_by(&mut self, n: Self::Difference) -> Result<void, Error> {
+        // n negatif olabilir, bu yüzden signed integer aritmetiği kullan.
+        let new_index = (self.current_index as i64) + n;
+        if new_index < 0 || (new_index as u64) > self.vector_len {
+            return Result::Err(Error::InvalidIteratorPosition("Attempted to advance out of bounds.".to_string()));
+        }
+        self.current_index = new_index as u64;
+        Result::Ok(())
+    }
+
+    fn difference(&self, other: &Self) -> Result<Self::Difference, Error> {
+        // İki iteratörün aynı vektörden olduğunu varsayıyoruz.
+        Result::Ok((self.current_index as i64) - (other.current_index as i64))
+    }
+
+    fn less_than(&self, other: &Self) -> bool {
+        self.current_index < other.current_index
+    }
+
+    fn less_than_or_equal(&self, other: &Self) -> bool {
+        self.current_index <= other.current_index
+    }
+
+    fn greater_than(&self, other: &Self) -> bool {
+        self.current_index > other.current_index
+    }
+
+    fn greater_than_or_equal(&self, other: &Self) -> bool {
+        self.current_index >= other.current_index
+    }
+}
+
+// `std::vector` modülüne eklenecek varsayılan iteratör fonksiyonları
+// Bu fonksiyonlar, bir `std::vector`'dan `VectorIterator`'lar oluşturur.
+
+// `vector.cnt` içinde veya `container.cnt` gibi genel bir dosyada bulunabilir.
+// Mevcut vektör yapısının değiştirilmesi veya bu iteratörlerin oluşturulması gerekir.
+// Örneğin:
+pub fn begin<T>(vec: &mut std::vector::Vector<T>) -> VectorIterator<T> {
+    VectorIterator {
+        data_ref: vec,
+        current_index: 0,
+        vector_len: std::vector::len(vec),
+    }
+}
+
+pub fn end<T>(vec: &mut std::vector::Vector<T>) -> VectorIterator<T> {
+    VectorIterator {
+        data_ref: vec,
+        current_index: std::vector::len(vec), // end iteratörü son elemanın bir sonrası
+        vector_len: std::vector::len(vec),
+    }
+}
+
+
+// --- Örnek Kullanım (main fonksiyonunda) ---
+
+fn main() {
+    println("Starting Iterator example...".to_string());
+
+    let mut my_vec = std::vector::from_array([10, 20, 30, 40, 50]);
+    println("Original vector: ".to_string() + my_vec.to_string());
+
+    // begin() ve end() iteratörleri
+    let mut it = begin(&mut my_vec);
+    let end_it = end(&mut my_vec);
+
+    // Iteratör ile gezinme ve elemanlara erişim
+    while it.not_equal(&end_it) {
+        let val = it.dereference().expect("Failed to dereference");
+        println("Current element: ".to_string() + (*val).to_string()); // val bir referans olduğu için *val
+        it.increment().expect("Failed to increment iterator");
+    }
+
+    // Iteratörü sıfırla ve değiştir
+    let mut modify_it = begin(&mut my_vec);
+    modify_it.increment().expect("Failed to increment"); // Şimdi 20'ye işaret ediyor
+    modify_it.assign_dereferenced(25).expect("Failed to assign"); // 20 -> 25
+    println("Modified vector: ".to_string() + my_vec.to_string()); // [10, 25, 30, 40, 50]
+
+    // advance ve distance kullanımı
+    let mut advanced_it = begin(&mut my_vec);
+    advance(&mut advanced_it, 3).expect("Failed to advance"); // Şimdi 40'a işaret ediyor
+    println("Element after advancing 3 steps: ".to_string() + (*advanced_it.dereference().expect("Dereference failed")).to_string()); // 40
+
+    let first_it = begin(&mut my_vec);
+    let last_it = end(&mut my_vec);
+    let dist = distance(&first_it, &last_it).expect("Failed to calculate distance");
+    println("Distance from begin to end: ".to_string() + dist.to_string()); // 5
+
+    let second_it = next(&begin(&mut my_vec), 1).expect("Failed to get next iterator");
+    println("Second element using next(): ".to_string() + (*second_it.dereference().expect("Dereference failed")).to_string()); // 25
+
+    let prev_of_end = prev(&end(&mut my_vec), 1).expect("Failed to get previous iterator");
+    println("Last element using prev(): ".to_string() + (*prev_of_end.dereference().expect("Dereference failed")).to_string()); // 50
+
+    println("Iterator example finished.".to_string());
+}
