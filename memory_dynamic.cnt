@@ -1,0 +1,156 @@
+// memory_dynamic.cnt
+// Dinamik Sahiplik ve Ödünç Alma Bellek Yönetimi modülü
+
+import std::string; // Hata mesajları için
+import std::memory_static; // size_of, align_of gibi yardımcı fonksiyonlar için
+
+// Harici C veya sistem heap bellek yönetim fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
+// Bu fonksiyonlar, altta yatan sistemin bellek ayırıcılarını (örn. malloc, free) kullanır.
+extern fn _cnt_mem_dynamic_alloc(size: int, align: int) -> RawPtr<u8>; // Ham bellek bloğu tahsis eder
+extern fn _cnt_mem_dynamic_dealloc(ptr: RawPtr<u8>, size: int, align: int) -> void; // Ham bellek bloğunu serbest bırakır
+
+// Box<T> için dahili operasyonlar
+extern fn _cnt_box_new<T>(value: T) -> Box<T>;
+extern fn _cnt_box_into_inner<T>(boxed_value: Box<T>) -> T; // Box'ın içindeki değeri sahiplenerek döndürür
+extern fn _cnt_box_deref<T>(boxed_value: &Box<T>) -> &T; // İçindeki değere immutable referans verir
+extern fn _cnt_box_deref_mut<T>(boxed_value: &mut Box<T>) -> &mut T; // İçindeki değere mutable referans verir
+extern fn _cnt_box_drop<T>(boxed_value: Box<T>) -> void; // Box'ı ve içindeki değeri serbest bırakır
+
+
+/// `RawPtr<T>`: Ham (unsafe) işaretçi tipi.
+/// Bu, doğrudan bellek adreslerini temsil eder ve bellek güvenliği garantisi vermez.
+/// Yalnızca sistem çağrıları veya düşük seviyeli FFI (Foreign Function Interface)
+/// ile etkileşim kurarken kullanılmalıdır.
+pub type RawPtr<T> = *mut T; // Mutable ham işaretçi
+pub type ConstRawPtr<T> = *const T; // Immutable ham işaretçi
+
+/// `Error` Enum'u: Dinamik bellek yönetimi sırasında oluşabilecek hataları temsil eder.
+pub enum Error {
+    /// Bellek tahsis edilemedi (örn. OOM - Out Of Memory).
+    OutOfMemory;
+    /// Geçersiz işaretçi veya bellek işlemi.
+    InvalidMemoryOperation(string);
+    /// Bilinmeyen veya yakalanamayan bir hata.
+    Other(string);
+}
+
+/// `Result<T, E>` Enum'u: Bir işlemin başarılı sonucunu (`Ok(T)`) veya bir hatayı (`Err(E)`) temsil eder.
+/// Bu enum, diğer modüllerdekiyle aynı mantığı taşır.
+pub enum Result<T, E> {
+    Ok(T);
+    Err(E);
+}
+
+/// `Box<T>`: Heap üzerinde tahsis edilmiş tek bir `T` değeri için **akıllı işaretçi**.
+///
+/// `Box<T>` oluşturulduğunda, `T` değeri yığına (heap) yerleştirilir ve `Box<T>` yığın üzerinde
+/// bu değere sahip olur. `Box<T>` kapsam dışına çıktığında, içindeki `T` değeriyle birlikte
+/// yığın belleğini otomatik olarak serbest bırakır. Bu, manuel bellek yönetimi hatalarını önler.
+pub struct Box<T> {
+    // Dahili olarak, bu muhtemelen T değerinin yığın üzerindeki adresini tutan bir RawPtr<T> içerir.
+    _phantom_data: T; // Jenerik tipi belirtmek için (runtime'da doğrudan depolanmayabilir)
+}
+
+
+/// Bir değeri heap üzerinde tahsis eder ve bir `Box<T>` içine sarar.
+///
+/// # Parametreler
+/// - `value`: Heap'e yerleştirilecek değer (sahipliği `Box`'a taşınır).
+///
+/// # Dönüş Değeri
+/// Başarılı olursa heap'te tahsis edilmiş `Box<T>` içeren `Result::Ok(Box<T>)`,
+/// bellek tahsisi başarısız olursa `Result::Err(Error::OutOfMemory)`.
+pub fn new_box<T>(value: T) -> Result<Box<T>, Error> {
+    // Dahili olarak:
+    // 1. memory_static::size_of<T>() ve memory_static::align_of<T>() ile boyut ve hizalama alınır.
+    // 2. _cnt_mem_dynamic_alloc çağrılır.
+    // 3. Değer tahsis edilen belleğe kopyalanır/taşınır.
+    // 4. Yeni Box<T> oluşturulur ve döndürülür.
+    // Hata durumunda Error::OutOfMemory döndürülür.
+    _cnt_box_new(value)
+}
+
+/// Bir `Box<T>`'ın içindeki değeri sahiplenerek döndürür ve `Box`'ı yok eder.
+/// Bu, heap'ten değeri geri "kutudan çıkarmak" gibidir.
+///
+/// # Parametreler
+/// - `boxed_value`: İçindeki değeri alınacak `Box<T>` (sahipliği buraya taşınır ve Box yok edilir).
+///
+/// # Dönüş Değeri
+/// `Box`'ın içerdiği değer.
+pub fn into_inner<T>(boxed_value: Box<T>) -> T {
+    // Dahili olarak:
+    // 1. Box'ın işaret ettiği değerden sahiplik taşınır.
+    // 2. Box'ın tuttuğu heap belleği serbest bırakılır.
+    _cnt_box_into_inner(boxed_value)
+}
+
+/// Bir `Box<T>`'ın içerdiği değere immutable bir referans döndürür.
+///
+/// # Parametreler
+/// - `boxed_value`: Referansı alınacak `Box<T>`'nin referansı.
+///
+/// # Dönüş Değeri
+/// `Box`'ın içerdiği değere `&T` referansı.
+pub fn deref<T>(boxed_value: &Box<T>) -> &T {
+    // Rust'taki Deref trait'ine benzer.
+    _cnt_box_deref(boxed_value)
+}
+
+/// Bir `Box<T>`'ın içerdiği değere mutable bir referans döndürür.
+///
+/// # Parametreler
+/// - `boxed_value`: Referansı alınacak `Box<T>`'nin mutable referansı.
+///
+/// # Dönüş Değeri
+/// `Box`'ın içerdiği değere `&mut T` referansı.
+pub fn deref_mut<T>(boxed_value: &mut Box<T>) -> &mut T {
+    // Rust'taki DerefMut trait'ine benzer.
+    _cnt_box_deref_mut(boxed_value)
+}
+
+// Not: `Box<T>` için `drop` fonksiyonu genellikle otomatik olarak implemente edilir ve
+// `Box` kapsam dışına çıktığında çağrılır. Aşağıdaki `drop_box` fonksiyonu,
+// manuel kontrol veya açıklık için bir örnek olarak eklenmiştir, ancak çoğu durumda
+// otomatik Drop mekanizması yeterlidir.
+
+/// Bir `Box<T>`'ı ve içerdiği değeri manuel olarak serbest bırakır.
+/// Bu fonksiyon genellikle otomatik olarak çağrılmaz.
+///
+/// # Parametreler
+/// - `boxed_value`: Serbest bırakılacak `Box<T>` (sahipliği buraya taşınır ve Box yok edilir).
+pub fn drop_box<T>(boxed_value: Box<T>) -> void {
+    _cnt_box_drop(boxed_value)
+}
+
+// --- Diğer Dinamik Bellek Yönetimi Kavramları (Gelecekteki Eklentiler) ---
+
+// Aşağıdaki tipler ve fonksiyonlar, daha karmaşık dinamik bellek ve sahiplik senaryolarını
+// desteklemek için düşünülebilir:
+
+/// `Vec<T>`: Dinamik boyutlu, heap üzerinde büyüyebilen bir dizi.
+/// `std::collections::List<T>`'nin altında yatan implementasyon bu `Vec` yapısını kullanabilir.
+ pub struct Vec<T> { /* ... */ }
+ pub fn new_vec<T>(capacity: int) -> Result<Vec<T>, Error>;
+ pub fn push_vec<T>(vec: &mut Vec<T>, item: T) -> Result<void, Error>;
+ pub fn pop_vec<T>(vec: &mut Vec<T>) -> Option<T>;
+
+/// `Rc<T>` (Reference Counted): Aynı verinin birden fazla "sahibi" olmasına izin veren akıllı işaretçi.
+/// Sayıcı sıfıra düştüğünde veri serbest bırakılır. Thread-safe değildir.
+ pub struct Rc<T> { /* ... */ }
+ pub fn new_rc<T>(value: T) -> Rc<T>;
+ pub fn clone_rc<T>(rc: &Rc<T>) -> Rc<T>; // Sayıcıyı artırır
+ pub fn strong_count<T>(rc: &Rc<T>) -> int;
+
+/// `Arc<T>` (Atomic Reference Counted): `Rc<T>`'nin iş parçacığı güvenli (thread-safe) versiyonu.
+/// Çok iş parçacıklı ortamlarda paylaşılan veriler için kullanılır.
+ pub struct Arc<T> { /* ... */ }
+ pub fn new_arc<T>(value: T) -> Arc<T>;
+ pub fn clone_arc<T>(arc: &Arc<T>) -> Arc<T>;
+ pub fn strong_count_arc<T>(arc: &Arc<T>) -> int;
+
+/// `Cell<T>` / `RefCell<T>`: İçsel değişebilirlik (Interior Mutability) için.
+/// Normalde değiştirilemez bir referans üzerinden bir değeri değiştirmeye izin verir.
+/// Rust'taki borrow checking'i runtime'da uygular.
+ pub struct Cell<T>(T);
+ pub struct RefCell<T>(T);
