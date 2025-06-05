@@ -1,0 +1,121 @@
+// memory_static.cnt
+// Statik Sahiplik ve Ödünç Alma Bellek Yönetimi modülü
+
+// CNT derleyicisinin ve runtime'ının dahili bellek yönetim fonksiyonlarına bağlanan harici çağrılar.
+// Bu fonksiyonlar, değerlerin kopyalanması, taşınması ve serbest bırakılması gibi
+// sahiplik kurallarını uygulayan düşük seviyeli operasyonları gerçekleştirir.
+extern fn _cnt_mem_static_copy<T>(source: &T) -> T; // T'nin kopyalanabilir olduğunu varsayar
+extern fn _cnt_mem_static_move<T>(source: &mut T) -> T; // T'nin taşınabilir olduğunu varsayar, source'u geçersiz kılar
+extern fn _cnt_mem_static_drop<T>(value: T) -> void; // T'nin kaynaklarını serbest bırakır
+extern fn _cnt_mem_static_size_of<T>() -> int; // T tipinin bellekteki boyutu
+extern fn _cnt_mem_static_align_of<T>() -> int; // T tipinin hizalama gereksinimi
+
+// Aşağıdaki struct'lar ve enum'lar, CNT'nin sahiplik ve ödünç alma kavramlarını
+// daha üst düzeyde ifade etmek için tasarlanmıştır.
+
+/// `Move<T>`: Bir değerin sahipliğinin açıkça taşınmasını temsil eden bir "sarmalayıcı" (wrapper).
+/// Bu, bir değerin bir konumdan diğerine taşındığını ve eski konumun artık geçerli olmadığını
+/// belirtmek için kullanılabilir. CNT'nin move semantiği zaten yerleşik olduğu için,
+/// bu struct daha çok kavramsal bir açıklayıcı veya özel durumlar için olabilir.
+pub struct Move<T>(T); // Tuple struct syntax
+
+/// `Copy<T>`: Bir değerin kopyalanabilir olduğunu ve sahipliğinin aktarılmadığını,
+/// bunun yerine yeni bir kopyanın oluşturulduğunu temsil eden bir "sarmalayıcı".
+/// Bu da CNT'nin yerleşik `Copy` anlambilimini vurgular.
+pub struct Copy<T>(T);
+
+/// `Lifetime<'a>`: Bir referansın geçerli olacağı ömür süresini temsil eder.
+/// Bu, Rust'taki ömür parametrelerine benzer şekilde, derleyiciye referansların
+/// hangi veriye ne kadar süre bağlı olduğunu bildirmek için kullanılır.
+/// CNT'nin sözdiziminde ömür belirtimi (`&'a T`) varsa, bu struct daha çok
+/// bilgi amaçlıdır veya ömürleri manuel olarak yönetmek için bir mekanizma sunar.
+// pub struct Lifetime<'a> {} // Eğer dil sözdiziminde ömür desteği varsa, bu doğrudan kullanılır.
+
+
+/// Bir değerin kopyasını oluşturur.
+/// Bu fonksiyon, tipin kopyalanabilir (`Copy`) özelliklerine sahip olmasını gerektirir.
+///
+/// # Parametreler
+/// - `source`: Kopyalanacak değerin immutable referansı.
+///
+/// # Dönüş Değeri
+/// Kaynak değerin yeni bir kopyası. Sahipliği çağrı yapan tarafa aktarılır.
+pub fn copy<T>(source: &T) -> T {
+    // CNT'nin yerleşik kopyalama mekanizmasını veya _cnt_mem_static_copy çağrısını kullanır.
+    // T tipinin kopyalanabilir (örn. Copy trait'i implemente eden) olması gerektiğini varsayarız.
+    _cnt_mem_static_copy(source)
+}
+
+/// Bir değerin sahipliğini başka bir konuma taşır.
+/// Taşıma işleminden sonra `source` referansı artık geçerli değildir ve kullanılamaz.
+///
+/// # Parametreler
+/// - `source`: Taşınacak değerin mutable referansı.
+///
+/// # Dönüş Değeri
+/// Kaynak değerin sahipliği taşınmış versiyonu.
+pub fn transfer_ownership<T>(source: &mut T) -> T {
+    // CNT'nin yerleşik taşıma semantiğini veya _cnt_mem_static_move çağrısını kullanır.
+    _cnt_mem_static_move(source)
+}
+
+/// Bir değerin sahip olduğu kaynakları açıkça serbest bırakır.
+/// Bu fonksiyon genellikle manuel olarak çağrılmaz; CNT'nin sahiplik sistemi
+/// bir değer kapsam dışına çıktığında bu işlemi otomatik olarak gerçekleştirir.
+/// Ancak özel durumlar veya unsafe kod için kullanılabilir.
+///
+/// # Parametreler
+/// - `value`: Kaynakları serbest bırakılacak değer (sahiplik buraya taşınır ve yok edilir).
+pub fn drop<T>(value: T) -> void {
+    // CNT'nin yerleşik Drop mekanizmasını veya _cnt_mem_static_drop çağrısını kullanır.
+    _cnt_mem_static_drop(value)
+}
+
+/// Bir tipin bellekte kapladığı boyutu (byte cinsinden) döndürür.
+///
+/// # Dönüş Değeri
+/// Tipin boyutu (int).
+pub fn size_of<T>() -> int {
+    _cnt_mem_static_size_of::<T>()
+}
+
+/// Bir tipin bellekteki hizalama gereksinimini (byte cinsinden) döndürür.
+///
+/// # Dönüş Değeri
+/// Tipin hizalama gereksinimi (int).
+pub fn align_of<T>() -> int {
+    _cnt_mem_static_align_of::<T>()
+}
+
+
+// --- Daha İleri Kavramlar ve Potansiyel Eklentiler ---
+
+// Aşağıdaki kavramlar, 'statik' bellek yönetimiyle doğrudan ilgili olmasa da,
+// dilin bellek modelini açıklığa kavuşturmak için önemlidir ve gelecekteki modüllerde
+// veya dilin çekirdek özelliklerinde yer alabilir.
+
+/// `Box<T>`: Heap üzerinde tahsis edilmiş tek bir T değeri için akıllı işaretçi.
+/// Bu, bir değeri statik boyutta bilinmeyen veya büyük olan bir tipin yığınına yerleştirmek için kullanılır.
+/// Box'ın Drop edildiğinde heap belleğini otomatik olarak serbest bırakması gerekir.
+ pub struct Box<T> {
+//     // Dahili olarak bir ham işaretçi (raw pointer) ve bellek boyutu
+     _phantom_data: T;
+ }
+ pub fn new_box<T>(value: T) -> Box<T>;
+ pub fn unbox<T>(boxed_value: Box<T>) -> T; // Sahipliği geri alır
+
+/// `Pin<P>`: Bir değerin bellekte taşınamayacağını garanti eden bir işaretçi.
+/// Özellikle asenkron programlamada ve kendinden referanslı yapılarla çalışırken önemlidir.
+/// Bu çok ileri düzey bir kavramdır ve güçlü bir derleyici desteği gerektirir.
+ pub struct Pin<P>(P);
+
+
+/// `RawPtr<T>`: Ham (unsafe) işaretçi tipi.
+/// Bu, güvenli olmayan kod bloklarında manuel bellek yönetimi veya FFI için kullanılabilir.
+/// Ham işaretçilerin bellek güvenliğini garanti etmez ve dikkatli kullanım gerektirir.
+ pub type RawPtr<T> = *mut T; // Mutable ham işaretçi
+ pub type ConstRawPtr<T> = *const T; // Immutable ham işaretçi
+
+ pub unsafe fn deref<T>(ptr: RawPtr<T>) -> &mut T;
+ pub unsafe fn alloc(size: int, align: int) -> RawPtr<u8>;
+ pub unsafe fn dealloc(ptr: RawPtr<u8>, size: int, align: int) -> void;
