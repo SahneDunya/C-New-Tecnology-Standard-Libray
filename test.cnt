@@ -1,0 +1,274 @@
+// test.cnt
+// Test Çatısı Modülü
+// Birim testleri ve entegrasyon testleri yazmak için araçlar ve yardımcı fonksiyonlar sağlar.
+
+import std::string::String;  // Test mesajları için
+import std::vec::Vec;       // Testleri toplamak için
+import std::io;             // Konsola çıktı için
+import std::fmt;            // Biçimlendirme için
+import std::error::Error; // Hata türleri için
+import std::result::Result; // Fonksiyon sonuçlarını yönetmek için
+
+/// `TestResult`: Bir test fonksiyonunun sonucunu temsil eden enum.
+pub enum TestResult {
+    /// Test başarılı oldu.
+    Success,
+    /// Test başarısız oldu, hata mesajı ile birlikte.
+    Failure(String),
+}
+
+/// `TestCase`: Bir test fonksiyonunu ve adını içeren yapı.
+pub struct TestCase {
+    pub name: String,
+    // Test fonksiyonu genellikle bir closure veya fonksiyon işaretçisi olarak tutulur.
+    // Varsayımsal olarak, testin sonucu döndüren bir closure'dır.
+    pub func: fn() -> TestResult, // fn() -> TestResult signature'ına sahip fonksiyon işaretçisi
+}
+
+impl TestCase {
+    /// `new(name: String, func: fn() -> TestResult) -> TestCase`:
+    /// Yeni bir `TestCase` oluşturur.
+    pub fn new(name: String, func: fn() -> TestResult) -> TestCase {
+        TestCase { name, func }
+    }
+}
+
+/// `TestRunner`: Testleri yöneten ve çalıştıran ana yapı.
+pub struct TestRunner {
+    test_cases: Vec<TestCase>,
+    success_count: u64,
+    failure_count: u64,
+}
+
+impl TestRunner {
+    /// `new() -> TestRunner`: Yeni bir `TestRunner` örneği oluşturur.
+    pub fn new() -> TestRunner {
+        TestRunner {
+            test_cases: Vec::new(),
+            success_count: 0,
+            failure_count: 0,
+        }
+    }
+
+    /// `add_test(&mut self, test_case: TestCase)`:
+    /// Test çalıştırıcısına bir test durumu ekler.
+    pub fn add_test(&mut self, test_case: TestCase) {
+        self.test_cases.push(test_case);
+    }
+
+    /// `run_all_tests(&mut self)`:
+    /// Kayıtlı tüm testleri çalıştırır ve sonuçları konsola yazdırır.
+    pub fn run_all_tests(&mut self) {
+        io::println("Running tests...".to_string());
+        io::println("----------------------------------------".to_string());
+
+        for test_case in &self.test_cases {
+            io::print(&format!("Test: {} ... ", test_case.name));
+            let result = (test_case.func)(); // Test fonksiyonunu çağır
+
+            match result {
+                TestResult::Success => {
+                    self.success_count += 1;
+                    io::println("OK".to_string());
+                }
+                TestResult::Failure(msg) => {
+                    self.failure_count += 1;
+                    io::println("FAILED".to_string());
+                    io::println(&format!("    Reason: {}", msg));
+                }
+            }
+        }
+
+        io::println("----------------------------------------".to_string());
+        io::println(&format!("Test Results: {} Succeeded, {} Failed, {} Total",
+                            self.success_count.to_string(),
+                            self.failure_count.to_string(),
+                            (self.success_count + self.failure_count).to_string()));
+
+        if self.failure_count > 0 {
+            // Gerçek bir test koşucusunda burada programın hata koduyla çıkması gerekirdi.
+             std::process::exit(1);
+        }
+    }
+}
+
+// --- Test İddiaları (Assertions) ---
+
+/// `assert!(condition: bool, message: String) -> TestResult`:
+/// Bir koşulun doğru olduğunu iddia eder. Yanlışsa `TestResult::Failure` döndürür.
+/// `message`: Koşul yanlış olduğunda gösterilecek hata mesajı.
+pub fn assert(condition: bool, message: String) -> TestResult {
+    if !condition {
+        TestResult::Failure(message)
+    } else {
+        TestResult::Success
+    }
+}
+
+/// `assert_eq!<T: PartialEq + fmt::Debug>(left: T, right: T, message: String) -> TestResult`:
+/// İki değerin eşit olduğunu iddia eder. Eşit değilse `TestResult::Failure` döndürür.
+/// `PartialEq` ve `fmt::Debug` trait'lerinin var olduğu varsayılır.
+// Makro olarak varsayılır, CNT'de nasıl tanımlanırsa.
+ #[macro_export]
+ macro_rules! assert_eq {
+     ($left:expr, $right:expr, $msg:expr) => {
+         if !($left == $right) {
+             return $crate::test::TestResult::Failure(format!($msg));
+         }
+         $crate::test::TestResult::Success
+     };
+     ($left:expr, $right:expr) => {
+         $crate::test::assert_eq!($left, $right, format!("assertion failed: `(left == right)`\n  left: `{:?}`,\n right: `{:?}`", $left, $right))
+     };
+ }
+pub fn assert_eq<T: PartialEq + fmt::Debug>(left: T, right: T, message: String) -> TestResult {
+    if !(left == right) {
+        TestResult::Failure(format!("{} (Left: {:?}, Right: {:?})", message, left, right))
+    } else {
+        TestResult::Success
+    }
+}
+
+/// `assert_ne!<T: PartialEq + fmt::Debug>(left: T, right: T, message: String) -> TestResult`:
+/// İki değerin eşit olmadığını iddia eder. Eşitse `TestResult::Failure` döndürür.
+// Makro olarak varsayılır.
+pub fn assert_ne<T: PartialEq + fmt::Debug>(left: T, right: T, message: String) -> TestResult {
+    if left == right {
+        TestResult::Failure(format!("{} (Left: {:?}, Right: {:?})", message, left, right))
+    } else {
+        TestResult::Success
+    }
+}
+
+/// `assert_ok!<T, E>(result: Result<T, E>) -> TestResult`:
+/// Bir `Result`'ın `Ok` varyantı olduğunu iddia eder. `Err` ise `TestResult::Failure` döndürür.
+/// Özellikle hata yönetimi testlerinde kullanışlıdır.
+pub fn assert_ok<T, E: Error>(result: Result<T, E>) -> TestResult {
+    if result.is_err() {
+        TestResult::Failure(format!("Expected Ok, but got Err: {}", result.unwrap_err().to_string()))
+    } else {
+        TestResult::Success
+    }
+}
+
+/// `assert_err!<T, E>(result: Result<T, E>) -> TestResult`:
+/// Bir `Result`'ın `Err` varyantı olduğunu iddia eder. `Ok` ise `TestResult::Failure` döndürür.
+pub fn assert_err<T, E: Error>(result: Result<T, E>) -> TestResult {
+    if result.is_ok() {
+        TestResult::Failure(format!("Expected Err, but got Ok: {:?}", result.unwrap())) // Debug print for T
+    } else {
+        TestResult::Success
+    }
+}
+
+// --- Test Macro'su (Varsayımsal) ---
+// Rust'taki #[test] niteliğine benzer bir mekanizma.
+// CNT'de doğrudan nitelik desteği olmayabilir, bu nedenle manuel kayıt veya bir makro ile yapılabilir.
+
+// #[test] niteliğini simüle eden bir mekanizma:
+// Normalde bu, derleyici tarafından otomatik olarak algılanır veya özel bir test ikili dosyası tarafından toplanır.
+// Basitlik adına, burada manuel olarak `TestRunner`'a ekleyeceğiz.
+
+ fn test_add_two_numbers() -> TestResult {
+     let x = 1;
+     let y = 2;
+     assert_eq(x + y, 3, "Addition should be correct.".to_string())
+ }
+
+ fn test_string_concatenation() -> TestResult {
+     let s1 = "Hello".to_string();
+     let s2 = " World".to_string();
+     assert_eq(s1 + &s2, "Hello World".to_string(), "String concatenation should work.".to_string())
+ }
+
+ fn test_division_by_zero_error() -> TestResult {
+//     // Varsayımsal bir division fonksiyonu:
+     fn divide(a: i64, b: i64) -> Result<i64, std::error::SystemError> {
+         if b == 0 {
+             return Result::Err(std::error::SystemError::new(1, "Division by zero".to_string()));
+         }
+         Result::Ok(a / b)
+     }
+     let result = divide(10, 0);
+     assert_err(result)
+ }
+
+
+// --- Örnek Kullanım (main fonksiyonu) ---
+
+import std::test::{self, TestRunner, TestCase, TestResult};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::SystemError; // Test edilen fonksiyonun hata türü için
+
+
+// Test fonksiyonları
+fn test_addition() -> TestResult {
+    io::println("  Running test_addition...".to_string());
+    let a = 5;
+    let b = 3;
+    test::assert_eq(a + b, 8, "5 + 3 should be 8".to_string())
+}
+
+fn test_subtraction_failure() -> TestResult {
+    io::println("  Running test_subtraction_failure...".to_string());
+    let x = 10;
+    let y = 4;
+    // Bu testin başarısız olması bekleniyor
+    test::assert_eq(x - y, 7, "10 - 4 should be 6, intentionally failing for demonstration.".to_string())
+}
+
+fn test_string_length() -> TestResult {
+    io::println("  Running test_string_length...".to_string());
+    let s = "CNT Programming".to_string();
+    test::assert(s.len() == 15, "String length should be 15.".to_string())
+}
+
+fn test_empty_string_length() -> TestResult {
+    io::println("  Running test_empty_string_length...".to_string());
+    let s = "".to_string();
+    test::assert_eq(s.len(), 0, "Empty string length should be 0.".to_string())
+}
+
+// Varsayımsal bir bölme fonksiyonu
+fn safe_divide(numerator: i64, denominator: i64) -> Result<i64, SystemError> {
+    if denominator == 0 {
+        return Result::Err(SystemError::new(100, "Division by zero is not allowed.".to_string()));
+    }
+    Result::Ok(numerator / denominator)
+}
+
+fn test_safe_divide_ok() -> TestResult {
+    io::println("  Running test_safe_divide_ok...".to_string());
+    let result = safe_divide(10, 2);
+    test::assert_ok(result)?; // `?` operatörü varsayımsal, eğer Err ise erken döner
+    test::assert_eq(result.unwrap(), 5, "10 / 2 should be 5.".to_string())
+}
+
+fn test_safe_divide_err() -> TestResult {
+    io::println("  Running test_safe_divide_err...".to_string());
+    let result = safe_divide(10, 0);
+    test::assert_err(result)
+}
+
+
+fn main() {
+    let mut runner = TestRunner::new();
+
+    // Testleri kaydet
+    runner.add_test(TestCase::new("test_addition".to_string(), test_addition));
+    runner.add_test(TestCase::new("test_subtraction_failure".to_string(), test_subtraction_failure));
+    runner.add_test(TestCase::new("test_string_length".to_string(), test_string_length));
+    runner.add_test(TestCase::new("test_empty_string_length".to_string(), test_empty_string_length));
+    runner.add_test(TestCase::new("test_safe_divide_ok".to_string(), test_safe_divide_ok));
+    runner.add_test(TestCase::new("test_safe_divide_err".to_string(), test_safe_divide_err));
+
+    // Tüm testleri çalıştır
+    runner.run_all_tests();
+
+    // Gerçek bir test ortamında, test başarısız olursa programın çıkış kodunu 1 olarak ayarlardık.
+     if runner.failure_count > 0 {
+         std::process::exit(1);
+     }
+}
