@@ -1,0 +1,315 @@
+// gpio.cnt
+// Genel Amaçlı Giriş/Çıkış (GPIO) Modülü
+// Donanım pinlerini programlı olarak kontrol etmek için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli donanım kayıtlarıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+
+/// `GpioError`: GPIO işlemleri sırasında oluşabilecek hata türleri.
+pub enum GpioError {
+    /// Geçersiz pin numarası.
+    InvalidPinNumber(String),
+    /// Pin zaten başka bir modda kullanılıyor.
+    PinInUse(String),
+    /// Pin yanlış modda (örn. giriş pinine yazmaya çalışmak).
+    WrongPinMode(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Genel bir GPIO hatası.
+    Custom(String),
+}
+
+impl Error for GpioError {
+    fn description(&self) -> String {
+        match self {
+            GpioError::InvalidPinNumber(msg) => format!("Invalid GPIO Pin Number: {}", msg),
+            GpioError::PinInUse(msg) => format!("GPIO Pin In Use: {}", msg),
+            GpioError::WrongPinMode(msg) => format!("Wrong GPIO Pin Mode: {}", msg),
+            GpioError::HardwareAccessError(msg) => format!("GPIO Hardware Access Error: {}", msg),
+            GpioError::Custom(msg) => format!("GPIO Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `PinMode`: GPIO pininin çalışma modunu tanımlar.
+pub enum PinMode {
+    /// Pin Giriş olarak ayarlı.
+    Input,
+    /// Pin Çıkış olarak ayarlı.
+    Output,
+    /// Pin, özel bir donanım fonksiyonu için alternatif modda (örn. UART, SPI, I2C).
+    AlternateFunction(u8), // Varsayımsal olarak alternatif fonksiyon numarası
+    /// Pin devre dışı veya analog modda.
+    Analog,
+}
+
+/// `PullMode`: Dahili çekme (pull) direncinin durumunu tanımlar.
+pub enum PullMode {
+    /// Dahili direnç yok (floating).
+    None,
+    /// Dahili yukarı çekme direnci (pull-up).
+    PullUp,
+    /// Dahili aşağı çekme direnci (pull-down).
+    PullDown,
+}
+
+/// `PinValue`: Dijital pinin mantıksal değerini tanımlar.
+pub enum PinValue {
+    /// Düşük (0V) veya Mantıksal Düşük.
+    Low,
+    /// Yüksek (3.3V/5V) veya Mantıksal Yüksek.
+    High,
+}
+
+impl PinValue {
+    fn to_u8(&self) -> u8 {
+        match self {
+            PinValue::Low => 0,
+            PinValue::High => 1,
+        }
+    }
+
+    fn from_u8(val: u8) -> PinValue {
+        if val == 0 { PinValue::Low } else { PinValue::High }
+    }
+}
+
+/// `GpioPin`: Tek bir GPIO pinini temsil eden yapı.
+/// Bu yapı, pinin durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct GpioPin {
+    pin_number: u32,
+    current_mode: PinMode,
+    // Gerçek bir implementasyonda, burada pinin ilgili donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, control_reg_offset: u32, data_reg_offset: u32
+}
+
+impl GpioPin {
+    /// `new(pin_number: u32) -> Result<GpioPin, GpioError>`:
+    /// Belirtilen pin numarası için yeni bir `GpioPin` örneği oluşturur.
+    /// Pin başlangıçta varsayılan bir modda (örn. giriş veya devre dışı) olur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir GPIO pinini başlatmak,
+    /// donanım kaynaklarını ayırabilir veya varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(pin_number: u32) -> Result<GpioPin, GpioError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if pin_number >= MAX_GPIO_PINS { // MAX_GPIO_PINS tanımlanmış bir sabit olmalı
+            return Result::Err(GpioError::InvalidPinNumber(
+                format!("Pin number {} is out of range.", pin_number.to_string())
+            ));
+        }
+
+        // Pin'in varsayılan durumunu (örneğin, giriş modu) ayarla.
+        // Bu, ilgili donanım register'ına yazmayı içerebilir.
+        io::println(&format!("HW_API: Initializing GPIO Pin {}.", pin_number.to_string()));
+         os_api::gpio_init_pin(pin_number);
+
+        Result::Ok(GpioPin {
+            pin_number,
+            current_mode: PinMode::Input, // Varsayılan olarak giriş
+        })
+    }
+
+    /// `set_mode(&mut self, mode: PinMode) -> Result<(), GpioError>`:
+    /// Pin'in çalışma modunu (Giriş, Çıkış, Alternatif Fonksiyon vb.) ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü donanım kayıtlarını doğrudan değiştirir
+    /// ve yanlış mod ayarı donanıma zarar verebilir veya beklenmedik davranışlara neden olabilir.
+    pub unsafe fn set_mode(&mut self, mode: PinMode) -> Result<(), GpioError> {
+        io::println(&format!("HW_API: Setting Pin {} mode to {:?}.", self.pin_number.to_string(), mode));
+        
+        // Gerçekte, burada pinin kontrol register'larına yazma işlemi gerçekleşir.
+        // Örneğin: `write_register(self.base_addr + CONTROL_REG_OFFSET, calculate_mode_bits(mode));`
+        
+        // Simülasyon olarak başarılı olduğunu varsayıyoruz.
+         if !os_api::gpio_set_pin_mode(self.pin_number, mode) {
+             return Result::Err(GpioError::HardwareAccessError("Failed to set pin mode.".to_string()));
+         }
+        self.current_mode = mode;
+        Result::Ok(())
+    }
+
+    /// `set_pull_mode(&mut self, pull_mode: PullMode) -> Result<(), GpioError>`:
+    /// Pin'in dahili çekme (pull-up/pull-down) direncini ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü donanım kayıtlarını doğrudan değiştirir.
+    pub unsafe fn set_pull_mode(&mut self, pull_mode: PullMode) -> Result<(), GpioError> {
+        io::println(&format!("HW_API: Setting Pin {} pull mode to {:?}.", self.pin_number.to_string(), pull_mode));
+        // Gerçekte, ilgili donanım register'larına yazma işlemi gerçekleşir.
+         if !os_api::gpio_set_pin_pull_mode(self.pin_number, pull_mode) {
+             return Result::Err(GpioError::HardwareAccessError("Failed to set pull mode.".to_string()));
+         }
+        Result::Ok(())
+    }
+
+    /// `write(&self, value: PinValue) -> Result<(), GpioError>`:
+    /// Pin çıkış olarak ayarlanmışsa, pinin dijital değerini yazar (High/Low).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü donanım kayıtlarını doğrudan değiştirir
+    /// ve yanlışlıkla bir giriş pinine yazmak veya yüksek akım çekmek donanıma zarar verebilir.
+    pub unsafe fn write(&self, value: PinValue) -> Result<(), GpioError> {
+        match self.current_mode {
+            PinMode::Output => {
+                io::println(&format!("HW_API: Writing Pin {} value to {:?}.", self.pin_number.to_string(), value));
+                // Gerçekte, ilgili donanım register'ına yazma işlemi gerçekleşir.
+                // Örneğin: `write_register(self.base_addr + DATA_REG_OFFSET, value.to_u8());`
+                 if !os_api::gpio_write_pin(self.pin_number, value) {
+                     return Result::Err(GpioError::HardwareAccessError("Failed to write pin value.".to_string()));
+                 }
+                Result::Ok(())
+            },
+            _ => Result::Err(GpioError::WrongPinMode(
+                format!("Cannot write to Pin {} because it is not in Output mode.", self.pin_number.to_string())
+            )),
+        }
+    }
+
+    /// `read(&self) -> Result<PinValue, GpioError>`:
+    /// Pin giriş olarak ayarlanmışsa, pinin mevcut dijital değerini okur (High/Low).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü donanım kayıtlarından doğrudan okur
+    /// ve yanlış bir adresten okumak tanımsız davranışlara neden olabilir.
+    pub unsafe fn read(&self) -> Result<PinValue, GpioError> {
+        match self.current_mode {
+            PinMode::Input => {
+                io::println(&format!("HW_API: Reading Pin {} value.", self.pin_number.to_string()));
+                // Gerçekte, ilgili donanım register'ından okuma işlemi gerçekleşir.
+                // Örneğin: `let raw_val = read_register(self.base_addr + DATA_REG_OFFSET);`
+                let simulated_value = 1; // Simülasyon: her zaman 1 (High) okuyalım
+                 if os_api::gpio_read_pin(self.pin_number).is_err() {
+                     return Result::Err(GpioError::HardwareAccessError("Failed to read pin value.".to_string()));
+                 }
+                Result::Ok(PinValue::from_u8(simulated_value))
+            },
+            _ => Result::Err(GpioError::WrongPinMode(
+                format!("Cannot read from Pin {} because it is not in Input mode.", self.pin_number.to_string())
+            )),
+        }
+    }
+
+    /// `get_mode(&self) -> PinMode`:
+    /// Pin'in mevcut çalışma modunu döndürür.
+    pub fn get_mode(&self) -> &PinMode {
+        &self.current_mode
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum GPIO pin sayısını belirtir.
+const MAX_GPIO_PINS: u32 = 32; // Örneğin, bir mikrodenetleyicide 32 GPIO pini olduğunu varsayalım.
+
+
+// --- Örnek Kullanım ---
+
+import std::gpio::{self, GpioPin, PinMode, PinValue, PullMode, GpioError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+
+fn main() {
+    io::println("Starting GPIO example...".to_string());
+
+    // Pin 13'ü (Genellikle bir LED'in bağlı olduğu varsayılır)
+    // ve Pin 2'yi (Genellikle bir düğmeye bağlı olduğu varsayılır) kullanalım.
+
+    io::println("\n--- Initializing GPIO Pins ---".to_string());
+
+    // UNSAFE BLOCK - GPIO pinlerini başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let mut led_pin_res = GpioPin::new(13); // LED Pini
+        let mut button_pin_res = GpioPin::new(2); // Düğme Pini
+
+        let mut led_pin: Option<GpioPin> = Option::None;
+        let mut button_pin: Option<GpioPin> = Option::None;
+
+        match led_pin_res {
+            Result::Ok(pin) => {
+                io::println("LED Pin 13 created successfully.".to_string());
+                led_pin = Option::Some(pin);
+            },
+            Result::Err(e) => io::println(&format!("Error creating LED Pin: {}", e.description())),
+        }
+
+        match button_pin_res {
+            Result::Ok(pin) => {
+                io::println("Button Pin 2 created successfully.".to_string());
+                button_pin = Option::Some(pin);
+            },
+            Result::Err(e) => io::println(&format!("Error creating Button Pin: {}", e.description())),
+        }
+
+        // LED Pinini çıkış olarak ayarla
+        if let Option::Some(mut pin) = led_pin { // 'mut' keyword is important to modify the pin
+            io::println("\n--- Setting LED Pin 13 to Output Mode ---".to_string());
+            match pin.set_mode(PinMode::Output) {
+                Result::Ok(_) => io::println("LED Pin 13 set to Output.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting LED Pin mode: {}", e.description())),
+            }
+
+            io::println("Toggling LED Pin 13 (High/Low)...".to_string());
+            match pin.write(PinValue::High) {
+                Result::Ok(_) => io::println("LED Pin 13 set High.".to_string()),
+                Result::Err(e) => io::println(&format!("Error writing to LED Pin: {}", e.description())),
+            }
+            // std::spirit::sleep_ms(500); // Varsayımsal gecikme
+            io::println(" (simulated delay)".to_string());
+
+            match pin.write(PinValue::Low) {
+                Result::Ok(_) => io::println("LED Pin 13 set Low.".to_string()),
+                Result::Err(e) => io::println(&format!("Error writing to LED Pin: {}", e.description())),
+            }
+            // std::spirit::sleep_ms(500); // Varsayımsal gecikme
+            io::println(" (simulated delay)".to_string());
+            led_pin = Option::Some(pin); // Güncellenmiş pini geri kaydet
+        }
+
+        // Düğme Pinini giriş olarak ayarla ve çekme direnci ekle
+        if let Option::Some(mut pin) = button_pin {
+            io::println("\n--- Setting Button Pin 2 to Input Mode with Pull-Up ---".to_string());
+            match pin.set_mode(PinMode::Input) {
+                Result::Ok(_) => io::println("Button Pin 2 set to Input.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting Button Pin mode: {}", e.description())),
+            }
+
+            match pin.set_pull_mode(PullMode::PullUp) {
+                Result::Ok(_) => io::println("Button Pin 2 set to Pull-Up.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting Button Pin pull mode: {}", e.description())),
+            }
+
+            io::println("Reading Button Pin 2 value (simulated press)...".to_string());
+            match pin.read() {
+                Result::Ok(value) => io::println(&format!("Button Pin 2 read value: {:?}", value)), // Output: High (varsayımsal)
+                Result::Err(e) => io::println(&format!("Error reading Button Pin: {}", e.description())),
+            }
+            button_pin = Option::Some(pin); // Güncellenmiş pini geri kaydet
+        }
+
+        // Yanlış mod hatası örneği: Giriş pinine yazmaya çalışmak
+        if let Option::Some(pin) = button_pin {
+            io::println("\n--- Attempting to Write to an Input Pin (Expected Error) ---".to_string());
+            match pin.write(PinValue::High) {
+                Result::Ok(_) => io::println("This should not happen: Successfully wrote to input pin!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: WrongPinMode
+            }
+        }
+    }
+
+    io::println("\nGPIO example finished.".to_string());
+}
