@@ -1,63 +1,296 @@
 // io.cnt
-// Standart Girdi/Çıktı (Input/Output) modülü
+// Girdi/Çıktı (Input/Output) İşlemleri Modülü
+// Konsol, dosya ve diğer G/Ç kaynakları ile etkileşim için temel işlevler sağlar.
 
-// Harici C veya sistem fonksiyonlarına bağlandığı varsayılan dahili fonksiyonlar.
-// Bu fonksiyonların gerçek implementasyonları CNT derleyicisi veya runtime tarafından sağlanacaktır.
-// Örneğin, "external_print_string" C'deki `printf` veya Rust'taki `libc::puts` gibi bir fonksiyona denk gelebilir.
-extern fn _cnt_print_string(s: &string) -> void;
-extern fn _cnt_read_line() -> string;
-extern fn _cnt_read_char() -> char;
-extern fn _cnt_read_int() -> int;
-extern fn _cnt_read_float() -> float;
-extern fn _cnt_new_line() -> void; // Yeni satır basmak için
+import std::string::String;  // Metin verileri için
+import std::vec::Vec;       // Bayt dizileri veya satırlar için
+import std::result::Result; // Hata yönetimi için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::fmt;            // Hata mesajları için formatlama
 
-/// Konsola bir dize yazdırır.
-/// Dize sahipliği aktarılmaz, sadece ödünç alınır.
-pub fn print(message: &string) -> void {
-    _cnt_print_string(message);
+/// `IoError`: G/Ç işlemleri sırasında oluşabilecek hata türlerini temsil eder.
+pub enum IoError {
+    /// Dosya bulunamadı hatası.
+    FileNotFound(String),
+    /// İzin reddedildi hatası.
+    PermissionDenied(String),
+    /// Geçersiz argüman hatası.
+    InvalidInput(String),
+    /// Veri okuma/yazma sırasında hata.
+    IoError(String),
+    /// G/Ç kaynağı (akış) kapatıldı.
+    BrokenPipe(String),
+    /// Genel bir G/Ç hatası.
+    Custom(String),
 }
 
-/// Konsola bir dize yazdırır ve ardından yeni bir satıra geçer.
-/// Dize sahipliği aktarılmaz, sadece ödünç alınır.
-pub fn println(message: &string) -> void {
-    _cnt_print_string(message);
-    _cnt_new_line();
+// --- Temel G/Ç Trait'leri ---
+
+/// `Read`: Bir kaynaktan veri okuma yeteneğini temsil eden bir trait.
+pub trait Read {
+    /// `read(&mut self, buf: &mut Vec<u8>) -> Result<u64, IoError>`:
+    /// Kaynaktan `buf`'a bayt dizisi okur ve okunan bayt sayısını döndürür.
+    /// Tamponun kapasitesi kadar veya kaynaktan okunan veri kadar okur.
+    fn read(&mut self, buf: &mut Vec<u8>) -> Result<u64, IoError>;
+
+    /// `read_to_string(&mut self, buf: &mut String) -> Result<u64, IoError>`:
+    /// Kaynaktan tüm veriyi okur ve `buf` string'ine ekler.
+    /// Okunan bayt sayısını döndürür. Verinin geçerli UTF-8 olduğu varsayılır.
+    fn read_to_string(&mut self, buf: &mut String) -> Result<u64, IoError>;
+
+    /// `bytes(&mut self) -> Iterator<Result<u8, IoError>>`:
+    /// Okuyucudan birer birer bayt okuyan bir iterator döndürür.
+    // Varsayımsal bir iterator arayüzü gerektirir.
+    // Şu an için direkt implementasyona dahil etmiyoruz.
 }
 
-/// Konsoldan bir satır metin okur ve okunan dizeyi döndürür.
-/// Döndürülen dize yeni oluşturulur ve bu fonksiyonun çağrıldığı yere sahipliği aktarılır.
-pub fn read_line() -> string {
-    _cnt_read_line()
+/// `Write`: Bir hedefe veri yazma yeteneğini temsil eden bir trait.
+pub trait Write {
+    /// `write(&mut self, buf: &Vec<u8>) -> Result<u64, IoError>`:
+    /// `buf`'taki bayt dizisini hedefe yazar ve yazılan bayt sayısını döndürür.
+    fn write(&mut self, buf: &Vec<u8>) -> Result<u64, IoError>;
+
+    /// `write_string(&mut self, s: &String) -> Result<u64, IoError>`:
+    /// Bir string'i hedefe yazar. Yazılan bayt sayısını döndürür (UTF-8 bayt sayısı).
+    fn write_string(&mut self, s: &String) -> Result<u64, IoError>;
+
+    /// `flush(&mut self) -> Result<(), IoError>`:
+    /// Arabelleklenmiş (buffered) tüm veriyi hedefe boşaltır (yazar).
+    fn flush(&mut self) -> Result<(), IoError>;
 }
 
-/// Konsoldan tek bir karakter okur ve döndürür.
-pub fn read_char() -> char {
-    _cnt_read_char()
+// --- Konsol G/Ç ---
+
+/// `stdout()`: Standart çıktı akışına erişim sağlar.
+/// `io::stdout().write_string("Hello").unwrap()` gibi kullanılabilir.
+pub fn stdout() -> Stdout {
+    Stdout { /* dahili OS handle */ }
 }
 
-/// Konsoldan bir tam sayı okur ve döndürür.
-/// Geçersiz giriş durumunda hata yönetimi (örn. Result enum'u) burada düşünülmelidir.
-/// Şimdilik, sadece ham int döndürdüğü varsayılıyor.
-pub fn read_int() -> int {
-    _cnt_read_int()
+/// `stdin()`: Standart girdi akışına erişim sağlar.
+/// `io::stdin().read_line().unwrap()` gibi kullanılabilir.
+pub fn stdin() -> Stdin {
+    Stdin { /* dahili OS handle */ }
 }
 
-/// Konsoldan bir ondalık sayı (float) okur ve döndürür.
-/// Geçersiz giriş durumunda hata yönetimi burada düşünülmelidir.
-pub fn read_float() -> float {
-    _cnt_read_float()
+/// `stderr()`: Standart hata akışına erişim sağlar.
+pub fn stderr() -> Stderr {
+    Stderr { /* dahili OS handle */ }
 }
 
-// İstenirse, farklı tipleri string'e dönüştürmek için yardımcı fonksiyonlar eklenebilir.
-// Örneğin:
- pub fn print_int(value: int) -> void {
-     print(&value.toString());
+/// `Stdout`: Standart çıktı akışını temsil eden yapı.
+pub struct Stdout {
+    // Dahili OS handle (varsayımsal)
+}
+
+impl Write for Stdout {
+    fn write(&mut self, buf: &Vec<u8>) -> Result<u64, IoError> {
+        // İşletim sistemine `buf`'taki baytları konsola yazması için çağrı (varsayımsal)
+        let written_bytes = buf.len() as u64;
+        io::println_raw(String::from_utf8(buf.clone()).unwrap_or("<<Invalid UTF-8>>".to_string())); // Sadece demo amaçlı
+        Result::Ok(written_bytes)
+    }
+
+    fn write_string(&mut self, s: &String) -> Result<u64, IoError> {
+        // İşletim sistemine `s` string'ini konsola yazması için çağrı (varsayımsal)
+        io::println_raw(s.clone()); // Sadece demo amaçlı
+        Result::Ok(s.len() as u64)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        // Konsol çıktısı genellikle hemen boşaltılır, ancak bu bir yer tutucudur.
+        Result::Ok(())
+    }
+}
+
+/// `Stdin`: Standart girdi akışını temsil eden yapı.
+pub struct Stdin {
+    // Dahili OS handle (varsayımsal)
+}
+
+impl Read for Stdin {
+    fn read(&mut self, buf: &mut Vec<u8>) -> Result<u64, IoError> {
+        // İşletim sisteminden girdi okuma (varsayımsal)
+        // Bu, klavyeden veya yönlendirilmiş girdiden baytları doldurur.
+        let demo_input = "Hello CNT stdin!\n".to_string().into_bytes(); // Örnek girdi
+        let bytes_to_copy = std::cmp::min(buf.capacity() as u64, demo_input.len() as u64);
+        buf.clear();
+        for i in 0..bytes_to_copy as usize {
+            buf.push(demo_input[i]);
+        }
+        Result::Ok(bytes_to_copy)
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> Result<u64, IoError> {
+        // İşletim sisteminden string girdi okuma (varsayımsal)
+        let demo_input = "This is a line from stdin example.\n".to_string(); // Örnek girdi
+        buf.push_str(&demo_input);
+        Result::Ok(demo_input.len() as u64)
+    }
+}
+
+impl Stdin {
+    /// `read_line(&mut self) -> Result<String, IoError>`:
+    /// Standart girdiden bir satır okur (yeni satır karakteri dahil).
+    pub fn read_line(&mut self) -> Result<String, IoError> {
+        let mut buffer = String::new();
+        // Gerçek implementasyonda, burada satır satır okuma döngüsü olur.
+        // Şimdilik sadece bir örnek döndürüyoruz.
+        buffer.push_str(&"User input example line.\n".to_string());
+        Result::Ok(buffer)
+    }
+}
+
+/// `Stderr`: Standart hata akışını temsil eden yapı.
+pub struct Stderr {
+    // Dahili OS handle (varsayımsal)
+}
+
+impl Write for Stderr {
+    fn write(&mut self, buf: &Vec<u8>) -> Result<u64, IoError> {
+        // İşletim sistemine `buf`'taki baytları hata çıktısına yazması için çağrı (varsayımsal)
+        let written_bytes = buf.len() as u64;
+        io::println_raw(String::from_utf8(buf.clone()).unwrap_or("<<Invalid UTF-8>>".to_string())); // Sadece demo amaçlı
+        Result::Ok(written_bytes)
+    }
+
+    fn write_string(&mut self, s: &String) -> Result<u64, IoError> {
+        // İşletim sistemine `s` string'ini hata çıktısına yazması için çağrı (varsayımsal)
+        io::println_raw(s.clone()); // Sadece demo amaçlı
+        Result::Ok(s.len() as u64)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        Result::Ok(())
+    }
+}
+
+
+// --- Dosya G/Ç ---
+
+/// `File`: Bir dosya sistemi dosyasını temsil eden yapı.
+pub struct File {
+    path: String,
+    // Dahili OS file handle (varsayımsal)
+    // Bu, dosya açıkken işletim sisteminin dosya tutamacı olabilir.
+}
+
+/// `FileMode`: Bir dosyanın nasıl açılacağını belirten enum.
+pub enum FileMode {
+    Read,     // Sadece okuma için aç.
+    Write,    // Yazma için aç (varsa içeriği siler, yoksa oluşturur).
+    Append,   // Yazma için aç (mevcut içeriğin sonuna ekler, yoksa oluşturur).
+    ReadWrite,// Hem okuma hem yazma için aç.
+}
+
+impl File {
+    /// `open(path: String, mode: FileMode) -> Result<File, IoError>`:
+    /// Belirtilen yoldaki dosyayı belirtilen modda açar.
+    pub fn open(path: String, mode: FileMode) -> Result<File, IoError> {
+        io::println(&format!("Opening file: {} with mode {:?}", path, mode));
+        // Varsayımsal bir OS API çağrısı simülasyonu:
+         let os_file_handle = os_api::open_file(path, mode);
+         if os_file_handle.is_err() {
+             return Result::Err(IoError::FileNotFound(path)); // Daha spesifik hata yönetimi gerekebilir
+         }
+         Result::Ok(File { path: path, os_handle: os_file_handle.unwrap() })
+
+        // Sadece demo amaçlı, her zaman başarılı dönüyoruz
+        Result::Ok(File { path })
+    }
+
+    /// `create(path: String) -> Result<File, IoError>`:
+    /// Belirtilen yolda yeni bir dosya oluşturur. Eğer dosya zaten varsa, içeriğini siler.
+    /// `File::open(path, FileMode::Write)` ile eşdeğerdir.
+    pub fn create(path: String) -> Result<File, IoError> {
+        io::println(&format!("Creating file: {}", path));
+        File::open(path, FileMode::Write)
+    }
+
+    /// `close(self) -> Result<(), IoError>`:
+    /// Dosyayı kapatır ve tüm arabelleklenmiş veriyi boşaltır.
+    /// `self`'i tüketir.
+    pub fn close(self) -> Result<(), IoError> {
+        io::println(&format!("Closing file: {}", self.path));
+        // Varsayımsal bir OS API çağrısı
+        Result::Ok(())
+    }
+}
+
+impl Read for File {
+    fn read(&mut self, buf: &mut Vec<u8>) -> Result<u64, IoError> {
+        io::println(&format!("Reading from file: {}", self.path));
+        // Varsayımsal olarak dosyadan veri okuma
+        let demo_file_content = "This is some content from the file.\nAnother line.".to_string().into_bytes();
+        let bytes_to_copy = std::cmp::min(buf.capacity() as u64, demo_file_content.len() as u64);
+        buf.clear();
+        for i in 0..bytes_to_copy as usize {
+            buf.push(demo_file_content[i]);
+        }
+        Result::Ok(bytes_to_copy)
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> Result<u64, IoError> {
+        io::println(&format!("Reading string from file: {}", self.path));
+        let demo_file_content = "File content as string example.\nLine two.".to_string();
+        buf.push_str(&demo_file_content);
+        Result::Ok(demo_file_content.len() as u64)
+    }
+}
+
+impl Write for File {
+    fn write(&mut self, buf: &Vec<u8>) -> Result<u64, IoError> {
+        io::println(&format!("Writing {} bytes to file: {}", buf.len().to_string(), self.path));
+        // Varsayımsal olarak dosyaya veri yazma
+        Result::Ok(buf.len() as u64)
+    }
+
+    fn write_string(&mut self, s: &String) -> Result<u64, IoError> {
+        io::println(&format!("Writing string '{}' to file: {}", s, self.path));
+        // Varsayımsal olarak dosyaya string yazma
+        Result::Ok(s.len() as u64)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        io::println(&format!("Flushing file: {}", self.path));
+        // Varsayımsal olarak dosya arabelleğini boşaltma
+        Result::Ok(())
+    }
+}
+
+// --- Yardımcı Fonksiyonlar ---
+
+/// `println(s: &String)`: Standart çıktıya bir string yazar ve ardından yeni bir satır ekler.
+pub fn println(s: &String) {
+    let mut stdout = stdout();
+    stdout.write_string(s);
+    stdout.write_string(&"\n".to_string()); // Yeni satır ekle
+    stdout.flush();
+}
+
+/// `print(s: &String)`: Standart çıktıya bir string yazar (yeni satır eklemez).
+pub fn print(s: &String) {
+    let mut stdout = stdout();
+    stdout.write_string(s);
+    stdout.flush();
+}
+
+/// `println_raw(s: String)`: Dahili kullanım için ham println (yeniden String oluşturmayı önler).
+fn println_raw(s: String) {
+    // Bu, CNT'nin gerçek runtime'ının doğrudan konsola yazdığı varsayılan bir fonksiyondur.
+    // Döngüsel bağımlılığı önlemek için IoError handling'i veya String dönüşümlerini atlarız.
+    // Normalde burası C'deki `printf` veya Rust'taki `libc::write` gibi düşük seviyeli bir çağrıdır.
+    // Şimdilik sadece `io::println`'in içindeki işlevselliği taklit edelim.
+    // Gerçekte, bu sadece "println" gibi çalışır.
+    // Bu örnekte, konsol çıktısını simüle etmek için doğrudan `print` işlevselliği kullanıyoruz.
+    print_simulated_console_output(s);
+}
+
+// Sadece simülasyon amaçlı, gerçekte bir `print_simulated_console_output` fonksiyonu olmazdı.
+extern "C" { // Varsayımsal bir C fonksiyonu çağrısı
+    fn print_simulated_console_output(s: String);
+}
+
+ fn main() {
+    print_simulated_console_output("Hello from raw print!".to_string());
  }
- pub fn println_int(value: int) -> void {
-     println(&value.toString());
- }
-
-// CNT'nin "toString()" metodunun yerleşik olduğu varsayımıyla,
-// yukarıdaki `print` ve `println` fonksiyonları çoğu temel tip için yeterli olacaktır.
-// string.cnt gibi başka bir modülde `int.toString()` veya `float.toString()` gibi metotların
-// tanımlanması beklenebilir.
