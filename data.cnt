@@ -1,0 +1,639 @@
+// data.cnt
+// Standart Veri Fonksiyonları Modülü
+// Temel veri işleme, dönüştürme, manipülasyon ve hata kontrolü fonksiyonları sağlar.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::vec::Vec;      // Dinamik boyutlu diziler için
+import std::cmp;           // min, max fonksiyonları için
+
+/// `DataError`: Veri işleme işlemleri sırasında oluşabilecek hata türleri.
+pub enum DataError {
+    /// Geçersiz giriş verisi veya biçimi.
+    InvalidInput(String),
+    /// Tampon boyutunun yetersiz olması.
+    BufferTooSmall(String),
+    /// Dönüşüm hatası (örn. sayısal taşma).
+    ConversionError(String),
+    /// Çekirdek (checksum) veya CRC hatası.
+    ChecksumMismatch(String),
+    /// Genel bir veri işleme hatası.
+    Custom(String),
+}
+
+impl Error for DataError {
+    fn description(&self) -> String {
+        match self {
+            DataError::InvalidInput(msg) => format!("Invalid Data Input: {}", msg),
+            DataError::BufferTooSmall(msg) => format!("Buffer Too Small: {}", msg),
+            DataError::ConversionError(msg) => format!("Data Conversion Error: {}", msg),
+            DataError::ChecksumMismatch(msg) => format!("Checksum Mismatch: {}", msg),
+            DataError::Custom(msg) => format!("Data Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `endian`: Byte sırası (endianness) dönüşümleri için fonksiyonlar.
+pub mod endian {
+    use super::{Result, DataError, String, Vec, fmt};
+    use std::cmp;
+
+    /// `ByteOrder`: Sistemdeki byte sırasını belirtir.
+    pub enum ByteOrder {
+        /// En az anlamlı bayt en düşük bellek adresinde bulunur.
+        LittleEndian,
+        /// En çok anlamlı bayt en düşük bellek adresinde bulunur.
+        BigEndian,
+    }
+
+    /// `native_endian() -> ByteOrder`:
+    /// Çalışan sistemin yerel byte sırasını döndürür.
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım mimarisine özgü bayt sırası tespiti yapabilir.
+    pub unsafe fn native_endian() -> ByteOrder {
+        // Gerçek bir implementasyonda, bu, mimariye özgü bir kontrol register'ından
+        // veya bir derleyici intrinsic'ten (örn. __BYTE_ORDER__) okunur.
+        // Veya basit bir test ile belirlenir:
+        let test_val: u16 = 0x0100; // MSB=0x01, LSB=0x00
+        let ptr: *const u8 = &test_val as *const u16 as *const u8;
+        if *ptr == 0x00 { // İlk byte 0x00 ise, Little Endian
+            return ByteOrder::LittleEndian;
+        }
+        ByteOrder::BigEndian
+    }
+
+    /// `swap_u16(value: u16) -> u16`:
+    /// Bir u16 değerinin byte sırasını tersine çevirir.
+    pub fn swap_u16(value: u16) -> u16 {
+        (value << 8) | (value >> 8)
+    }
+
+    /// `swap_u32(value: u32) -> u32`:
+    /// Bir u32 değerinin byte sırasını tersine çevirir.
+    pub fn swap_u32(value: u32) -> u32 {
+        (value << 24) | ((value & 0x00FF0000) >> 8) | ((value & 0x0000FF00) << 8) | (value >> 24)
+    }
+
+    /// `swap_u64(value: u64) -> u64`:
+    /// Bir u64 değerinin byte sırasını tersine çevirir.
+    pub fn swap_u64(value: u64) -> u64 {
+        (value << 56) | ((value & 0x00FF000000000000) >> 40) | ((value & 0x0000FF0000000000) >> 24) |
+        ((value & 0x000000FF00000000) >> 8) | ((value & 0x00000000FF000000) << 8) |
+        ((value & 0x0000000000FF0000) << 24) | ((value & 0x000000000000FF00) << 40) | (value >> 56)
+    }
+
+    /// `u16_to_little_endian(value: u16) -> u16`:
+    /// Bir u16 değerini küçük endian formatına dönüştürür.
+    /// Sistem yerel endian'ı zaten küçük endian ise değişiklik olmaz.
+    pub fn u16_to_little_endian(value: u16) -> u16 {
+        unsafe {
+            if let ByteOrder::BigEndian = native_endian() {
+                swap_u16(value)
+            } else {
+                value
+            }
+        }
+    }
+
+    /// `u16_from_little_endian(value: u16) -> u16`:
+    /// Küçük endian formatındaki bir u16 değerini sistemin yerel endian'ına dönüştürür.
+    pub fn u16_from_little_endian(value: u16) -> u16 {
+        unsafe {
+            if let ByteOrder::BigEndian = native_endian() {
+                swap_u16(value)
+            } else {
+                value
+            }
+        }
+    }
+
+    // Diğer boyutlar için benzer from/to fonksiyonları eklenebilir.
+}
+
+/// `checksum`: Veri bütünlüğü için basit çekirdek (checksum) fonksiyonları.
+pub mod checksum {
+    use super::{Result, DataError, String, Vec, fmt};
+    use std::cmp;
+
+    /// `calculate_sum8(data: &[u8]) -> u8`:
+    /// Bir bayt dizisinin 8-bitlik toplam çekirdeğini hesaplar.
+    /// Basitçe tüm baytları toplar ve 256'ya göre modunu alır.
+    pub fn calculate_sum8(data: &[u8]) -> u8 {
+        let mut sum: u8 = 0;
+        for &byte in data {
+            sum = sum.wrapping_add(byte);
+        }
+        sum
+    }
+
+    /// `calculate_sum16(data: &[u8]) -> u16`:
+    /// Bir bayt dizisinin 16-bitlik toplam çekirdeğini hesaplar.
+    /// Basitçe tüm baytları 16-bit olarak toplar ve 65536'ya göre modunu alır.
+    pub fn calculate_sum16(data: &[u8]) -> u16 {
+        let mut sum: u16 = 0;
+        for &byte in data {
+            sum = sum.wrapping_add(byte as u16);
+        }
+        sum
+    }
+
+    /// `verify_sum8(data: &[u8], expected_checksum: u8) -> Result<(), DataError>`:
+    /// Bir bayt dizisinin 8-bitlik çekirdeğini doğrular.
+    pub fn verify_sum8(data: &[u8], expected_checksum: u8) -> Result<(), DataError> {
+        let calculated_checksum = calculate_sum8(data);
+        if calculated_checksum == expected_checksum {
+            Result::Ok(())
+        } else {
+            Result::Err(DataError::ChecksumMismatch(
+                format!("Expected 8-bit checksum 0x{:X}, but got 0x{:X}.",
+                    expected_checksum.to_string(), calculated_checksum.to_string())
+            ))
+        }
+    }
+
+    /// `calculate_crc8(data: &[u8], polynomial: u8, initial_value: u8, xor_out: u8, reflect_in: bool, reflect_out: bool) -> u8`:
+    /// CRC-8 (Döngüsel Artık Kontrolü) çekirdeğini hesaplar.
+    /// Farklı CRC-8 varyantlarını destekler (örn. CRC-8-SAE-J1850, CRC-8-MAXIM).
+    /// `polynomial`: Generator polinomu (örn. 0x1D for SAE-J1850).
+    /// `initial_value`: Başlangıç CRC değeri.
+    /// `xor_out`: Sonuçla XOR edilecek değer.
+    /// `reflect_in`: Giriş baytlarını yansıtır.
+    /// `reflect_out`: Sonuç CRC'yi yansıtır.
+    pub fn calculate_crc8(data: &[u8], polynomial: u8, initial_value: u8, xor_out: u8, reflect_in: bool, reflect_out: bool) -> u8 {
+        let mut crc = initial_value;
+
+        for &mut byte in data {
+            let mut byte_val = byte;
+            if reflect_in {
+                byte_val = byte_val.reverse_bits(); // Varsayımsal CNT intrinsic/fonksiyonu
+            }
+            crc ^= byte_val;
+            for _ in 0..8 {
+                if (crc & 0x80) != 0 {
+                    crc = (crc << 1) ^ polynomial;
+                } else {
+                    crc <<= 1;
+                }
+            }
+        }
+
+        if reflect_out {
+            crc = crc.reverse_bits(); // Varsayımsal CNT intrinsic/fonksiyonu
+        }
+        crc ^ xor_out
+    }
+
+    // Yaygın bir CRC-8 türü için kolaylaştırıcı fonksiyon: CRC-8-MAXIM
+    pub fn calculate_crc8_maxim(data: &[u8]) -> u8 {
+        calculate_crc8(data, 0x31, 0x00, 0x00, true, true)
+    }
+
+    /// `calculate_crc16(data: &[u8], polynomial: u16, initial_value: u16, xor_out: u16, reflect_in: bool, reflect_out: bool) -> u16`:
+    /// CRC-16 çekirdeğini hesaplar.
+    /// Farklı CRC-16 varyantlarını destekler (örn. CRC-16-CCITT, CRC-16-IBM).
+    pub fn calculate_crc16(data: &[u8], polynomial: u16, initial_value: u16, xor_out: u16, reflect_in: bool, reflect_out: bool) -> u16 {
+        let mut crc = initial_value;
+
+        for &mut byte in data {
+            let mut byte_val = byte as u16;
+            if reflect_in {
+                byte_val = byte_val.reverse_bits() >> 8; // Varsayımsal CNT intrinsic/fonksiyonu
+            }
+            crc ^= (byte_val << 8); // Shift byte to MSB
+
+            for _ in 0..8 {
+                if (crc & 0x8000) != 0 {
+                    crc = (crc << 1) ^ polynomial;
+                } else {
+                    crc <<= 1;
+                }
+            }
+        }
+
+        if reflect_out {
+            crc = crc.reverse_bits(); // Varsayımsal CNT intrinsic/fonksiyonu
+        }
+        crc ^ xor_out
+    }
+
+    // Yaygın bir CRC-16 türü için kolaylaştırıcı fonksiyon: CRC-16-CCITT (XMODEM)
+    pub fn calculate_crc16_ccitt(data: &[u8]) -> u16 {
+        calculate_crc16(data, 0x1021, 0x0000, 0x0000, false, false)
+    }
+
+    /// `calculate_crc32(data: &[u8]) -> u32`:
+    /// CRC-32 (IEEE 802.3) çekirdeğini hesaplar.
+    /// Genellikle ters yansıtılmış giriş ve çıkış ile kullanılır.
+    pub fn calculate_crc32(data: &[u8]) -> u32 {
+        let polynomial: u32 = 0x04C11DB7; // IEEE 802.3 polynomial
+        let mut crc = 0xFFFFFFFF; // Initial value
+
+        for &mut byte in data {
+            crc ^= byte as u32; // XOR with current byte
+            for _ in 0..8 {
+                if (crc & 0x00000001) != 0 { // If LSB is 1
+                    crc = (crc >> 1) ^ polynomial;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        crc ^ 0xFFFFFFFF // XOR out
+    }
+}
+
+
+/// `bytes`: Bayt dizisi (slice) manipülasyonları için fonksiyonlar.
+pub mod bytes {
+    use super::{Result, DataError, String, Vec, fmt};
+    use std::cmp;
+
+    /// `slice_to_u16(data: &[u8]) -> Result<u16, DataError>`:
+    /// Bir u8 dizisini (slice) u16'ya dönüştürür (küçük endian varsayılarak).
+    pub fn slice_to_u16(data: &[u8]) -> Result<u16, DataError> {
+        if data.len() < 2 {
+            return Result::Err(DataError::InvalidInput("Slice too short for u16 conversion.".to_string()));
+        }
+        Result::Ok((data[1] as u16) << 8 | (data[0] as u16))
+    }
+
+    /// `slice_to_u32(data: &[u8]) -> Result<u32, DataError>`:
+    /// Bir u8 dizisini (slice) u32'ye dönüştürür (küçük endian varsayılarak).
+    pub fn slice_to_u32(data: &[u8]) -> Result<u32, DataError> {
+        if data.len() < 4 {
+            return Result::Err(DataError::InvalidInput("Slice too short for u32 conversion.".to_string()));
+        }
+        Result::Ok(
+            (data[3] as u32) << 24 |
+            (data[2] as u32) << 16 |
+            (data[1] as u32) << 8 |
+            (data[0] as u32)
+        )
+    }
+
+    /// `u16_to_slice(value: u16, buffer: &mut [u8]) -> Result<(), DataError>`:
+    /// Bir u16 değerini bir u8 dizisine (slice) yazar (küçük endian varsayılarak).
+    pub fn u16_to_slice(value: u16, buffer: &mut [u8]) -> Result<(), DataError> {
+        if buffer.len() < 2 {
+            return Result::Err(DataError::BufferTooSmall("Buffer too small for u16.".to_string()));
+        }
+        buffer[0] = value as u8;
+        buffer[1] = (value >> 8) as u8;
+        Result::Ok(())
+    }
+
+    /// `u32_to_slice(value: u32, buffer: &mut [u8]) -> Result<(), DataError>`:
+    /// Bir u32 değerini bir u8 dizisine (slice) yazar (küçük endian varsayılarak).
+    pub fn u32_to_slice(value: u32, buffer: &mut [u8]) -> Result<(), DataError> {
+        if buffer.len() < 4 {
+            return Result::Err(DataError::BufferTooSmall("Buffer too small for u32.".to_string()));
+        }
+        buffer[0] = value as u8;
+        buffer[1] = (value >> 8) as u8;
+        buffer[2] = (value >> 16) as u8;
+        buffer[3] = (value >> 24) as u8;
+        Result::Ok(())
+    }
+
+    /// `compare(a: &[u8], b: &[u8]) -> bool`:
+    /// İki bayt dizisinin eşit olup olmadığını kontrol eder.
+    pub fn compare(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for i in 0..a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `copy(source: &[u8], destination: &mut [u8]) -> Result<usize, DataError>`:
+    /// Bir bayt dizisini diğerine kopyalar. Kopyalanan bayt sayısını döndürür.
+    /// `destination` tamponu yetersizse hata döner.
+    pub fn copy(source: &[u8], destination: &mut [u8]) -> Result<usize, DataError> {
+        if destination.len() < source.len() {
+            return Result::Err(DataError::BufferTooSmall(
+                format!("Destination buffer (len: {}) is too small for source (len: {}).",
+                    destination.len().to_string(), source.len().to_string())
+            ));
+        }
+        for i in 0..source.len() {
+            destination[i] = source[i];
+        }
+        Result::Ok(source.len())
+    }
+
+    /// `fill(buffer: &mut [u8], value: u8) -> ()`:
+    /// Bir bayt dizisini belirtilen bir değerle doldurur.
+    pub fn fill(buffer: &mut [u8], value: u8) {
+        for i in 0..buffer.len() {
+            buffer[i] = value;
+        }
+    }
+}
+
+/// `conversion`: Genel veri dönüşüm fonksiyonları.
+pub mod conversion {
+    use super::{Result, DataError, String, Vec, fmt};
+    use std::cmp;
+
+    /// `hex_to_u8(hex_char: char) -> Result<u8, DataError>`:
+    /// Tek bir onaltılık karakteri (0-9, A-F, a-f) u8 değerine dönüştürür.
+    pub fn hex_to_u8(hex_char: char) -> Result<u8, DataError> {
+        match hex_char {
+            '0' => Result::Ok(0),
+            '1' => Result::Ok(1),
+            '2' => Result::Ok(2),
+            '3' => Result::Ok(3),
+            '4' => Result::Ok(4),
+            '5' => Result::Ok(5),
+            '6' => Result::Ok(6),
+            '7' => Result::Ok(7),
+            '8' => Result::Ok(8),
+            '9' => Result::Ok(9),
+            'a' | 'A' => Result::Ok(10),
+            'b' | 'B' => Result::Ok(11),
+            'c' | 'C' => Result::Ok(12),
+            'd' | 'D' => Result::Ok(13),
+            'e' | 'E' => Result::Ok(14),
+            'f' | 'F' => Result::Ok(15),
+            _ => Result::Err(DataError::InvalidInput(format!("Invalid hex character: '{}'.", hex_char.to_string()))),
+        }
+    }
+
+    /// `u8_to_hex(value: u8) -> char`:
+    /// Bir u8 değerinin ilk onaltılık basamağını karakter olarak döndürür.
+    /// (Bu, daha çok debug amaçlıdır, tam bayt için iki karakter gerekir)
+    pub fn u8_to_hex_char(value: u8) -> char {
+        match value & 0x0F {
+            0 => '0', 1 => '1', 2 => '2', 3 => '3', 4 => '4',
+            5 => '5', 6 => '6', 7 => '7', 8 => '8', 9 => '9',
+            10 => 'A', 11 => 'B', 12 => 'C', 13 => 'D', 14 => 'E', 15 => 'F',
+            _ => '?', // Asla buraya ulaşmamalı
+        }
+    }
+
+    /// `bytes_to_hex_string(data: &[u8]) -> String`:
+    /// Bir bayt dizisini onaltılık temsiline dönüştürür (örn. [0xAB, 0xCD] -> "ABCD").
+    pub fn bytes_to_hex_string(data: &[u8]) -> String {
+        let mut s = String::new();
+        for &byte in data {
+            s.push(u8_to_hex_char((byte >> 4) & 0x0F));
+            s.push(u8_to_hex_char(byte & 0x0F));
+        }
+        s
+    }
+
+    /// `hex_string_to_bytes(hex_str: &str) -> Result<Vec<u8>, DataError>`:
+    /// Bir onaltılık dizesini bayt dizisine dönüştürür (örn. "ABCD" -> [0xAB, 0xCD]).
+    /// Çift sayıda karakter gerektirir.
+    pub fn hex_string_to_bytes(hex_str: &str) -> Result<Vec<u8>, DataError> {
+        let len = hex_str.len();
+        if len % 2 != 0 {
+            return Result::Err(DataError::InvalidInput("Hex string must have an even number of characters.".to_string()));
+        }
+
+        let mut bytes = Vec::with_capacity(len / 2);
+        let mut chars = hex_str.chars();
+
+        while let Option::Some(c1) = chars.next() {
+            if let Option::Some(c2) = chars.next() {
+                let v1 = hex_to_u8(c1)?;
+                let v2 = hex_to_u8(c2)?;
+                bytes.push((v1 << 4) | v2);
+            } else {
+                // Bu duruma ulaşmamalı, çünkü len kontrol edildi
+                break;
+            }
+        }
+        Result::Ok(bytes)
+    }
+
+    /// `char_to_ascii(c: char) -> u8`:
+    /// Bir karakteri ASCII u8 değerine dönüştürür.
+    pub fn char_to_ascii(c: char) -> u8 {
+        c as u8
+    }
+
+    /// `ascii_to_char(b: u8) -> char`:
+    /// Bir ASCII u8 değerini karaktere dönüştürür.
+    /// (Non-ASCII değerler için davranışı tanımsız olabilir veya '?' döndürebilir.)
+    pub fn ascii_to_char(b: u8) -> char {
+        b as char
+    }
+}
+
+
+/// `debug`: Hata ayıklama için basit yazdırma fonksiyonları.
+pub mod debug {
+    use super::{String, fmt};
+
+    /// `print_bytes(prefix: &str, data: &[u8])`:
+    /// Bir bayt dizisini onaltılık ve ASCII formatında yazdırır.
+    pub fn print_bytes(prefix: &str, data: &[u8]) {
+        let mut hex_str = String::new();
+        let mut ascii_str = String::new();
+
+        for &byte in data {
+            hex_str.push(super::conversion::u8_to_hex_char((byte >> 4) & 0x0F));
+            hex_str.push(super::conversion::u8_to_hex_char(byte & 0x0F));
+            hex_str.push(' '); // Her bayt arasına boşluk koy
+
+            if byte >= 0x20 && byte <= 0x7E { // Yazdırılabilir ASCII
+                ascii_str.push(byte as char);
+            } else {
+                ascii_str.push('.'); // Yazdırılamayan karakterler için nokta
+            }
+        }
+        // Son boşluğu kaldır
+        if hex_str.len() > 0 {
+            hex_str.pop();
+        }
+        
+        io::println(&format!("{}: {}  |{}", prefix, hex_str, ascii_str));
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::data::{self, DataError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+import std::vec::Vec; // For Vec::new()
+
+// Mock `std::time` if needed, for demonstration purposes.
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+    pub mod cmp {
+        pub fn min<T: PartialOrd>(a: T, b: T) -> T {
+            if a < b { a } else { b }
+        }
+        pub fn max<T: PartialOrd>(a: T, b: T) -> T {
+            if a > b { a } else { b }
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting data module example...".to_string());
+
+    // --- Endian Fonksiyonları ---
+    io::println("\n--- Endian Functions ---".to_string());
+    unsafe {
+        let native_endian = data::endian::native_endian();
+        io::println(&format!("Native System Endian: {:?}", native_endian));
+    }
+
+    let val_u16: u16 = 0xABCD;
+    let swapped_u16 = data::endian::swap_u16(val_u16);
+    io::println(&format!("Original u16: 0x{:X}, Swapped u16: 0x{:X}", val_u16.to_string(), swapped_u16.to_string()));
+
+    let val_u32: u32 = 0x12345678;
+    let swapped_u32 = data::endian::swap_u32(val_u32);
+    io::println(&format!("Original u32: 0x{:X}, Swapped u32: 0x{:X}", val_u32.to_string(), swapped_u32.to_string()));
+
+    let val_u64: u64 = 0x1122334455667788;
+    let swapped_u64 = data::endian::swap_u64(val_u64);
+    io::println(&format!("Original u64: 0x{:X}, Swapped u64: 0x{:X}", val_u64.to_string(), swapped_u64.to_string()));
+
+    let le_val_u16 = data::endian::u16_to_little_endian(val_u16);
+    io::println(&format!("u16 to Little Endian (from native): 0x{:X}", le_val_u16.to_string()));
+
+
+    // --- Checksum Fonksiyonları ---
+    io::println("\n--- Checksum Functions ---".to_string());
+    let data_for_checksum: [u8; 5] = [0x01, 0x02, 0x03, 0x04, 0x05];
+    io::println(&format!("Data: {:?}", data_for_checksum));
+
+    let sum8 = data::checksum::calculate_sum8(&data_for_checksum);
+    io::println(&format!("8-bit Checksum (Sum8): 0x{:X}", sum8.to_string()));
+    match data::checksum::verify_sum8(&data_for_checksum, sum8) {
+        Result::Ok(_) => io::println("Sum8 verification successful.".to_string()),
+        Result::Err(e) => io::println(&format!("Sum8 verification failed: {}", e.description())),
+    }
+    match data::checksum::verify_sum8(&data_for_checksum, sum8 + 1) {
+        Result::Ok(_) => io::println("Sum8 (incorrect) verification successful (ERROR).".to_string()),
+        Result::Err(e) => io::println(&format!("Sum8 (incorrect) verification failed: {}", e.description())),
+    }
+
+    let sum16 = data::checksum::calculate_sum16(&data_for_checksum);
+    io::println(&format!("16-bit Checksum (Sum16): 0x{:X}", sum16.to_string()));
+
+    let crc8_maxim = data::checksum::calculate_crc8_maxim(&data_for_checksum);
+    io::println(&format!("CRC-8-MAXIM: 0x{:X}", crc8_maxim.to_string()));
+
+    let crc16_ccitt = data::checksum::calculate_crc16_ccitt(&data_for_checksum);
+    io::println(&format!("CRC-16-CCITT (XMODEM): 0x{:X}", crc16_ccitt.to_string()));
+
+    let crc32 = data::checksum::calculate_crc32(&data_for_checksum);
+    io::println(&format!("CRC-32 (IEEE 802.3): 0x{:X}", crc32.to_string()));
+
+
+    // --- Bytes Fonksiyonları ---
+    io::println("\n--- Bytes Functions ---".to_string());
+    let bytes_u16: [u8; 2] = [0xEF, 0xBE]; // Little Endian: 0xBEEF
+    match data::bytes::slice_to_u16(&bytes_u16) {
+        Result::Ok(val) => io::println(&format!("Slice [0xEF, 0xBE] to u16: 0x{:X}", val.to_string())),
+        Result::Err(e) => io::println(&format!("Error converting slice to u16: {}", e.description())),
+    }
+
+    let bytes_u32: [u8; 4] = [0xEF, 0xBE, 0xAD, 0xDE]; // Little Endian: 0xDEADBEEF
+    match data::bytes::slice_to_u32(&bytes_u32) {
+        Result::Ok(val) => io::println(&format!("Slice [0xEF, 0xBE, 0xAD, 0xDE] to u32: 0x{:X}", val.to_string())),
+        Result::Err(e) => io::println(&format!("Error converting slice to u32: {}", e.description())),
+    }
+
+    let mut u16_buffer: [u8; 2] = [0; 2];
+    match data::bytes::u16_to_slice(0xCAFE, &mut u16_buffer) {
+        Result::Ok(_) => io::println(&format!("u16 0xCAFE to slice: {:?}", u16_buffer)),
+        Result::Err(e) => io::println(&format!("Error converting u16 to slice: {}", e.description())),
+    }
+
+    let mut u32_buffer: [u8; 4] = [0; 4];
+    match data::bytes::u32_to_slice(0xFEEDBEEF, &mut u32_buffer) {
+        Result::Ok(_) => io::println(&format!("u32 0xFEEDBEEF to slice: {:?}", u32_buffer)),
+        Result::Err(e) => io::println(&format!("Error converting u32 to slice: {}", e.description())),
+    }
+
+    let bytes_a: [u8; 3] = [0x01, 0x02, 0x03];
+    let bytes_b: [u8; 3] = [0x01, 0x02, 0x03];
+    let bytes_c: [u8; 3] = [0x01, 0x02, 0x04];
+    io::println(&format!("Compare {:?} and {:?}: {}", bytes_a, bytes_b, data::bytes::compare(&bytes_a, &bytes_b).to_string()));
+    io::println(&format!("Compare {:?} and {:?}: {}", bytes_a, bytes_c, data::bytes::compare(&bytes_a, &bytes_c).to_string()));
+
+    let source_data: [u8; 5] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+    let mut dest_buffer: [u8; 10] = [0; 10];
+    match data::bytes::copy(&source_data, &mut dest_buffer) {
+        Result::Ok(len) => io::println(&format!("Copied {} bytes. Destination: {:?}", len.to_string(), dest_buffer)),
+        Result::Err(e) => io::println(&format!("Error copying bytes: {}", e.description())),
+    }
+
+    let mut fill_buffer: [u8; 7] = [0; 7];
+    data::bytes::fill(&mut fill_buffer, 0x55);
+    io::println(&format!("Filled buffer with 0x55: {:?}", fill_buffer));
+
+
+    // --- Conversion Fonksiyonları ---
+    io::println("\n--- Conversion Functions ---".to_string());
+    let hex_char = 'E';
+    match data::conversion::hex_to_u8(hex_char) {
+        Result::Ok(val) => io::println(&format!("Hex char '{}' to u8: {}", hex_char.to_string(), val.to_string())),
+        Result::Err(e) => io::println(&format!("Error converting hex char: {}", e.description())),
+    }
+
+    let val_to_hex_char = 13;
+    io::println(&format!("u8 {} to hex char: '{}'", val_to_hex_char.to_string(), data::conversion::u8_to_hex_char(val_to_hex_char).to_string()));
+
+    let raw_bytes_for_hex_str: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+    let hex_string = data::conversion::bytes_to_hex_string(&raw_bytes_for_hex_str);
+    io::println(&format!("Bytes {:?} to hex string: \"{}\"", raw_bytes_for_hex_str, hex_string));
+
+    let hex_str_to_parse = "1A2B3C";
+    match data::conversion::hex_string_to_bytes(hex_str_to_parse) {
+        Result::Ok(bytes) => io::println(&format!("Hex string \"{}\" to bytes: {:?}", hex_str_to_parse, bytes)),
+        Result::Err(e) => io::println(&format!("Error converting hex string to bytes: {}", e.description())),
+    }
+
+    let char_val = 'X';
+    io::println(&format!("Char '{}' to ASCII u8: {}", char_val.to_string(), data::conversion::char_to_ascii(char_val).to_string()));
+    let ascii_val = 0x41; // 'A'
+    io::println(&format!("ASCII u8 0x{:X} to char: '{}'", ascii_val.to_string(), data::conversion::ascii_to_char(ascii_val).to_string()));
+
+
+    // --- Debug Fonksiyonları ---
+    io::println("\n--- Debug Functions ---".to_string());
+    let debug_data: [u8; 20] = [
+        0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64, 0x21, 0x0A, 0x0D, 0xFF, 0x00, 0x12, 0x34, 0x56, 0x78
+    ]; // "Hello World!\n\r" + some binary
+    data::debug::print_bytes("Sample Data", &debug_data);
+
+    io::println("\nData module example finished.".to_string());
+}
