@@ -1,0 +1,418 @@
+// uart.cnt
+// Evrensel Asenkron Alıcı/Verici (UART) Modülü
+// Cihazlar arasında seri haberleşme için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli UART donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::vec::Vec;       // Veri tamponları için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+// Ayrıca, baud hızı hesaplamaları için saat (clock) yönetimi modülüne ihtiyaç duyulabilir.
+
+/// `UartError`: UART işlemleri sırasında oluşabilecek hata türleri.
+pub enum UartError {
+    /// Geçersiz UART ID'si.
+    InvalidUartId(String),
+    /// Geçersiz baud hızı, veri bitleri, stop bitleri veya parity ayarı.
+    InvalidConfiguration(String),
+    /// Veri gönderme/alma zaman aşımına uğradı.
+    Timeout(String),
+    /// Alıcı tamponu dolu.
+    RxBufferFull(String),
+    /// Gönderici tamponu boş.
+    TxBufferEmpty(String),
+    /// Çerçeveleme hatası (yanlış stop bit).
+    FramingError(String),
+    /// Parity hatası.
+    ParityError(String),
+    /// Aşırı akış hatası (alıcı, verileri işleyemeden önce yeni veriler geldi).
+    OverrunError(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Genel bir UART hatası.
+    Custom(String),
+}
+
+impl Error for UartError {
+    fn description(&self) -> String {
+        match self {
+            UartError::InvalidUartId(msg) => format!("Invalid UART ID: {}", msg),
+            UartError::InvalidConfiguration(msg) => format!("Invalid UART Configuration: {}", msg),
+            UartError::Timeout(msg) => format!("UART Timeout: {}", msg),
+            UartError::RxBufferFull(msg) => format!("UART RX Buffer Full: {}", msg),
+            UartError::TxBufferEmpty(msg) => format!("UART TX Buffer Empty: {}", msg),
+            UartError::FramingError(msg) => format!("UART Framing Error: {}", msg),
+            UartError::ParityError(msg) => format!("UART Parity Error: {}", msg),
+            UartError::OverrunError(msg) => format!("UART Overrun Error: {}", msg),
+            UartError::HardwareAccessError(msg) => format!("UART Hardware Access Error: {}", msg),
+            UartError::Custom(msg) => format!("UART Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `DataBits`: UART veri çerçevesindeki veri bitlerinin sayısı.
+pub enum DataBits {
+    Bits7,
+    Bits8,
+    Bits9, // Bazı UART'lar 9-bit veri modunu destekler.
+}
+
+/// `StopBits`: UART veri çerçevesindeki durdurma bitlerinin sayısı.
+pub enum StopBits {
+    One,
+    OneAndAHalf, // Bazı UART'lar 1.5 stop bitini destekler.
+    Two,
+}
+
+/// `Parity`: UART veri çerçevesindeki parity (eşlik) kontrolü ayarı.
+pub enum Parity {
+    None,
+    Even,
+    Odd,
+}
+
+/// `UartConfig`: UART biriminin yapılandırma ayarları.
+pub struct UartConfig {
+    pub baud_rate: u32,
+    pub data_bits: DataBits,
+    pub stop_bits: StopBits,
+    pub parity: Parity,
+    // Diğer potansiyel ayarlar (örn. akış kontrolü, FIFO ayarları)
+}
+
+impl Default for UartConfig {
+    fn default() -> UartConfig {
+        UartConfig {
+            baud_rate: 115200,
+            data_bits: DataBits::Bits8,
+            stop_bits: StopBits::One,
+            parity: Parity::None,
+        }
+    }
+}
+
+/// `Uart`: Tek bir UART birimini temsil eden yapı.
+/// Bu yapı, UART'ın durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct Uart {
+    id: u8, // UART birimi ID'si (örneğin UART0, UART1)
+    config: UartConfig,
+    is_initialized: bool,
+    // Gerçek bir implementasyonda, burada UART biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, dr_offset: u32, fr_offset: u32, cr_offset: u32
+}
+
+impl Uart {
+    /// `new(id: u8, config: UartConfig) -> Result<Uart, UartError>`:
+    /// Belirtilen ID ve yapılandırma için yeni bir `Uart` örneği oluşturur ve başlatır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir UART birimini başlatmak ve yapılandırmak,
+    /// donanım kaynaklarını ayırabilir, pinleri alternatif fonksiyona geçirebilir ve
+    /// varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(id: u8, config: UartConfig) -> Result<Uart, UartError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if id >= MAX_UART_UNITS { // MAX_UART_UNITS tanımlanmış bir sabit olmalı
+            return Result::Err(UartError::InvalidUartId(
+                format!("UART ID {} is out of range.", id.to_string())
+            ));
+        }
+
+        // Konfigürasyonun geçerliliğini kontrol et (örn. baud hızı sınırları)
+        if config.baud_rate == 0 || config.baud_rate > MAX_UART_BAUD_RATE {
+            return Result::Err(UartError::InvalidConfiguration(
+                format!("Invalid baud rate: {}", config.baud_rate.to_string())
+            ));
+        }
+
+        // UART donanımını başlat ve yapılandır (saati aç, baud hızı, veri bitleri vb. ayarla).
+        io::println(&format!("HW_API: Initializing UART Unit {} with config: {{ Baud: {}, DataBits: {:?}, StopBits: {:?}, Parity: {:?} }}.",
+            id.to_string(), config.baud_rate.to_string(), config.data_bits, config.stop_bits, config.parity));
+         os_api::uart_init(id, &config);
+
+        Result::Ok(Uart {
+            id,
+            config,
+            is_initialized: true,
+        })
+    }
+
+    /// `write_byte(&self, byte: u8) -> Result<(), UartError>`:
+    /// UART'tan tek bir bayt gönderir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım gönderim kaydına doğrudan yazma işlemi içerdiğinden güvenli değildir.
+    /// Yanlış kullanım, veri bozulmasına veya donanım kilitlenmelerine neden olabilir.
+    pub unsafe fn write_byte(&self, byte: u8) -> Result<(), UartError> {
+        if !self.is_initialized {
+            return Result::Err(UartError::Custom("UART not initialized.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Writing byte 0x{:X} to UART Unit {}.", byte, self.id.to_string()));
+        // Gerçekte, UART veri gönderme kaydına yazma işlemi gerçekleşir.
+        // Genellikle, gönderim tamponunun (TX FIFO) boş olmasını beklemek gerekir.
+         let timeout_ms = 100; // Varsayımsal zaman aşımı
+         if os_api::uart_write_byte(self.id, byte, timeout_ms).is_err() {
+             return Result::Err(UartError::Timeout("UART TX timeout.".to_string()));
+         }
+        Result::Ok(())
+    }
+
+    /// `write(&self, data: &[u8]) -> Result<(), UartError>`:
+    /// UART'tan bir bayt dizisi gönderir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `write_byte`'ı çağırdığı için güvenli değildir.
+    pub unsafe fn write(&self, data: &[u8]) -> Result<(), UartError> {
+        for &byte in data.iter() {
+            match self.write_byte(byte) {
+                Result::Ok(_) => {},
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+        Result::Ok(())
+    }
+
+    /// `read_byte(&self) -> Result<u8, UartError>`:
+    /// UART'tan tek bir bayt okur. Alınacak veri yoksa zaman aşımına uğrayabilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım alım kaydından doğrudan okuma işlemi içerdiğinden güvenli değildir.
+    /// Yanlış kullanım, veri bozulmasına veya donanım okuma hatalarına neden olabilir.
+    pub unsafe fn read_byte(&self) -> Result<u8, UartError> {
+        if !self.is_initialized {
+            return Result::Err(UartError::Custom("UART not initialized.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Reading byte from UART Unit {}.", self.id.to_string()));
+        // Gerçekte, UART veri alma kaydından okuma işlemi gerçekleşir.
+        // Genellikle, alım tamponunun (RX FIFO) veri içerip içermediğini kontrol etmek gerekir.
+         let timeout_ms = 100; // Varsayımsal zaman aşımı
+         let (byte_res, status_flags) = os_api::uart_read_byte(self.id, timeout_ms);
+         if byte_res.is_err() {
+             return Result::Err(UartError::Timeout("UART RX timeout.".to_string()));
+         }
+         if status_flags.has_framing_error() { return Result::Err(UartError::FramingError("Framing error detected.".to_string())); }
+         if status_flags.has_parity_error() { return Result::Err(UartError::ParityError("Parity error detected.".to_string())); }
+         if status_flags.has_overrun_error() { return Result::Err(UartError::OverrunError("Overrun error detected.".to_string())); }
+
+        // Simülasyon: Rastgele bir bayt döndürelim (veya belirli bir sırayı taklit edelim)
+        let simulated_byte = (std::time::nanos() % 256) as u8; // Varsayımsal `std::time::nanos()`
+        Result::Ok(simulated_byte)
+    }
+
+    /// `read(&self, buffer: &mut [u8]) -> Result<usize, UartError>`:
+    /// UART'tan belirli bir bayt sayısı okur ve verilen tampona doldurur.
+    /// Tampon dolana kadar veya zaman aşımına kadar okur.
+    /// Okunan bayt sayısını döndürür.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `read_byte`'ı çağırdığı için güvenli değildir.
+    pub unsafe fn read(&self, buffer: &mut [u8]) -> Result<usize, UartError> {
+        let mut bytes_read = 0;
+        for i in 0..buffer.len() {
+            match self.read_byte() {
+                Result::Ok(byte) => {
+                    buffer[i] = byte;
+                    bytes_read += 1;
+                },
+                Result::Err(UartError::Timeout(_)) => break, // Zaman aşımı olursa okumayı durdur
+                Result::Err(e) => return Result::Err(e),    // Diğer hataları ilet
+            }
+        }
+        Result::Ok(bytes_read)
+    }
+
+    /// `bytes_to_read(&self) -> Result<usize, UartError>`:
+    /// Alıcı tamponunda (RX FIFO) kaç bayt veri olduğunu döndürür.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım durum kaydından okuduğundan güvenli değildir.
+    pub unsafe fn bytes_to_read(&self) -> Result<usize, UartError> {
+        if !self.is_initialized {
+            return Result::Err(UartError::Custom("UART not initialized.".to_string()));
+        }
+        // Gerçekte, UART'ın FIFO durum kaydından veya bayt sayacıdan okunur.
+        // let num_bytes = os_api::uart_get_rx_fifo_level(self.id);
+        let simulated_bytes = (std::time::nanos() % 5) as usize; // Simülasyon: 0-4 arası bayt
+        Result::Ok(simulated_bytes)
+    }
+
+    /// `flush_tx(&self) -> Result<(), UartError>`:
+    /// Gönderim tamponunu (TX FIFO) temizler, bekleyen tüm verilerin gönderilmesini bekler.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını etkilediğinden güvenli değildir.
+    pub unsafe fn flush_tx(&self) -> Result<(), UartError> {
+        if !self.is_initialized {
+            return Result::Err(UartError::Custom("UART not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Flushing TX buffer for UART Unit {}.", self.id.to_string()));
+        // os_api::uart_flush_tx(self.id);
+        Result::Ok(())
+    }
+
+    /// `flush_rx(&self) -> Result<(), UartError>`:
+    /// Alım tamponunu (RX FIFO) temizler, bekleyen tüm verileri atar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını etkilediğinden güvenli değildir.
+    pub unsafe fn flush_rx(&self) -> Result<(), UartError> {
+        if !self.is_initialized {
+            return Result::Err(UartError::Custom("UART not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Flushing RX buffer for UART Unit {}.", self.id.to_string()));
+        // os_api::uart_flush_rx(self.id);
+        Result::Ok(())
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum UART birimi sayısını belirtir.
+const MAX_UART_UNITS: u8 = 2; // Örneğin, UART0 ve UART1
+// Varsayımsal maksimum baud hızı
+const MAX_UART_BAUD_RATE: u32 = 4_000_000; // Örneğin, 4 Mbaud
+
+// --- Örnek Kullanım ---
+
+import std::uart::{self, Uart, UartConfig, UartError, DataBits, StopBits, Parity};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+import std::vec::Vec;
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting UART example...".to_string());
+
+    // UART Unit 0'ı kullanalım
+    io::println("\n--- Initializing UART Unit 0 ---".to_string());
+
+    // Varsayılan yapılandırma: 115200 baud, 8N1
+    let mut config = UartConfig::default();
+    config.baud_rate = 9600; // Daha yavaş bir baud hızı ayarlayalım
+
+    // UNSAFE BLOCK - UART birimini başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let uart_res = Uart::new(0, config); // UART Unit 0
+
+        let mut uart_instance: Option<Uart> = Option::None;
+
+        match uart_res {
+            Result::Ok(uart) => {
+                io::println("UART Unit 0 created successfully.".to_string());
+                uart_instance = Option::Some(uart);
+            },
+            Result::Err(e) => io::println(&format!("Error creating UART: {}", e.description())),
+        }
+
+        if let Option::Some(mut uart) = uart_instance {
+            io::println("\n--- Writing data to UART ---".to_string());
+            let message = "Hello, CNT UART!";
+            match uart.write(message.as_bytes()) {
+                Result::Ok(_) => io::println(&format!("Successfully wrote: '{}'", message)),
+                Result::Err(e) => io::println(&format!("Error writing to UART: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(100); // Kısa bir gecikme
+
+            io::println("\n--- Reading data from UART ---".to_string());
+            let mut rx_buffer = Vec::new_with_capacity(32); // 32 baytlık tampon
+            let mut bytes_read_total = 0;
+
+            // Simüle edilmiş alma için bir döngü
+            io::println("  (Simulating incoming data...)".to_string());
+            for _ in 0..5 { // 5 kez okuma denemesi
+                std::spirit::sleep_ms(20); // Her okuma arasında kısa gecikme
+                let mut temp_buf = Vec::new_with_capacity(4); // Küçük bir geçici tampon
+                temp_buf.resize(4); // 4 baytlık alan ayır
+                match uart.read(&mut temp_buf.as_slice()) {
+                    Result::Ok(num_read) => {
+                        if num_read > 0 {
+                            io::println(&format!("  Read {} bytes: {:?}", num_read.to_string(), temp_buf.as_slice().slice(0, num_read)));
+                            for i in 0..num_read {
+                                rx_buffer.push(temp_buf.as_slice()[i]);
+                            }
+                            bytes_read_total += num_read;
+                        } else {
+                            io::println("  No bytes available to read.".to_string());
+                        }
+                    },
+                    Result::Err(e) => {
+                        io::println(&format!("Error reading from UART: {}", e.description()));
+                        break;
+                    },
+                }
+            }
+            io::println(&format!("Total bytes read: {}", bytes_read_total.to_string()));
+            io::println(&format!("Received data (raw): {:?}", rx_buffer.as_slice()));
+            // Try to convert to string if it's valid ASCII
+            let received_string = String::from_utf8(rx_buffer.as_slice());
+            match received_string {
+                Result::Ok(s) => io::println(&format!("Received data (string): '{}'", s)),
+                Result::Err(_) => io::println("Received data is not valid UTF-8.".to_string()),
+            }
+
+
+            io::println("\n--- Checking bytes available and flushing buffers ---".to_string());
+            match uart.bytes_to_read() {
+                Result::Ok(count) => io::println(&format!("Bytes currently available in RX buffer: {}", count.to_string())),
+                Result::Err(e) => io::println(&format!("Error checking RX buffer: {}", e.description())),
+            }
+
+            match uart.flush_rx() {
+                Result::Ok(_) => io::println("RX buffer flushed.".to_string()),
+                Result::Err(e) => io::println(&format!("Error flushing RX buffer: {}", e.description())),
+            }
+
+            match uart.flush_tx() {
+                Result::Ok(_) => io::println("TX buffer flushed.".to_string()),
+                Result::Err(e) => io::println(&format!("Error flushing TX buffer: {}", e.description())),
+            }
+
+            // Geçersiz konfigürasyon denemesi (çok yüksek baud hızı)
+            io::println("\n--- Attempting to Create UART with Invalid Baud Rate (Expected Error) ---".to_string());
+            let invalid_config = UartConfig {
+                baud_rate: MAX_UART_BAUD_RATE + 1, // Max baud rate'den büyük
+                ..UartConfig::default()
+            };
+            match Uart::new(1, invalid_config) { // UART Unit 1
+                Result::Ok(_) => io::println("This should not happen: Successfully created UART with invalid baud rate!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidConfiguration
+            }
+            uart_instance = Option::Some(uart); // Güncellenmiş örneği geri kaydet
+        }
+    }
+
+    io::println("\nUART example finished.".to_string());
+}
