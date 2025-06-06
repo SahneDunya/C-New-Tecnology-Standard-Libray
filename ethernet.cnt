@@ -1,0 +1,645 @@
+// ethernet.cnt
+// Ethernet Modülü
+// Kablolu ağ iletişimi için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli Ethernet denetleyicisi donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::vec::Vec;      // Veri tamponları için
+import std::cmp;           // min fonksiyonu için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::ethernet_controller` gibi bir kütüphane/modül aracılığıyla.
+
+/// `EthernetError`: Ethernet işlemleri sırasında oluşabilecek hata türleri.
+pub enum EthernetError {
+    /// Geçersiz Ethernet yapılandırması veya parametreleri.
+    InvalidConfig(String),
+    /// Ethernet birimi başlatılmadı veya yapılandırılmadı.
+    NotInitialized(String),
+    /// Ethernet denetleyicisi meşgul veya kilitlenmiş.
+    Busy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Zaman aşımı hatası (örn. veri gönderme/almada).
+    Timeout(String),
+    /// Çerçeve hatası (örn. CRC hatası, çok büyük/küçük çerçeve).
+    FrameError(String),
+    /// Bağlantı kesildi veya fiziksel katman (PHY) hatası.
+    LinkDown(String),
+    /// Desteklenmeyen işlem veya özellik.
+    UnsupportedOperation(String),
+    /// Bellek veya tampon hatası.
+    MemoryError(String),
+    /// Genel bir Ethernet hatası.
+    Custom(String),
+}
+
+impl Error for EthernetError {
+    fn description(&self) -> String {
+        match self {
+            EthernetError::InvalidConfig(msg) => format!("Invalid Ethernet Configuration: {}", msg),
+            EthernetError::NotInitialized(msg) => format!("Ethernet Not Initialized: {}", msg),
+            EthernetError::Busy(msg) => format!("Ethernet Busy: {}", msg),
+            EthernetError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            EthernetError::Timeout(msg) => format!("Ethernet Timeout: {}", msg),
+            EthernetError::FrameError(msg) => format!("Ethernet Frame Error: {}", msg),
+            EthernetError::LinkDown(msg) => format!("Ethernet Link Down: {}", msg),
+            EthernetError::UnsupportedOperation(msg) => format!("Unsupported Ethernet Operation: {}", msg),
+            EthernetError::MemoryError(msg) => format!("Ethernet Memory Error: {}", msg),
+            EthernetError::Custom(msg) => format!("Ethernet Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `MacAddress`: 6 baytlık MAC adresini temsil eder.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct MacAddress([u8; 6]);
+
+impl fmt::Debug for MacAddress {
+    fn fmt(&self, f: &mut fmt::Formatter) {
+        f.write_str(&format!(
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            self.0[0].to_string(), self.0[1].to_string(), self.0[2].to_string(),
+            self.0[3].to_string(), self.0[4].to_string(), self.0[5].to_string()
+        ));
+    }
+}
+
+impl MacAddress {
+    /// Yeni bir MAC adresi oluşturur.
+    pub fn new(bytes: [u8; 6]) -> MacAddress {
+        MacAddress(bytes)
+    }
+
+    /// Tamamen sıfırlardan oluşan bir boş MAC adresi döner.
+    pub fn zero() -> MacAddress {
+        MacAddress([0, 0, 0, 0, 0, 0])
+    }
+
+    /// MAC adresinin baytlarını döndürür.
+    pub fn as_bytes(&self) -> &[u8; 6] {
+        &self.0
+    }
+}
+
+/// `EthernetSpeed`: Ethernet bağlantı hızı.
+pub enum EthernetSpeed {
+    /// 10 Mbps
+    M10,
+    /// 100 Mbps
+    M100,
+    /// 1 Gbps (Gigabit Ethernet)
+    M1000,
+    // Daha yüksek hızlar eklenebilir (örn. 10 Gigabit)
+}
+
+/// `DuplexMode`: Ethernet çift yönlü modu.
+pub enum DuplexMode {
+    /// Veri tek yönlü, dönüşümlü olarak gönderilir veya alınır.
+    Half,
+    /// Veri eşzamanlı olarak hem gönderilebilir hem de alınabilir.
+    Full,
+}
+
+/// `EthernetConfig`: Ethernet denetleyicisinin genel yapılandırma ayarları.
+pub struct EthernetConfig {
+    pub speed: EthernetSpeed,
+    pub duplex: DuplexMode,
+    pub enable_flow_control: bool, // Akış kontrolünü (PAUSE çerçeveleri) etkinleştir
+    pub enable_mdio: bool,         // Yönetim Veri G/Ç (MDIO) arayüzünü etkinleştir (PHY ile iletişim için)
+    // Diğer yapılandırma ayarları (örn. RX/TX tampon boyutları, kesme ayarları)
+}
+
+impl Default for EthernetConfig {
+    fn default() -> EthernetConfig {
+        EthernetConfig {
+            speed: EthernetSpeed::M100, // Varsayılan olarak 100 Mbps
+            duplex: DuplexMode::Full,   // Varsayılan olarak tam dubleks
+            enable_flow_control: true,
+            enable_mdio: true,
+        }
+    }
+}
+
+/// `Ethernet`: Ethernet denetleyicisini temsil eden yapı.
+pub struct Ethernet {
+    id: u8, // Ethernet birimi ID'si (örneğin ETH0)
+    config: EthernetConfig,
+    mac_address: MacAddress,
+    is_initialized: bool,
+    is_active: bool, // Ethernet iletişim kuruyor mu?
+    // Geri çağırma fonksiyonları (varsayımsal)
+     rx_callback: Option<fn(&[u8], usize)>, // Veri alındığında çağrılır (data, len)
+     link_status_callback: Option<fn(bool)>, // Bağlantı durumu değiştiğinde çağrılır (is_up)
+    // Gerçek bir implementasyonda, burada Ethernet denetleyicisinin register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+}
+
+// Varsayımsal global statik depolama alanı ve kilit mekanizması
+static mut ETHERNET_INSTANCE: Option<Ethernet> = Option::None; // Tek bir Ethernet örneği için (singleton)
+
+// RX (Alma) Geri Çağırma için global static (basit simülasyon)
+static mut RX_CALLBACK: Option<fn(&[u8], usize) -> ()> = Option::None;
+
+/// `init(eth_id: u8, mac_addr: MacAddress, config: EthernetConfig) -> Result<(), EthernetError>`:
+/// Ethernet modülünü başlatır ve belirtilen Ethernet denetleyicisini yapılandırır.
+/// Ayrıca MAC adresini ayarlar. Yalnızca bir kez çağrılmalıdır.
+///
+/// `eth_id`: Ethernet birimi ID'si (örn. 0).
+/// `mac_addr`: Cihazın benzersiz MAC adresi.
+/// `config`: Ethernet denetleyicisi için yapılandırma ayarları.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım Ethernet denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init(eth_id: u8, mac_addr: MacAddress, config: EthernetConfig) -> Result<(), EthernetError> {
+    if ETHERNET_INSTANCE.is_some() {
+        return Result::Err(EthernetError::Custom("Ethernet module already initialized.".to_string()));
+    }
+    if eth_id >= MAX_ETH_UNITS { // MAX_ETH_UNITS tanımlanmış bir sabit olmalı
+        return Result::Err(EthernetError::InvalidConfig(
+            format!("Ethernet ID {} is out of range.", eth_id.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Initializing Ethernet Controller Unit {} with MAC: {:?}, Speed: {:?}, Duplex: {:?}.",
+        eth_id.to_string(), mac_addr, config.speed, config.duplex));
+    // Gerçekte, Ethernet denetleyicisi ve PHY burada başlatılır, saatleri açılır,
+    // MAC adresi yazılır, ve varsayılan ayarlar (hız, dubleks) yapılır.
+     os_api::ethernet_controller_init(eth_id, mac_addr.as_bytes(), &config);
+
+    let ethernet = Ethernet {
+        id: eth_id,
+        config,
+        mac_address: mac_addr,
+        is_initialized: true,
+        is_active: false,
+    };
+    ETHERNET_INSTANCE = Option::Some(ethernet);
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), EthernetError>`:
+/// Ethernet modülünü devre dışı bırakır ve tüm aktif iletişimleri durdurur, kaynakları serbest bırakır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım Ethernet denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), EthernetError> {
+    if ETHERNET_INSTANCE.is_none() {
+        return Result::Err(EthernetError::NotInitialized("Ethernet module not initialized.".to_string()));
+    }
+
+    io::println("HW_API: De-initializing Ethernet Controller.".to_string());
+    // os_api::ethernet_disable_controller(ETHERNET_INSTANCE.as_ref().unwrap().id);
+    RX_CALLBACK = Option::None;
+    ETHERNET_INSTANCE = Option::None;
+    Result::Ok(())
+}
+
+impl Ethernet {
+    /// `get_instance() -> Result<&'static mut Ethernet, EthernetError>`:
+    /// Başlatılmış Ethernet örneğine erişim sağlar (Singleton deseni).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `ETHERNET_INSTANCE`'a mutlak erişim sağladığından güvenli değildir.
+    pub unsafe fn get_instance() -> Result<&'static mut Ethernet, EthernetError> {
+        if let Option::Some(ref mut eth) = ETHERNET_INSTANCE {
+            Result::Ok(eth)
+        } else {
+            Result::Err(EthernetError::NotInitialized("Ethernet module not initialized. Call init() first.".to_string()))
+        }
+    }
+
+    /// `enable(&mut self) -> Result<(), EthernetError>`:
+    /// Ethernet denetleyicisini etkinleştirir ve ağ bağlantısını başlatır.
+    /// PHY'nin bağlantıyı kurmasını beklemeyi içerebilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım Ethernet kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn enable(&mut self) -> Result<(), EthernetError> {
+        if !self.is_initialized {
+            return Result::Err(EthernetError::NotInitialized("Ethernet not initialized.".to_string()));
+        }
+        if self.is_active {
+            return Result::Err(EthernetError::Busy("Ethernet is already enabled.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Enabling Ethernet Unit {}.", self.id.to_string()));
+        // os_api::ethernet_enable(self.id);
+        self.is_active = true;
+
+        // Bağlantının kurulmasını bekle (simülasyon)
+        io::println("HW_API: Waiting for Ethernet link to come up...".to_string());
+        // Gerçekte, burada PHY durumu okunur ve bağlantı kurana kadar beklenir.
+        // Veya bir kesme ile bağlantı durum değişikliği bildirilir.
+        std::spirit::sleep_ms(100); // Küçük bir gecikme
+
+        if self.get_link_status()? { // Bağlantı durumunu kontrol et
+            io::println("Ethernet link is UP.".to_string());
+            Result::Ok(())
+        } else {
+            io::println("Ethernet link is DOWN.".to_string());
+            Result::Err(EthernetError::LinkDown("Failed to establish Ethernet link.".to_string()))
+        }
+    }
+
+    /// `disable(&mut self) -> Result<(), EthernetError>`:
+    /// Ethernet denetleyicisini devre dışı bırakır ve aktif iletişimleri keser.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım Ethernet kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn disable(&mut self) -> Result<(), EthernetError> {
+        if !self.is_active {
+            return Result::Err(EthernetError::NotInitialized("Ethernet is not enabled.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Disabling Ethernet Unit {}.", self.id.to_string()));
+        // os_api::ethernet_disable(self.id);
+        self.is_active = false;
+        Result::Ok(())
+    }
+
+    /// `get_mac_address(&self) -> Result<MacAddress, EthernetError>`:
+    /// Ethernet denetleyicisinin mevcut MAC adresini okur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım MAC adresi kayıtlarını okuduğundan güvenli değildir.
+    pub unsafe fn get_mac_address(&self) -> Result<MacAddress, EthernetError> {
+        if !self.is_initialized {
+            return Result::Err(EthernetError::NotInitialized("Ethernet not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Getting MAC Address for Unit {}.", self.id.to_string()));
+        // Gerçekte, donanımdan okunur.
+         let raw_mac = os_api::ethernet_get_mac(self.id);
+         Result::Ok(MacAddress::new(raw_mac));
+        Result::Ok(self.mac_address) // Simülasyon: ayarlanmış olanı döndür
+    }
+
+    /// `send_frame(&mut self, data: &[u8]) -> Result<usize, EthernetError>`:
+    /// Verilen bayt dizisini bir Ethernet çerçevesi olarak gönderir.
+    /// Veri, bir Ethernet başlığı (hedef MAC, kaynak MAC, EtherType/Uzunluk) ve veri yükünü içermelidir.
+    /// CRC (Hata Denetimi) genellikle donanım tarafından otomatik olarak eklenir.
+    /// Döndürülen `usize`, başarıyla gönderilen bayt sayısıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bellek tamponları ve donanım Ethernet kayıtları ile doğrudan çalıştığından güvenli değildir.
+    pub unsafe fn send_frame(&mut self, data: &[u8]) -> Result<usize, EthernetError> {
+        if !self.is_active {
+            return Result::Err(EthernetError::NotInitialized("Ethernet is not enabled or link is down.".to_string()));
+        }
+        if data.is_empty() {
+            return Result::Ok(0);
+        }
+        // Minimum Ethernet çerçeve boyutu (64 bayt) ve maksimum (1518/1522 bayt) kontrolü
+        if data.len() < 46 || data.len() > 1500 { // Min data payload, Max data payload (excluding header/CRC)
+            return Result::Err(EthernetError::InvalidConfig(
+                format!("Invalid frame size: {} bytes. Must be between 46 and 1500 (payload).", data.len().to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Sending Ethernet frame ({} bytes) from Unit {}.", data.len().to_string(), self.id.to_string()));
+         os_api::ethernet_send_frame(self.id, data); // Bu bloklar
+        // Verinin donanım TX FIFO'suna veya DMA tamponuna yazılması
+        // Transferin başlatılması
+
+        // Simülasyon: Başarıyla gönderildiğini varsayalım
+        Result::Ok(data.len())
+    }
+
+    /// `receive_frame(&mut self, buffer: &mut [u8]) -> Result<usize, EthernetError>`:
+    /// Gelen bir Ethernet çerçevesini alır ve verilen tampona yazar.
+    /// Alınan bayt sayısı döndürülür. Tampon yeterince büyük olmalıdır (genellikle 1518/1522 bayt).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bellek tamponları ve donanım Ethernet kayıtları ile doğrudan çalıştığından güvenli değildir.
+    pub unsafe fn receive_frame(&mut self, buffer: &mut [u8]) -> Result<usize, EthernetError> {
+        if !self.is_active {
+            return Result::Err(EthernetError::NotInitialized("Ethernet is not enabled or link is down.".to_string()));
+        }
+        if buffer.is_empty() {
+            return Result::Ok(0);
+        }
+        // Tamponun en az maksimum çerçeve boyutunu alabilecek kadar büyük olması
+        if buffer.len() < 1518 { // Standart Ethernet çerçeve boyutu (header + payload + CRC)
+            return Result::Err(EthernetError::MemoryError(
+                format!("Receive buffer too small ({} bytes). Minimum 1518 bytes recommended.", buffer.len().to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Receiving Ethernet frame into buffer (size: {}) on Unit {}.", buffer.len().to_string(), self.id.to_string()));
+         os_api::ethernet_receive_frame(self.id, buffer); // Bu bloklar
+        // Donanım RX FIFO'sundan veya DMA tamponundan verinin okunması
+        // Eğer veri yoksa veya hata varsa uygun hata döner
+
+        // Simülasyon: Rastgele baytlar alalım
+        let received_len = std::cmp::min(buffer.len(), 100); // Simülasyon için 100 bayt alalım
+        for i in 0..received_len {
+            buffer[i] = (i % 256) as u8; // Basit örnek veri
+        }
+        Result::Ok(received_len)
+    }
+
+    /// `get_link_status(&self) -> Result<bool, EthernetError>`:
+    /// Ethernet fiziksel bağlantısının (PHY) durumunu kontrol eder. `true` bağlantının aktif olduğunu, `false` pasif olduğunu gösterir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım PHY kayıtlarını okuduğundan güvenli değildir.
+    pub unsafe fn get_link_status(&self) -> Result<bool, EthernetError> {
+        if !self.is_initialized {
+            return Result::Err(EthernetError::NotInitialized("Ethernet not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Checking Ethernet Unit {} link status.", self.id.to_string()));
+        // Result::Ok(os_api::ethernet_get_link_status(self.id));
+
+        // Simülasyon: Her zaman true dönelim (bağlantı var)
+        Result::Ok(true)
+    }
+
+    /// `register_rx_callback(&self, callback: fn(&[u8], usize) -> ()) -> Result<(), EthernetError>`:
+    /// Bir Ethernet çerçevesi alındığında çağrılacak bir geri çağırma (callback) fonksiyonu kaydeder.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `RX_CALLBACK`'ı değiştirdiğinden güvenli değildir.
+    /// `callback` fonksiyonunun kesme güvenli (async-signal-safe) olması kritik öneme sahiptir.
+    pub unsafe fn register_rx_callback(&self, callback: fn(&[u8], usize) -> ()) -> Result<(), EthernetError> {
+        if !self.is_initialized {
+            return Result::Err(EthernetError::NotInitialized("Ethernet module not initialized.".to_string()));
+        }
+        if RX_CALLBACK.is_some() {
+            return Result::Err(EthernetError::Custom("RX callback already registered.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Registering RX callback for Ethernet Unit {}.", self.id.to_string()));
+         os_api::ethernet_enable_rx_interrupt(self.id); // RX kesmelerini etkinleştir
+        RX_CALLBACK = Option::Some(callback);
+        Result::Ok(())
+    }
+
+    /// `unregister_rx_callback(&self) -> Result<(), EthernetError>`:
+    /// Kayıtlı RX geri çağırma fonksiyonunu kaldırır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `RX_CALLBACK`'ı değiştirdiğinden güvenli değildir.
+    pub unsafe fn unregister_rx_callback(&self) -> Result<(), EthernetError> {
+        if !self.is_initialized {
+            return Result::Err(EthernetError::NotInitialized("Ethernet module not initialized.".to_string()));
+        }
+        if RX_CALLBACK.is_none() {
+            return Result::Err(EthernetError::Custom("No RX callback registered.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Unregistering RX callback for Ethernet Unit {}.", self.id.to_string()));
+         os_api::ethernet_disable_rx_interrupt(self.id);
+        RX_CALLBACK = Option::None;
+        Result::Ok(())
+    }
+
+    /// `_simulate_rx_interrupt(eth_id: u8, data: &[u8])`:
+    /// Bu fonksiyon, geliştirme ve test amacıyla bir Ethernet alma (RX) kesmesini simüle etmek için kullanılır.
+    /// Gerçek bir donanım üzerinde çağrılmamalıdır!
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Normalde donanım tarafından tetiklenecek bir olayı manuel olarak tetiklediğinden güvenli değildir.
+    /// Sadece test senaryoları için kullanılır.
+    pub unsafe fn _simulate_rx_interrupt(eth_id: u8, data: &[u8]) {
+        io::println(&format!("SIMULATION: Ethernet RX Interrupt triggered for Unit {}. Received {} bytes.",
+            eth_id.to_string(), data.len().to_string()));
+        if let Option::Some(eth) = &mut ETHERNET_INSTANCE {
+            if eth.id == eth_id {
+                if let Option::Some(callback) = RX_CALLBACK {
+                    callback(data, data.len());
+                } else {
+                    io::println("SIMULATION WARNING: No RX callback registered.".to_string());
+                }
+            } else {
+                io::println(&format!("SIMULATION WARNING: Ethernet ID {} does not match current instance ID {}.", eth_id.to_string(), eth.id.to_string()));
+            }
+        } else {
+            io::println("SIMULATION WARNING: Ethernet module not initialized. Cannot simulate.".to_string());
+        }
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum Ethernet denetleyici birimi sayısını belirtir.
+const MAX_ETH_UNITS: u8 = 1; // Genellikle tek bir Ethernet denetleyici birimi olur.
+
+
+// --- Örnek Kullanım ---
+
+import std::ethernet::{self, Ethernet, MacAddress, EthernetConfig, EthernetSpeed, DuplexMode, EthernetError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+import std::vec::Vec; // For Vec::new()
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+    // Simple comparison for vectors (needed for PartialEq on &[u8])
+    pub mod cmp {
+        pub fn min<T: PartialOrd>(a: T, b: T) -> T {
+            if a < b { a } else { b }
+        }
+    }
+}
+
+// Global flag and buffer for RX data (for example purposes only)
+static mut RECEIVED_FRAME_DATA: Vec<u8> = Vec::new();
+static mut RX_DATA_AVAILABLE: bool = false;
+
+// Ethernet RX Geri Çağırma Fonksiyonu (ISR benzeri)
+fn ethernet_rx_callback(data: &[u8], len: usize) {
+    unsafe {
+        io::println(&format!("  >>> ETHERNET Callback: Received {} bytes: {:?}", len.to_string(), data));
+        RECEIVED_FRAME_DATA.clear();
+        for i in 0..len {
+            RECEIVED_FRAME_DATA.push(data[i]);
+        }
+        RX_DATA_AVAILABLE = true;
+    }
+}
+
+fn main() {
+    io::println("Starting Ethernet example...".to_string());
+
+    // UNSAFE BLOCK - Ethernet altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        let my_mac_address = MacAddress::new([0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E]);
+        let eth_config = EthernetConfig {
+            speed: EthernetSpeed::M100,
+            duplex: DuplexMode::Full,
+            enable_flow_control: true,
+            enable_mdio: true,
+        };
+
+        io::println("\n--- Initializing Ethernet Module ---".to_string());
+        match ethernet::init(0, my_mac_address, eth_config) { // ETH Unit 0
+            Result::Ok(_) => io::println("Ethernet module initialized.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing Ethernet module: {}", e.description()));
+                return;
+            }
+        }
+
+        let mut eth_instance: Option<&'static mut Ethernet> = Option::None;
+        match Ethernet::get_instance() {
+            Result::Ok(instance) => {
+                io::println("Ethernet instance obtained.".to_string());
+                eth_instance = Option::Some(instance);
+            },
+            Result::Err(e) => io::println(&format!("Error getting Ethernet instance: {}", e.description())),
+        }
+
+        if let Option::Some(eth) = eth_instance {
+            // MAC adresini oku
+            io::println("\n--- Reading MAC Address ---".to_string());
+            match eth.get_mac_address() {
+                Result::Ok(mac) => io::println(&format!("Current MAC Address: {:?}", mac)),
+                Result::Err(e) => io::println(&format!("Error reading MAC address: {}", e.description())),
+            }
+
+            // Ethernet'i etkinleştir
+            io::println("\n--- Enabling Ethernet Controller and waiting for link ---".to_string());
+            match eth.enable() {
+                Result::Ok(_) => io::println("Ethernet controller enabled. Link should be up.".to_string()),
+                Result::Err(e) => io::println(&format!("Error enabling Ethernet controller or link down: {}", e.description())),
+            }
+
+            // RX callback'i kaydet
+            io::println("\n--- Registering RX Callback ---".to_string());
+            match eth.register_rx_callback(ethernet_rx_callback) {
+                Result::Ok(_) => io::println("RX callback registered.".to_string()),
+                Result::Err(e) => io::println(&format!("Error registering RX callback: {}", e.description())),
+            }
+
+            // Örnek Ethernet Çerçevesi Oluştur (Basit bir IP paketi gibi, başlıklar dahil)
+            // Hedef MAC, Kaynak MAC, EtherType (IP için 0x0800), IP başlığı, Veri
+            let dest_mac: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]; // Broadcast
+            let src_mac: [u8; 6] = *my_mac_address.as_bytes();
+            let eth_type: [u8; 2] = [0x08, 0x00]; // IPv4
+            let mut payload: Vec<u8> = Vec::new();
+            payload.push(0x45); // IP Version and Header Length
+            payload.push(0x00); // Type of Service
+            payload.push(0x00); payload.push(0x20); // Total Length (32 bytes)
+            // ... (diğer IP başlığı ve veri)
+            for i in 0..10 { payload.push(i as u8); } // Örnek veri
+
+            let mut frame_data: Vec<u8> = Vec::new();
+            frame_data.extend_from_slice(&dest_mac);
+            frame_data.extend_from_slice(&src_mac);
+            frame_data.extend_from_slice(&eth_type);
+            frame_data.extend_from_slice(&payload);
+
+            // Minimum çerçeve boyutuna tamamla (46 bayt veri + 14 bayt başlık = 60)
+            // Padding ihtiyacı olabilir, 64 bayta tamamlamak yaygındır (CRC hariç)
+            while frame_data.len() < 60 {
+                frame_data.push(0x00); // Padding
+            }
+
+
+            // Veri Gönderme
+            io::println("\n--- Sending Ethernet Frame ---".to_string());
+            match eth.send_frame(&frame_data) {
+                Result::Ok(bytes_sent) => io::println(&format!("Sent {} bytes.", bytes_sent.to_string())),
+                Result::Err(e) => io::println(&format!("Error sending frame: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(50); // Küçük bir gecikme
+
+            // Veri Alma (simüle edilmiş)
+            io::println("\n--- Simulating Incoming Ethernet Frame (RX) ---".to_string());
+            let mut rx_buffer: [u8; 1518] = [0; 1518]; // Standart maksimum çerçeve boyutu
+            let simulated_rx_data: [u8; 80] = [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // Hedef MAC (örnek)
+                0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // Kaynak MAC (örnek)
+                0x08, 0x00, // EtherType (IPv4)
+                // IP Header ve Payload (66 bayt, min 46 + 14 = 60, burada 66 + 14 = 80)
+                0x45, 0x00, 0x00, 0x42, 0x12, 0x34, 0x00, 0x00, 0x40, 0x06, 0x7C, 0xF2,
+                0xC0, 0xA8, 0x01, 0x01, 0xC0, 0xA8, 0x01, 0xC8, // Örnek IP başlığı
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // Örnek veri
+                0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+                0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+                0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+                0x29, 0x2A // 66 baytlık payload
+            ];
+
+            RX_DATA_AVAILABLE = false; // Bayrağı sıfırla
+            ethernet::_simulate_rx_interrupt(eth.id, &simulated_rx_data); // Simüle et
+
+            // Gelen veriyi işle (ana döngüde veya ayrı bir görevde yapılır)
+            io::println("Waiting for received data (simulated)...".to_string());
+            let mut timeout_count = 0;
+            while !RX_DATA_AVAILABLE && timeout_count < 5 {
+                std::spirit::sleep_ms(100);
+                timeout_count += 1;
+            }
+
+            if RX_DATA_AVAILABLE {
+                io::println(&format!("Successfully processed simulated RX data ({} bytes).", RECEIVED_FRAME_DATA.len().to_string()));
+            } else {
+                io::println("No RX data received or processed within timeout.".to_string());
+            }
+
+            // Bağlantı durumunu tekrar kontrol et
+            io::println("\n--- Checking Ethernet Link Status Again ---".to_string());
+            match eth.get_link_status() {
+                Result::Ok(status) => {
+                    if status {
+                        io::println("Ethernet link is still UP.".to_string());
+                    } else {
+                        io::println("Ethernet link is DOWN.".to_string());
+                    }
+                },
+                Result::Err(e) => io::println(&format!("Error checking link status: {}", e.description())),
+            }
+
+            // RX callback'i kaldır
+            io::println("\n--- Unregistering RX Callback ---".to_string());
+            match eth.unregister_rx_callback() {
+                Result::Ok(_) => io::println("RX callback unregistered.".to_string()),
+                Result::Err(e) => io::println(&format!("Error unregistering RX callback: {}", e.description())),
+            }
+
+            // Ethernet'i devre dışı bırak
+            io::println("\n--- Disabling Ethernet Controller ---".to_string());
+            match eth.disable() {
+                Result::Ok(_) => io::println("Ethernet controller disabled.".to_string()),
+                Result::Err(e) => io::println(&format!("Error disabling Ethernet controller: {}", e.description())),
+            }
+        }
+
+        // Modülü de-initialize et
+        io::println("\n--- De-initializing Ethernet Module ---".to_string());
+        match ethernet::deinit() {
+            Result::Ok(_) => io::println("Ethernet module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing Ethernet module: {}", e.description())),
+        }
+    }
+
+    io::println("\nEthernet example finished.".to_string());
+}
