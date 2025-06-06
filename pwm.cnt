@@ -1,0 +1,295 @@
+// pwm.cnt
+// Darbe Genişliği Modülasyonu (PWM) Modülü
+// Dijital sinyallerin darbe genişliğini değiştirerek analog benzeri davranışları simüle etmek için
+// bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli zamanlayıcı/sayıcı donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+// Ayrıca, frekans hesaplamaları için saat (clock) yönetimi modülüne ihtiyaç duyulabilir.
+
+/// `PwmError`: PWM işlemleri sırasında oluşabilecek hata türleri.
+pub enum PwmError {
+    /// Geçersiz PWM kanalı numarası.
+    InvalidChannelNumber(String),
+    /// Geçersiz frekans veya görev döngüsü değeri.
+    InvalidParameter(String),
+    /// Donanım birimi meşgul veya zaten kullanımda.
+    PwmBusy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Genel bir PWM hatası.
+    Custom(String),
+}
+
+impl Error for PwmError {
+    fn description(&self) -> String {
+        match self {
+            PwmError::InvalidChannelNumber(msg) => format!("Invalid PWM Channel Number: {}", msg),
+            PwmError::InvalidParameter(msg) => format!("Invalid PWM Parameter: {}", msg),
+            PwmError::PwmBusy(msg) => format!("PWM Busy: {}", msg),
+            PwmError::HardwareAccessError(msg) => format!("PWM Hardware Access Error: {}", msg),
+            PwmError::Custom(msg) => format!("PWM Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `PwmChannel`: Tek bir PWM kanalını temsil eden yapı.
+/// Bu yapı, PWM'nin durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct PwmChannel {
+    channel_id: u8,
+    // Gerçek bir implementasyonda, burada PWM zamanlayıcısının/sayıcısının
+    // donanım register adresleri veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: timer_base_addr: u64, ccmr_offset: u32, arr_offset: u32, ccr_offset: u32
+    is_enabled: bool,
+    current_frequency_hz: u32,
+    current_duty_cycle: f32, // 0.0 (0%) ile 1.0 (100%) arasında
+}
+
+impl PwmChannel {
+    /// `new(channel_id: u8) -> Result<PwmChannel, PwmError>`:
+    /// Belirtilen PWM kanalı ID'si için yeni bir `PwmChannel` örneği oluşturur.
+    /// Kanal başlangıçta devre dışı durumda olur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir PWM kanalını başlatmak,
+    /// ilgili zamanlayıcı/sayıcı donanımını yapılandırabilir ve varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(channel_id: u8) -> Result<PwmChannel, PwmError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if channel_id >= MAX_PWM_CHANNELS { // MAX_PWM_CHANNELS tanımlanmış bir sabit olmalı
+            return Result::Err(PwmError::InvalidChannelNumber(
+                format!("PWM Channel ID {} is out of range.", channel_id.to_string())
+            ));
+        }
+
+        // PWM donanımını başlat (saati aç, varsayılan kayıtları ayarla).
+        io::println(&format!("HW_API: Initializing PWM Channel {}.", channel_id.to_string()));
+        // os_api::pwm_init_channel(channel_id);
+
+        Result::Ok(PwmChannel {
+            channel_id,
+            is_enabled: false,
+            current_frequency_hz: 0,
+            current_duty_cycle: 0.0,
+        })
+    }
+
+    /// `set_frequency(&mut self, frequency_hz: u32) -> Result<(), PwmError>`:
+    /// PWM sinyalinin frekansını Hertz (Hz) cinsinden ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını (zamanlayıcı/sayıcı periyot veya otomatik yeniden yükleme kaydı)
+    /// doğrudan değiştirdiğinden güvenli değildir. Yanlış frekans ayarları donanımı
+    /// beklenmedik şekilde çalıştırabilir veya çıkış pinine zarar verebilir.
+    pub unsafe fn set_frequency(&mut self, frequency_hz: u32) -> Result<(), PwmError> {
+        if frequency_hz == 0 {
+            return Result::Err(PwmError::InvalidParameter("Frequency cannot be zero.".to_string()));
+        }
+
+        // Varsayımsal sistem saati frekansı (örneğin 100 MHz)
+        const SYSTEM_CLOCK_HZ: u64 = 100_000_000;
+        // PWM donanımına bağlı olarak, bir bölücü (prescaler) ve periyot değeri hesaplanır.
+        // Örneğin: Periyot = (System Clock / (Prescaler * Frequency)) - 1
+        // Bu karmaşık hesaplamalar genellikle düşük seviyeli donanım soyutlaması tarafından yapılır.
+
+        io::println(&format!("HW_API: Setting PWM Channel {} frequency to {} Hz.", self.channel_id.to_string(), frequency_hz.to_string()));
+         if !os_api::pwm_set_frequency(self.channel_id, frequency_hz) {
+             return Result::Err(PwmError::HardwareAccessError("Failed to set PWM frequency.".to_string()));
+         }
+        self.current_frequency_hz = frequency_hz;
+        Result::Ok(())
+    }
+
+    /// `set_duty_cycle(&mut self, duty_cycle: f32) -> Result<(), PwmError>`:
+    /// PWM sinyalinin görev döngüsünü ayarlar. Değer 0.0 (0%) ile 1.0 (100%) arasında olmalıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını (karşılaştırma veya yakalama/karşılaştırma kaydı) doğrudan
+    /// değiştirdiğinden güvenli değildir. Yanlış görev döngüsü, bağlı donanımı (örn. motor)
+    /// beklenmedik şekilde kontrol edebilir.
+    pub unsafe fn set_duty_cycle(&mut self, duty_cycle: f32) -> Result<(), PwmError> {
+        if duty_cycle < 0.0 || duty_cycle > 1.0 {
+            return Result::Err(PwmError::InvalidParameter(
+                format!("Duty cycle must be between 0.0 and 1.0, got {}.", duty_cycle.to_string())
+            ));
+        }
+
+        // Görev döngüsü, genellikle zamanlayıcı periyoduyla çarpılarak bir karşılaştırma değeri olarak ayarlanır.
+        // Örneğin: Compare Value = Duty Cycle * (Period + 1)
+        io::println(&format!("HW_API: Setting PWM Channel {} duty cycle to {} ({}%).",
+            self.channel_id.to_string(), duty_cycle.to_string(), (duty_cycle * 100.0).to_string()));
+         if !os_api::pwm_set_duty_cycle(self.channel_id, duty_cycle) {
+             return Result::Err(PwmError::HardwareAccessError("Failed to set PWM duty cycle.".to_string()));
+         }
+        self.current_duty_cycle = duty_cycle;
+        Result::Ok(())
+    }
+
+    /// `enable(&mut self) -> Result<(), PwmError>`:
+    /// PWM çıkışını etkinleştirir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn enable(&mut self) -> Result<(), PwmError> {
+        if self.is_enabled {
+            return Result::Ok(()); // Zaten etkin
+        }
+        io::println(&format!("HW_API: Enabling PWM Channel {}.", self.channel_id.to_string()));
+         if !os_api::pwm_enable_output(self.channel_id) {
+             return Result::Err(PwmError::HardwareAccessError("Failed to enable PWM output.".to_string()));
+         }
+        self.is_enabled = true;
+        Result::Ok(())
+    }
+
+    /// `disable(&mut self) -> Result<(), PwmError>`:
+    /// PWM çıkışını devre dışı bırakır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn disable(&mut self) -> Result<(), PwmError> {
+        if !self.is_enabled {
+            return Result::Ok(()); // Zaten devre dışı
+        }
+        io::println(&format!("HW_API: Disabling PWM Channel {}.", self.channel_id.to_string()));
+         if !os_api::pwm_disable_output(self.channel_id) {
+             return Result::Err(PwmError::HardwareAccessError("Failed to disable PWM output.".to_string()));
+         }
+        self.is_enabled = false;
+        Result::Ok(())
+    }
+
+    /// `get_frequency(&self) -> u32`:
+    /// Kanalın mevcut frekansını döndürür.
+    pub fn get_frequency(&self) -> u32 {
+        self.current_frequency_hz
+    }
+
+    /// `get_duty_cycle(&self) -> f32`:
+    /// Kanalın mevcut görev döngüsünü döndürür.
+    pub fn get_duty_cycle(&self) -> f32 {
+        self.current_duty_cycle
+    }
+
+    /// `is_enabled(&self) -> bool`:
+    /// Kanalın şu anda etkin olup olmadığını döndürür.
+    pub fn is_enabled(&self) -> bool {
+        self.is_enabled
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum PWM kanalı sayısını belirtir.
+const MAX_PWM_CHANNELS: u8 = 4; // Örneğin, bir mikrodenetleyicide 4 PWM kanalı olduğunu varsayalım.
+
+
+// --- Örnek Kullanım ---
+
+import std::pwm::{self, PwmChannel, PwmError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+
+// Dummy `std::ptr` for mock
+pub mod std {
+    pub mod ptr {
+        pub fn null_mut<T>() -> *mut T {
+            0 as *mut T
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting PWM example...".to_string());
+
+    // PWM Kanal 0'ı kullanalım (genellikle bir LED'in parlaklığını veya motor hızını kontrol etmek için)
+    io::println("\n--- Initializing PWM Channel 0 ---".to_string());
+
+    // UNSAFE BLOCK - PWM kanalını başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let mut pwm_channel_res = PwmChannel::new(0); // PWM Kanal 0
+
+        let mut pwm_channel: Option<PwmChannel> = Option::None;
+
+        match pwm_channel_res {
+            Result::Ok(channel) => {
+                io::println("PWM Channel 0 created successfully.".to_string());
+                pwm_channel = Option::Some(channel);
+            },
+            Result::Err(e) => io::println(&format!("Error creating PWM Channel: {}", e.description())),
+        }
+
+        if let Option::Some(mut channel) = pwm_channel {
+            // Frekansı ayarla (örn. 1 kHz)
+            io::println("\n--- Setting PWM Frequency to 1 kHz ---".to_string());
+            match channel.set_frequency(1000) { // 1000 Hz
+                Result::Ok(_) => io::println(&format!("Frequency set to {} Hz.", channel.get_frequency().to_string())),
+                Result::Err(e) => io::println(&format!("Error setting frequency: {}", e.description())),
+            }
+
+            // Görev döngüsünü ayarla ve etkinleştir
+            io::println("\n--- Setting Duty Cycle to 25% and Enabling PWM ---".to_string());
+            match channel.set_duty_cycle(0.25) { // %25 görev döngüsü
+                Result::Ok(_) => io::println(&format!("Duty cycle set to {}.", channel.get_duty_cycle().to_string())),
+                Result::Err(e) => io::println(&format!("Error setting duty cycle: {}", e.description())),
+            }
+
+            match channel.enable() {
+                Result::Ok(_) => io::println("PWM Channel 0 enabled.".to_string()),
+                Result::Err(e) => io::println(&format!("Error enabling PWM: {}", e.description())),
+            }
+            std::spirit::sleep_ms(2000); // 2 saniye çalıştır
+
+            // Görev döngüsünü %75'e ayarla
+            io::println("\n--- Changing Duty Cycle to 75% ---".to_string());
+            match channel.set_duty_cycle(0.75) { // %75 görev döngüsü
+                Result::Ok(_) => io::println(&format!("Duty cycle set to {}.", channel.get_duty_cycle().to_string())),
+                Result::Err(e) => io::println(&format!("Error setting duty cycle: {}", e.description())),
+            }
+            std::spirit::sleep_ms(2000); // 2 saniye çalıştır
+
+            // PWM'i devre dışı bırak
+            io::println("\n--- Disabling PWM Channel 0 ---".to_string());
+            match channel.disable() {
+                Result::Ok(_) => io::println("PWM Channel 0 disabled.".to_string()),
+                Result::Err(e) => io::println(&format!("Error disabling PWM: {}", e.description())),
+            }
+
+            // Geçersiz parametre denemesi (görev döngüsü)
+            io::println("\n--- Attempting to Set Invalid Duty Cycle (Expected Error) ---".to_string());
+            match channel.set_duty_cycle(1.5) { // 1.0'dan büyük
+                Result::Ok(_) => io::println("This should not happen: Successfully set invalid duty cycle!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidParameter
+            }
+
+            // Geçersiz kanal denemesi
+            io::println("\n--- Attempting to Create Invalid PWM Channel (Expected Error) ---".to_string());
+            match PwmChannel::new(MAX_PWM_CHANNELS + 1) { // Maksimumdan büyük
+                Result::Ok(_) => io::println("This should not happen: Successfully created invalid channel!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidChannelNumber
+            }
+            pwm_channel = Option::Some(channel); // Güncellenmiş kanalı geri kaydet
+        }
+    }
+
+    io::println("\nPWM example finished.".to_string());
+}
