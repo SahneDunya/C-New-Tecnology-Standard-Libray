@@ -1,0 +1,493 @@
+// memory_utils.cnt
+// Bellek Yönetimi Yardımcı Fonksiyonları Modülü
+// Düşük seviyeli bellek manipülasyonu ve güvenli olmayan bellek işlemleri için araçlar sağlar.
+// Bu fonksiyonlar genellikle 'unsafe' bağlamlarda kullanılır ve dikkatli kullanım gerektirir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de ham işaretçi türleri (`*mut T`, `*const T`) ve
+// bunların manipülasyonu için temel operatörler (dereference `*`, adres alma `&`) mevcuttur.
+// Ayrıca `size_of<T>()` gibi bir mekanizmanın var olduğu varsayılır.
+
+/// `MemoryError`: Bellek işlemleri sırasında oluşabilecek hata türlerini temsil eder.
+pub enum MemoryError {
+    /// Geçersiz bellek adresi veya boyutu.
+    InvalidMemoryAccess(String),
+    /// Bellek tahsis hatası.
+    AllocationFailed(String),
+    /// Genel bir bellek hatası.
+    Custom(String),
+}
+
+impl Error for MemoryError {
+    fn description(&self) -> String {
+        match self {
+            MemoryError::InvalidMemoryAccess(msg) => format!("Invalid Memory Access: {}", msg),
+            MemoryError::AllocationFailed(msg) => format!("Memory Allocation Failed: {}", msg),
+            MemoryError::Custom(msg) => format!("Memory Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+
+// --- Bellek Manipülasyon Fonksiyonları ---
+
+/// `memcpy(dst: *mut u8, src: *const u8, count: u64) -> Result<(), MemoryError>`:
+/// Kaynak bellek bölgesinden hedef bellek bölgesine `count` bayt kopyalar.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `dst` ve `src` geçerli bellek adreslerini göstermelidir.
+/// - Kopyalanacak bölgeler çakışmamalıdır (çakışıyorsa `memmove` kullanılmalıdır).
+/// - `dst` bölgesinin `count` bayt yazmak için yeterli alana sahip olması gerekir.
+/// - `src` bölgesinin `count` bayt okumak için yeterli veriye sahip olması gerekir.
+pub unsafe fn memcpy(dst: *mut u8, src: *const u8, count: u64) -> Result<(), MemoryError> {
+    // Sanal OS çağrısı veya yerleşik optimizasyonlar
+    // Örneğin, düşük seviyeli assembly komutları veya donanım intrinsikleri
+    // Burada basit bir bayt kopyalama döngüsü ile simüle ediyoruz.
+    if dst.is_null() || src.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided to memcpy".to_string()));
+    }
+    
+    for i in 0..count {
+        // İşaretçi aritmetiği ve dereferanslama
+        *(dst.offset(i as isize)) = *(src.offset(i as isize));
+    }
+    Result::Ok(())
+}
+
+/// `memmove(dst: *mut u8, src: *const u8, count: u64) -> Result<(), MemoryError>`:
+/// Kaynak bellek bölgesinden hedef bellek bölgesine `count` bayt kopyalar.
+/// Bellek bölgeleri çakışabilir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `dst` ve `src` geçerli bellek adreslerini göstermelidir.
+/// - `dst` bölgesinin `count` bayt yazmak için yeterli alana sahip olması gerekir.
+/// - `src` bölgesinin `count` bayt okumak için yeterli veriye sahip olması gerekir.
+pub unsafe fn memmove(dst: *mut u8, src: *const u8, count: u64) -> Result<(), MemoryError> {
+    if dst.is_null() || src.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided to memmove".to_string()));
+    }
+
+    let dst_addr = dst as u64;
+    let src_addr = src as u64;
+
+    if dst_addr == src_addr {
+        return Result::Ok(()); // Aynı adrese kopyalamaya gerek yok
+    }
+
+    if dst_addr < src_addr {
+        // Kopyalama ileriye doğru yapılabilir (üst üste binme yoksa)
+        // src: [A B C D E]
+        // dst:   [A B C D E] -> [A A B C D]
+        for i in 0..count {
+            *(dst.offset(i as isize)) = *(src.offset(i as isize));
+        }
+    } else {
+        // Kopyalama geriye doğru yapılmalıdır (üst üste binme olasılığı)
+        // src:   [A B C D E]
+        // dst: [A B C D E] -> [C D E E E]
+        let mut i = count;
+        while i > 0 {
+            i -= 1;
+            *(dst.offset(i as isize)) = *(src.offset(i as isize));
+        }
+    }
+    Result::Ok(())
+}
+
+
+/// `memset(dst: *mut u8, value: u8, count: u64) -> Result<(), MemoryError>`:
+/// Hedef bellek bölgesini `count` bayt boyunca belirli bir `value` ile doldurur.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `dst` geçerli bir bellek adresini göstermelidir.
+/// - `dst` bölgesinin `count` bayt yazmak için yeterli alana sahip olması gerekir.
+pub unsafe fn memset(dst: *mut u8, value: u8, count: u64) -> Result<(), MemoryError> {
+    if dst.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided to memset".to_string()));
+    }
+
+    for i in 0..count {
+        *(dst.offset(i as isize)) = value;
+    }
+    Result::Ok(())
+}
+
+/// `memcmp(a: *const u8, b: *const u8, count: u64) -> Result<i32, MemoryError>`:
+/// İki bellek bölgesini `count` bayt boyunca karşılaştırır.
+///
+/// - Eğer `a` ve `b` eşitse `0` döndürür.
+/// - Eğer `a`'daki ilk farklı bayt `b`'deki karşılık gelen bayttan küçükse negatif bir değer döndürür.
+/// - Eğer `a`'daki ilk farklı bayt `b`'deki karşılık gelen bayttan büyükse pozitif bir değer döndürür.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `a` ve `b` geçerli bellek adreslerini göstermelidir.
+/// - Her iki bölgenin de `count` bayt okumak için yeterli veriye sahip olması gerekir.
+pub unsafe fn memcmp(a: *const u8, b: *const u8, count: u64) -> Result<i32, MemoryError> {
+    if a.is_null() || b.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided to memcmp".to_string()));
+    }
+
+    for i in 0..count {
+        let val_a = *(a.offset(i as isize));
+        let val_b = *(b.offset(i as isize));
+        if val_a < val_b {
+            return Result::Ok(-1);
+        } else if val_a > val_b {
+            return Result::Ok(1);
+        }
+    }
+    Result::Ok(0) // Tüm baytlar eşleşti
+}
+
+
+// --- İşaretçi Yardımcıları ---
+
+/// `offset_ptr<T>(ptr: *mut T, offset: isize) -> *mut T`:
+/// Bir işaretçiyi belirli bir ofset (kaydırma) kadar ileri veya geri taşır.
+/// Güvenli olmayan bir fonksiyon değildir, çünkü sadece bir hesaplama yapar, dereferanslama yapmaz.
+pub fn offset_ptr<T>(ptr: *mut T, offset: isize) -> *mut T {
+    ptr.offset(offset)
+}
+
+/// `offset_const_ptr<T>(ptr: *const T, offset: isize) -> *const T`:
+/// Bir sabit işaretçiyi belirli bir ofset (kaydırma) kadar ileri veya geri taşır.
+pub fn offset_const_ptr<T>(ptr: *const T, offset: isize) -> *const T {
+    ptr.offset(offset)
+}
+
+/// `ptr_to_slice<T>(ptr: *const T, len: u64) -> Result<&[T], MemoryError>`:
+/// Ham bir işaretçiden ve uzunluktan bir immutable (değişmez) dilim (slice) oluşturur.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `ptr` geçerli ve başlatılmış `len` adet `T` tipinde öğeyi işaret etmelidir.
+/// - Bellek, dilim ömrü boyunca geçerli kalmalıdır.
+/// - Verinin doğru hizalandığından emin olunmalıdır.
+pub unsafe fn ptr_to_slice<T>(ptr: *const T, len: u64) -> Result<&[T], MemoryError> {
+    if ptr.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided for slice".to_string()));
+    }
+    // Varsayımsal CNT syntax'ı:
+     let slice = &*ptr_as_slice(ptr, len);
+    // Result::Ok(slice)
+    // Rust'taki karşılığı: std::slice::from_raw_parts(ptr, len as usize);
+    // Burada bir placeholder dönüyoruz
+    Result::Err(MemoryError::Custom("ptr_to_slice not fully implemented in mock".to_string()))
+}
+
+/// `ptr_to_mut_slice<T>(ptr: *mut T, len: u64) -> Result<&mut [T], MemoryError>`:
+/// Ham bir işaretçiden ve uzunluktan bir mutable (değişebilir) dilim (slice) oluşturur.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `ptr` geçerli ve başlatılmış `len` adet `T` tipinde öğeyi işaret etmelidir.
+/// - Bellek, dilim ömrü boyunca geçerli kalmalıdır.
+/// - Verinin doğru hizalandığından emin olunmalıdır.
+/// - Bu dilim üzerinden yapılan değişiklikler, diğer işaretçilerin de görmesi gereken belleği etkileyecektir.
+pub unsafe fn ptr_to_mut_slice<T>(ptr: *mut T, len: u64) -> Result<&mut [T], MemoryError> {
+    if ptr.is_null() {
+        return Result::Err(MemoryError::InvalidMemoryAccess("Null pointer provided for mutable slice".to_string()));
+    }
+    // Varsayımsal CNT syntax'ı:
+     let slice = &mut *ptr_as_mut_slice(ptr, len);
+    // Result::Ok(slice)
+    // Rust'taki karşılığı: std::slice::from_raw_parts_mut(ptr, len as usize);
+    // Burada bir placeholder dönüyoruz
+    Result::Err(MemoryError::Custom("ptr_to_mut_slice not fully implemented in mock".to_string()))
+}
+
+// --- Bellek Tahsisi (Varsayımsal) ---
+
+/// `allocate(layout: &Layout) -> Result<*mut u8, MemoryError>`:
+/// Belirtilen bellek düzenine (boyut ve hizalama) uygun ham bellek tahsis eder.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - Döndürülen işaretçi, serbest bırakılmadan önce geçerli bir bellek adresini işaret etmelidir.
+/// - Serbest bırakma, doğru `Layout` ile yapılmalıdır.
+pub unsafe fn allocate(layout: &Layout) -> Result<*mut u8, MemoryError> {
+    // Varsayımsal olarak işletim sistemi veya runtime allocatörünü çağırır.
+    // Şimdilik sadece bir placeholder:
+    io::println(&format!("Allocating {} bytes with alignment {}...", layout.size.to_string(), layout.align.to_string()));
+     let ptr = os_api::alloc(layout.size, layout.align);
+     if ptr.is_null() {
+         return Result::Err(MemoryError::AllocationFailed(format!("Failed to allocate {} bytes", layout.size.to_string())));
+     }
+     Result::Ok(ptr)
+    Result::Err(MemoryError::Custom("allocate not fully implemented in mock".to_string()))
+}
+
+/// `deallocate(ptr: *mut u8, layout: &Layout) -> Result<(), MemoryError>`:
+/// Daha önce `allocate` ile tahsis edilmiş belleği serbest bırakır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `ptr`, geçerli ve daha önce `allocate` ile tahsis edilmiş bir adresi göstermelidir.
+/// - `layout`, tahsis sırasında kullanılan `Layout` ile aynı olmalıdır.
+/// - Bellek iki kez serbest bırakılmamalıdır (double-free).
+pub unsafe fn deallocate(ptr: *mut u8, layout: &Layout) -> Result<(), MemoryError> {
+    // Varsayımsal olarak işletim sistemi veya runtime free fonksiyonunu çağırır.
+    io::println(&format!("Deallocating pointer {:?} with size {}...", ptr, layout.size.to_string()));
+    // os_api::free(ptr, layout.size, layout.align);
+    Result::Ok(())
+}
+
+/// `Layout`: Bellek tahsisi için boyut ve hizalama bilgilerini tutan yapı.
+pub struct Layout {
+    pub size: u64,  // Bayt cinsinden boyut
+    pub align: u64, // Bayt cinsinden hizalama (2'nin kuvveti olmalı)
+}
+
+impl Layout {
+    /// `from_size_align(size: u64, align: u64) -> Result<Layout, InvalidInputError>`:
+    /// Yeni bir `Layout` oluşturur, hizalamanın geçerli olduğunu doğrular.
+    pub fn from_size_align(size: u64, align: u64) -> Result<Layout, InvalidInputError> {
+        if !align.is_power_of_two() { // Varsayımsal `is_power_of_two` metodu
+            return Result::Err(InvalidInputError::new(
+                "align".to_string(),
+                "Alignment must be a power of two".to_string(),
+            ));
+        }
+        Result::Ok(Layout { size, align })
+    }
+
+    /// `for_type<T>() -> Layout`:
+    /// Belirli bir `T` tipi için uygun `Layout`'u oluşturur.
+    pub fn for_type<T>() -> Layout {
+        // Varsayımsal `size_of<T>()` ve `align_of<T>()` fonksiyonları
+        // Rust'taki `std::mem::size_of` ve `std::mem::align_of` gibi.
+        Layout {
+            size: std::mem::size_of::<T>() as u64, // Varsayımsal
+            align: std::mem::align_of::<T>() as u64, // Varsayımsal
+        }
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::memory_utils::{self, Layout, MemoryError};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing
+
+// Helper for simulating u64.is_power_of_two()
+// In a real CNT, this would likely be a built-in method or a math utility.
+trait PowerOfTwoCheck {
+    fn is_power_of_two(&self) -> bool;
+}
+
+impl PowerOfTwoCheck for u64 {
+    fn is_power_of_two(&self) -> bool {
+        if *self == 0 { return false; }
+        (*self & (*self - 1)) == 0
+    }
+}
+
+
+// Dummy `std::mem` for size_of and align_of
+pub mod std {
+    pub mod mem {
+        pub fn size_of<T>() -> u64 {
+            // Placeholder: Replace with actual type size calculation
+            match String::from_type_name::<T>() { // Varsayımsal `from_type_name`
+                "i64" => 8,
+                "f64" => 8,
+                "bool" => 1,
+                "u8" => 1,
+                "String" => 24, // Example: pointer + capacity + length
+                _ => 8, // Default or more sophisticated lookup
+            }
+        }
+        pub fn align_of<T>() -> u64 {
+            // Placeholder: Replace with actual type alignment calculation
+            match String::from_type_name::<T>() {
+                "i64" => 8,
+                "f64" => 8,
+                "bool" => 1,
+                "u8" => 1,
+                "String" => 8, // Example: pointer alignment
+                _ => 8,
+            }
+        }
+    }
+}
+
+// Function to print a simulated memory block
+unsafe fn print_memory_block(ptr: *const u8, len: u64, name: &String) {
+    io::print(&format!("{}: [", name));
+    for i in 0..len {
+        io::print(&format!("{:02X} ", *ptr.offset(i as isize)));
+    }
+    io::println("]".to_string());
+}
+
+fn main() {
+    io::println("Starting Memory Utilities example...".to_string());
+
+    // --- memcpy / memset ---
+    io::println("\n--- Memcpy / Memset ---".to_string());
+
+    // Simulating heap allocated memory with Vec<u8> for safety in this mock
+    // In real use, these would be raw pointers to OS-allocated memory or static arrays.
+    let mut data1_vec = Vec::new();
+    data1_vec.resize(10, 0u8); // Create 10 bytes initialized to 0
+    let mut data2_vec = Vec::new();
+    data2_vec.resize(10, 0u8);
+
+    // Fill data1 with a pattern
+    for i in 0..10 {
+        data1_vec[i as usize] = (i * 2 + 1) as u8;
+    }
+    
+    // Simulate pointers to the first element
+    let data1_ptr: *mut u8 = &mut data1_vec[0];
+    let data2_ptr: *mut u8 = &mut data2_vec[0];
+
+    // UNSAFE BLOCK - Real world usage would be in an unsafe {} block
+    unsafe {
+        io::println("Before memcpy:".to_string());
+        print_memory_block(data1_ptr, 10, &"Data1".to_string()); // [01 03 05 07 09 0B 0D 0F 11 13]
+        print_memory_block(data2_ptr, 10, &"Data2".to_string()); // [00 00 00 00 00 00 00 00 00 00]
+
+        // Copy 5 bytes from data1 to data2
+        match memory_utils::memcpy(data2_ptr, data1_ptr, 5) {
+            Result::Ok(_) => io::println("Memcpy successful.".to_string()),
+            Result::Err(e) => io::println(&format!("Memcpy error: {}", e.description())),
+        }
+
+        io::println("After memcpy (5 bytes):".to_string());
+        print_memory_block(data1_ptr, 10, &"Data1".to_string()); // [01 03 05 07 09 0B 0D 0F 11 13]
+        print_memory_block(data2_ptr, 10, &"Data2".to_string()); // [01 03 05 07 09 00 00 00 00 00]
+
+        // Use memset to fill part of data2
+        match memory_utils::memset(data2_ptr.offset(5), 0xFF, 3) {
+            Result::Ok(_) => io::println("Memset successful.".to_string()),
+            Result::Err(e) => io::println(&format!("Memset error: {}", e.description())),
+        }
+        io::println("After memset (3 bytes from offset 5):".to_string());
+        print_memory_block(data2_ptr, 10, &"Data2".to_string()); // [01 03 05 07 09 FF FF FF 00 00]
+    }
+
+    // --- memmove ---
+    io::println("\n--- Memmove (overlapping copy) ---".to_string());
+    let mut overlap_vec = Vec::new();
+    overlap_vec.resize(10, 0u8);
+    for i in 0..10 {
+        overlap_vec[i as usize] = (i + 0x41) as u8; // ASCII 'A' to 'J'
+    }
+    let overlap_ptr: *mut u8 = &mut overlap_vec[0];
+
+    unsafe {
+        io::println("Before memmove:".to_string());
+        print_memory_block(overlap_ptr, 10, &"Overlap".to_string()); // [41 42 43 44 45 46 47 48 49 4A] (A B C D E F G H I J)
+
+        // Move 5 bytes from index 0 to index 2 (overlapping)
+        // [A B C D E F G H I J]
+        //   ^ src
+        //     ^ dst
+        // Expected: [A B A B C D E F G H]
+        match memory_utils::memmove(overlap_ptr.offset(2), overlap_ptr, 5) {
+            Result::Ok(_) => io::println("Memmove successful (src < dst).".to_string()),
+            Result::Err(e) => io::println(&format!("Memmove error: {}", e.description())),
+        }
+        io::println("After memmove (src < dst):".to_string());
+        print_memory_block(overlap_ptr, 10, &"Overlap".to_string()); // [41 42 41 42 43 44 45 48 49 4A] (A B A B C D E H I J)
+
+        // Reset and test src > dst
+        for i in 0..10 {
+            overlap_vec[i as usize] = (i + 0x41) as u8; // Reset to A-J
+        }
+        io::println("\nBefore memmove (src > dst):".to_string());
+        print_memory_block(overlap_ptr, 10, &"Overlap".to_string()); // [41 42 43 44 45 46 47 48 49 4A] (A B C D E F G H I J)
+
+        // Move 5 bytes from index 3 to index 0 (overlapping)
+        // [A B C D E F G H I J]
+        //   ^ dst
+        //       ^ src
+        // Expected: [D E F G H F G H I J]
+        match memory_utils::memmove(overlap_ptr, overlap_ptr.offset(3), 5) {
+            Result::Ok(_) => io::println("Memmove successful (src > dst).".to_string()),
+            Result::Err(e) => io::println(&format!("Memmove error: {}", e.description())),
+        }
+        io::println("After memmove (src > dst):".to_string());
+        print_memory_block(overlap_ptr, 10, &"Overlap".to_string()); // [44 45 46 47 48 46 47 48 49 4A] (D E F G H F G H I J)
+    }
+
+    // --- memcmp ---
+    io::println("\n--- Memcmp ---".to_string());
+    let mut cmp_data1_vec = Vec::new();
+    cmp_data1_vec.push(1); cmp_data1_vec.push(2); cmp_data1_vec.push(3);
+    let mut cmp_data2_vec = Vec::new();
+    cmp_data2_vec.push(1); cmp_data2_vec.push(2); cmp_data2_vec.push(3);
+    let mut cmp_data3_vec = Vec::new();
+    cmp_data3_vec.push(1); cmp_data3_vec.push(2); cmp_data3_vec.push(4); // Different
+    let mut cmp_data4_vec = Vec::new();
+    cmp_data4_vec.push(1); cmp_data4_vec.push(1); cmp_data4_vec.push(3); // Different
+
+    let cmp_ptr1: *const u8 = &cmp_data1_vec[0];
+    let cmp_ptr2: *const u8 = &cmp_data2_vec[0];
+    let cmp_ptr3: *const u8 = &cmp_data3_vec[0];
+    let cmp_ptr4: *const u8 = &cmp_data4_vec[0];
+
+    unsafe {
+        match memory_utils::memcmp(cmp_ptr1, cmp_ptr2, 3) {
+            Result::Ok(res) => io::println(&format!("cmp_data1 vs cmp_data2 (3 bytes): {}", res.to_string())), // Output: 0
+            Result::Err(e) => io::println(&format!("Memcmp error: {}", e.description())),
+        }
+        match memory_utils::memcmp(cmp_ptr1, cmp_ptr3, 3) {
+            Result::Ok(res) => io::println(&format!("cmp_data1 vs cmp_data3 (3 bytes): {}", res.to_string())), // Output: -1
+            Result::Err(e) => io::println(&format!("Memcmp error: {}", e.description())),
+        }
+        match memory_utils::memcmp(cmp_ptr1, cmp_ptr4, 3) {
+            Result::Ok(res) => io::println(&format!("cmp_data1 vs cmp_data4 (3 bytes): {}", res.to_string())), // Output: 1
+            Result::Err(e) => io::println(&format!("Memcmp error: {}", e.description())),
+        }
+    }
+
+    // --- Layout and Allocation (Mocked) ---
+    io::println("\n--- Layout and Allocation (Mocked) ---".to_string());
+
+    match Layout::from_size_align(1024, 64) {
+        Result::Ok(layout) => {
+            io::println(&format!("Created Layout: Size={}, Align={}", layout.size.to_string(), layout.align.to_string()));
+            unsafe {
+                 let allocated_ptr = memory_utils::allocate(&layout);
+                 if allocated_ptr.is_ok() {
+                     io::println("Memory allocated (mock).".to_string());
+                     memory_utils::deallocate(allocated_ptr.unwrap(), &layout);
+                     io::println("Memory deallocated (mock).".to_string());
+                 } else {
+                     io::println(&format!("Allocation failed: {}", allocated_ptr.unwrap_err().description()));
+                 }
+                 io::println("Allocation and deallocation mock calls were skipped.".to_string());
+            }
+        },
+        Result::Err(e) => io::println(&format!("Layout error: {}", e.description())),
+    }
+
+    match Layout::from_size_align(100, 3) { // 3 is not a power of two
+        Result::Ok(layout) => io::println("Invalid Layout created (should fail).".to_string()),
+        Result::Err(e) => io::println(&format!("Layout error (expected): {}", e.description())), // Output: "Layout error (expected): Invalid Input for 'align': Alignment must be a power of two"
+    }
+
+    let i64_layout = Layout::for_type::<i64>();
+    io::println(&format!("Layout for i64: Size={}, Align={}", i64_layout.size.to_string(), i64_layout.align.to_string())); // Output: "Layout for i64: Size=8, Align=8"
+
+    io::println("\nMemory Utilities example finished.".to_string());
+}
