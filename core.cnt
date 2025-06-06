@@ -1,0 +1,510 @@
+// core.cnt
+// Standart Kütüphane Core Modülü
+// CNT için en temel ve ilkel dil yapılarını ve işlevselliğini sağlar.
+// Diğer tüm standart kütüphane modülleri 'core'a bağımlı olabilir.
+
+// --- Temel Türler (Language Primitives) ---
+
+/// `bool`: Boolean türü (true veya false).
+pub type bool = u8; // Dahili olarak u8 olarak temsil edilebilir (0 veya 1)
+
+/// `char`: Unicode Scalar Değeri için karakter türü.
+pub type char = u32; // UTF-32 olarak temsil edilebilir
+
+/// İşaretsiz tamsayı türleri
+pub type u8 = u8;
+pub type u16 = u16;
+pub type u32 = u32;
+pub type u64 = u64;
+pub type usize = u32; // Bellek adresleri ve boyutlar için (32-bit sistem varsayımı)
+
+/// İşaretli tamsayı türleri
+pub type i8 = i8;
+pub type i16 = i16;
+pub type i32 = i32;
+pub type i64 = i64;
+pub type isize = i32; // Bellek adresleri ve boyutlar için (32-bit sistem varsayımı)
+
+// Not: Bu `pub type` tanımları, mevcut olan yerleşik (builtin) türlerin
+// yeniden dışa aktarımı veya basit bir şekilde takma adlarıdır.
+// Gerçek bir derleyici bu türleri doğrudan tanır.
+
+// --- Temel Trait'ler ---
+
+/// `Copy`: Bir türün bayt kopyalaması ile kopyalanabileceğini belirtir.
+/// Bellek kopyalaması basit ve yan etkisi olmayan türler için otomatik olarak uygulanır.
+pub trait Copy {}
+
+/// `Clone`: Bir türün derinlemesine kopyalanabileceğini belirtir.
+/// Genellikle `Copy` olamayan (örn. dinamik bellek içeren) türler için manuel olarak uygulanır.
+pub trait Clone {
+    fn clone(&self) -> Self;
+}
+
+/// `Default`: Bir türün varsayılan bir değere sahip olduğunu belirtir.
+pub trait Default {
+    fn default() -> Self;
+}
+
+/// `PartialEq`: İki değerin kısmi eşitliğini test etmeye izin verir.
+/// Genellikle '==' operatörü için kullanılır.
+pub trait PartialEq<Rhs: ?Sized = Self> {
+    fn eq(&self, other: &Rhs) -> bool;
+    // fn ne(&self, other: &Rhs) -> bool { !self.eq(other) } // Varsayılan implementasyon
+}
+
+/// `Eq`: Tam eşitlik için `PartialEq`'nin bir uzantısı.
+/// Eğer `a == b` ve `b == c` ise `a == c` kuralını garantiler.
+pub trait Eq: PartialEq {}
+
+/// `PartialOrd`: İki değerin kısmi sıralamasını test etmeye izin verir.
+/// Genellikle '<', '<=', '>', '>=' operatörleri için kullanılır.
+pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
+    fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;
+}
+
+/// `Ord`: Tam sıralama için `PartialOrd`'un bir uzantısı.
+/// Tüm değerler arasında toplam bir sıralama sağlar (Herhangi a, b için ya a<b, a=b ya da a>b).
+pub trait Ord: Eq + PartialOrd {
+    fn cmp(&self, other: &Self) -> Ordering;
+}
+
+/// `Ordering`: Karşılaştırma sonucunu temsil eden enum.
+pub enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+/// `Debug`: Hata ayıklama çıktısı için bir türü biçimlendirmeye izin verir.
+/// Genellikle `{:?}` format belirleyicisi ile kullanılır.
+pub trait Debug {
+    fn fmt(&self, f: &mut fmt::Formatter); // `fmt` modülünden `Formatter`'a bağımlılık
+}
+
+/// `Drop`: Bir değer kapsam dışına çıktığında çalıştırılacak kodu tanımlar.
+/// Kaynakları serbest bırakmak için kullanılır (örn. bellek, dosya tanıtıcıları).
+pub trait Drop {
+    fn drop(&mut self);
+}
+
+// --- Temel Veri Yapıları (Collections/Enums) ---
+
+/// `Option`: Hesaplamanın bir değeri olup olmadığını temsil eder.
+/// `Some(T)`: Bir değeri temsil eder.
+/// `None`: Bir değerin yokluğunu temsil eder.
+pub enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    /// `is_some(&self) -> bool`: Eğer `Option` bir `Some` değeri içeriyorsa `true` döner.
+    pub fn is_some(&self) -> bool {
+        match self {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    /// `is_none(&self) -> bool`: Eğer `Option` bir `None` değeri içeriyorsa `true` döner.
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+
+    /// `unwrap(self) -> T`: Eğer `Option` bir `Some` değeri ise içindeki değeri döner,
+    /// aksi takdirde panik atar.
+    pub fn unwrap(self) -> T {
+        match self {
+            Option::Some(val) => val,
+            Option::None => {
+                // Panikleme (panic) işlemi için varsayımsal bir hata işleyici
+                // Gerçekte `std::panic` modülü veya bir kernel panik fonksiyonu kullanılır.
+                io::println("PANIC: Called `Option::unwrap()` on a `None` value!".to_string());
+                // sistemin durması veya yeniden başlatılması gerekebilir
+                std::spirit::halt(); // Varsayımsal sistem durdurma fonksiyonu
+                unreachable!(); // Bu kodun asla ulaşılmaması gerektiğini belirtir.
+            }
+        }
+    }
+
+    /// `unwrap_or(self, default: T) -> T`: Eğer `Option` bir `Some` değeri ise içindeki değeri döner,
+    /// aksi takdirde verilen varsayılan değeri döner.
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Option::Some(val) => val,
+            Option::None => default,
+        }
+    }
+}
+
+/// `Result`: Başarılı veya hatalı bir sonucu temsil eder.
+/// `Ok(T)`: Başarılı bir değeri temsil eder.
+/// `Err(E)`: Bir hata değerini temsil eder.
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    /// `is_ok(&self) -> bool`: Eğer `Result` bir `Ok` değeri içeriyorsa `true` döner.
+    pub fn is_ok(&self) -> bool {
+        match self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    /// `is_err(&self) -> bool`: Eğer `Result` bir `Err` değeri içeriyorsa `true` döner.
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    /// `unwrap(self) -> T`: Eğer `Result` bir `Ok` değeri ise içindeki değeri döner,
+    /// aksi takdirde panik atar.
+    pub fn unwrap(self) -> T {
+        match self {
+            Result::Ok(val) => val,
+            Result::Err(_) => {
+                io::println("PANIC: Called `Result::unwrap()` on an `Err` value!".to_string());
+                std::spirit::halt();
+                unreachable!();
+            }
+        }
+    }
+
+    /// `unwrap_err(self) -> E`: Eğer `Result` bir `Err` değeri ise içindeki hatayı döner,
+    /// aksi takdirde panik atar.
+    pub fn unwrap_err(self) -> E {
+        match self {
+            Result::Err(err) => err,
+            Result::Ok(_) => {
+                io::println("PANIC: Called `Result::unwrap_err()` on an `Ok` value!".to_string());
+                std::spirit::halt();
+                unreachable!();
+            }
+        }
+    }
+}
+
+
+// --- İşaretçiler ve Bellek Yönetimi (Unsafe) ---
+
+/// `ptr` modülü: Ham işaretçi türleri ve işlemleri.
+/// # Güvenli Olmayan (Unsafe)
+/// Ham işaretçi işlemleri, bellek güvenliğini sağlamak geliştiricinin sorumluluğundadır.
+pub mod ptr {
+    /// `null<T>() -> *const T`: Null bir sabit işaretçi döner.
+    pub fn null<T>() -> *const T {
+        0 as *const T // Varsayımsal null adres
+    }
+
+    /// `null_mut<T>() -> *mut T`: Null bir değiştirilebilir işaretçi döner.
+    pub fn null_mut<T>() -> *mut T {
+        0 as *mut T // Varsayımsal null adres
+    }
+
+    /// `read<T>(src: *const T) -> T`: Belirtilen adresten `T` tipinde bir değer okur.
+    /// Kaynak bellek geçerli ve doğru hizalanmış olmalıdır.
+    /// # Güvenli Olmayan (Unsafe)
+    pub unsafe fn read<T>(src: *const T) -> T {
+        // Gerçekte donanım/derleyici intrinsic'leri veya assembly kullanılır.
+        // Örneğin: `*src`
+        io::println(&format!("HW_API: Reading from address 0x{:X}", src as usize));
+        // Bu sadece bir simülasyon, gerçek bir değer döndürmez
+        // Varsayılan bir T değeri döndürmek için default trait'i kullanılabilir.
+         let val: T = Default::default(); // Eğer T için Default uygulanmışsa
+         val
+        todo!(); // Gerçek implementasyon gerektirir
+    }
+
+    /// `write<T>(dst: *mut T, src: T)`: Belirtilen adrese `T` tipinde bir değer yazar.
+    /// Hedef bellek geçerli ve doğru hizalanmış olmalıdır.
+    /// # Güvenli Olmayan (Unsafe)
+    pub unsafe fn write<T>(dst: *mut T, src: T) {
+        // Gerçekte donanım/derleyici intrinsic'leri veya assembly kullanılır.
+        // Örneğin: `*dst = src;`
+        io::println(&format!("HW_API: Writing value to address 0x{:X}", dst as usize));
+        // Değerin kendisi burada işlenmez, sadece yazma işlemi simüle edilir.
+    }
+
+    /// `copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize)`:
+    /// Kaynak konumdan hedef konuma `count` sayıda `T` öğesi kopyalar.
+    /// Bellek bölgeleri çakışmamalıdır.
+    /// # Güvenli Olmayan (Unsafe)
+    pub unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
+        // Gerçekte memcpy/memmove gibi sistem çağrıları veya donanım DMA kullanılır.
+        io::println(&format!("HW_API: Copying {} items from 0x{:X} to 0x{:X}",
+            count.to_string(), src as usize, dst as usize));
+        // Bu sadece bir simülasyon.
+    }
+
+    /// `copy<T>(src: *const T, dst: *mut T, count: usize)`:
+    /// Kaynak konumdan hedef konuma `count` sayıda `T` öğesi kopyalar.
+    /// Bellek bölgeleri çakışabilir.
+    /// # Güvenli Olmayan (Unsafe)
+    pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
+        // Gerçekte memmove gibi sistem çağrıları kullanılır.
+        io::println(&format!("HW_API: Copying {} items (overlapping allowed) from 0x{:X} to 0x{:X}",
+            count.to_string(), src as usize, dst as usize));
+        // Bu sadece bir simülasyon.
+    }
+}
+
+// --- Makrolar / Intrinsicler (Varsayımsal) ---
+
+/// `unreachable!()`: Bu kodun asla çalıştırılmaması gerektiğini derleyiciye bildirir.
+/// Genellikle, panik atar veya tanımsız davranışa neden olur.
+macro unreachable!() {
+    // Bu bir makro olduğundan, doğrudan bir fonksiyon değildir.
+    // Derleyiciye sinyal gönderir ve çoğu zaman optimize edilir.
+    // Gömülü sistemlerde bu genellikle bir hata döngüsüne veya bir yeniden başlatmaya yol açar.
+    io::println("UNREACHABLE code reached!".to_string());
+    std::spirit::halt(); // Varsayımsal sistem durdurma fonksiyonu
+}
+
+/// `todo!()`: Henüz implemente edilmemiş bir yer tutucu.
+/// Çalışma zamanında panik atar.
+macro todo!() {
+    // Bu bir makro olduğundan, doğrudan bir fonksiyon değildir.
+    io::println("TODO: Functionality not yet implemented!".to_string());
+    std::spirit::halt(); // Varsayımsal sistem durdurma fonksiyonu
+}
+
+
+// --- Varsayımsal Bağlantılar (Gerçekte diğer modüllerden import edilir) ---
+// Bu modülün diğer modüllere bağımlılığı minimal olmalı ancak temel I/O ve sistem durdurma
+// gibi işlevler, `unreachable!` ve `todo!` gibi makrolar için gereklidir.
+import std::io;
+import std::string::String;
+import std::spirit; // `halt` fonksiyonu için
+
+
+// --- Örnek Kullanım (main.cnt gibi bir dosyadan) ---
+
+import std::core::{self, Option, Result, Ordering};
+import std::io;
+import std::string::String;
+import std::fmt; // Debug trait için
+import std::cmp; // Kullanım için
+
+// Mock `std::time` for demonstration purposes.
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+        // Mock halt function
+        pub fn halt() {
+            io::println("System Halted (simulated panic)!".to_string());
+            // In a real system, this would halt the CPU or cause a reset.
+            loop {} // Infinite loop to simulate halt
+        }
+    }
+    // Minimal `fmt` module for Debug trait
+    pub mod fmt {
+        pub struct Formatter {
+            // Placeholder for formatting state
+        }
+
+        impl Formatter {
+            pub fn new() -> Formatter {
+                Formatter {}
+            }
+            pub fn write_str(&mut self, s: &String) {
+                io::print(s);
+            }
+        }
+    }
+    pub mod cmp {
+        pub fn min<T: PartialOrd>(a: T, b: T) -> T {
+            if a < b { a } else { b }
+        }
+        pub fn max<T: PartialOrd>(a: T, b: T) -> T {
+            if a > b { a } else { b }
+        }
+    }
+}
+
+// Bir struct için `Debug` trait'ini manuel olarak uygulayalım
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl core::Debug for Point {
+    fn fmt(&self, f: &mut std::fmt::Formatter) {
+        f.write_str(&format!("Point {{ x: {}, y: {} }}", self.x.to_string(), self.y.to_string()));
+    }
+}
+
+// Bir struct için `PartialEq` ve `Eq` trait'ini uygulayalım
+impl core::PartialEq for Point {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+impl core::Eq for Point {}
+
+// Bir struct için `PartialOrd` ve `Ord` trait'ini uygulayalım
+impl core::PartialOrd for Point {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.x < other.x {
+            Option::Some(Ordering::Less)
+        } else if self.x > other.x {
+            Option::Some(Ordering::Greater)
+        } else { // x'ler eşitse y'ye göre karşılaştır
+            if self.y < other.y {
+                Option::Some(Ordering::Less)
+            } else if self.y > other.y {
+                Option::Some(Ordering::Greater)
+            } else {
+                Option::Some(Ordering::Equal)
+            }
+        }
+    }
+}
+
+impl core::Ord for Point {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap() // Point için her zaman tam sıralama var
+    }
+}
+
+
+fn main() {
+    io::println("Starting core module example...".to_string());
+
+    // --- Option Kullanımı ---
+    io::println("\n--- Option Usage ---".to_string());
+    let some_value: Option<u32> = Option::Some(123);
+    let none_value: Option<u32> = Option::None;
+
+    io::println(&format!("Is some_value Some? {}", some_value.is_some().to_string()));
+    io::println(&format!("Is none_value None? {}", none_value.is_none().to_string()));
+
+    let unwrapped_some = some_value.unwrap();
+    io::println(&format!("Unwrapped some_value: {}", unwrapped_some.to_string()));
+
+    let default_val = none_value.unwrap_or(999);
+    io::println(&format!("Unwrapped none_value (with default): {}", default_val.to_string()));
+
+    // Not: Aşağıdaki satır, panik atmasına neden olur (simüle edilmiş).
+     let panicking_unwrap = Option::None.unwrap();
+
+
+    // --- Result Kullanımı ---
+    io::println("\n--- Result Usage ---".to_string());
+    enum MyError {
+        NetworkError,
+        IOError,
+    }
+
+    impl core::Debug for MyError {
+        fn fmt(&self, f: &mut std::fmt::Formatter) {
+            f.write_str(match self {
+                MyError::NetworkError => "NetworkError",
+                MyError::IOError => "IOError",
+            }.to_string());
+        }
+    }
+
+    let success_result: Result<String, MyError> = Result::Ok("Data received!".to_string());
+    let error_result: Result<String, MyError> = Result::Err(MyError::NetworkError);
+
+    io::println(&format!("Is success_result Ok? {}", success_result.is_ok().to_string()));
+    io::println(&format!("Is error_result Err? {}", error_result.is_err().to_string()));
+
+    let unwrapped_ok = success_result.unwrap();
+    io::println(&format!("Unwrapped Ok result: \"{}\"", unwrapped_ok));
+
+    let unwrapped_err = error_result.unwrap_err();
+    io::println(&format!("Unwrapped Err result: {:?}", unwrapped_err));
+
+    // Not: Aşağıdaki satırlar, panik atmasına neden olur (simüle edilmiş).
+     let panicking_unwrap_ok = Result::Err(MyError::IOError).unwrap();
+     let panicking_unwrap_err = Result::Ok("Success".to_string()).unwrap_err();
+
+
+    // --- PartialEq, Eq, PartialOrd, Ord Trait Kullanımı ---
+    io::println("\n--- Trait Usage (PartialEq, Eq, PartialOrd, Ord) ---".to_string());
+    let p1 = Point { x: 10, y: 20 };
+    let p2 = Point { x: 10, y: 20 };
+    let p3 = Point { x: 15, y: 10 };
+    let p4 = Point { x: 10, y: 25 };
+
+    io::println(&format!("p1: {:?}, p2: {:?}, p3: {:?}, p4: {:?}", p1, p2, p3, p4));
+
+    io::println(&format!("p1 == p2: {}", (p1 == p2).to_string())); // PartialEq
+    io::println(&format!("p1 == p3: {}", (p1 == p3).to_string()));
+
+    match p1.partial_cmp(&p3) { // PartialOrd
+        Option::Some(Ordering::Less) => io::println("p1 is less than p3.".to_string()),
+        Option::Some(Ordering::Equal) => io::println("p1 is equal to p3.".to_string()),
+        Option::Some(Ordering::Greater) => io::println("p1 is greater than p3.".to_string()),
+        Option::None => io::println("p1 and p3 are incomparable.".to_string()),
+    }
+
+    match p1.cmp(&p4) { // Ord
+        Ordering::Less => io::println("p1 is less than p4.".to_string()),
+        Ordering::Equal => io::println("p1 is equal to p4.".to_string()),
+        Ordering::Greater => io::println("p1 is greater than p4.".to_string()),
+    }
+
+
+    // --- Ham İşaretçi Kullanımı (Unsafe) ---
+    io::println("\n--- Raw Pointer Usage (Unsafe) ---".to_string());
+    unsafe {
+        let mut x: u32 = 10;
+        let x_ptr: *mut u32 = &mut x as *mut u32;
+
+        io::println(&format!("Value of x: {}", x.to_string()));
+        io::println(&format!("Address of x: 0x{:X}", x_ptr as usize));
+
+        // İşaretçi okuma/yazma simülasyonu
+        // Bu fonksiyonların gerçek bir değer dönmesi/yazması için detaylı implementasyon gerekir.
+         let read_val = core::ptr::read(x_ptr); // Hata: `todo!()` çağıracak
+         io::println(&format!("Value read from x_ptr: {}", read_val));
+
+        core::ptr::write(x_ptr, 20);
+        io::println(&format!("Value of x after write: {}", x.to_string())); // x'in değeri değişmez, çünkü yazma simüle edildi
+
+
+        let arr_src: [u8; 5] = [1, 2, 3, 4, 5];
+        let mut arr_dst: [u8; 5] = [0; 5];
+
+        let src_ptr = &arr_src as *const u8;
+        let dst_ptr = &mut arr_dst as *mut u8;
+
+        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 5);
+        io::println(&format!("arr_dst after copy_nonoverlapping: {:?}", arr_dst));
+    }
+
+
+    // --- unreachable! ve todo! Makroları ---
+    io::println("\n--- unreachable! and todo! Macros ---".to_string());
+    let mut some_condition = true; // Sadece örnek için
+    if some_condition {
+        // Bu kısım çalıştırılır
+        io::println("Conditional block executed.".to_string());
+    } else {
+        // Bu kısım çalışmaz, ancak derleyiciye "buraya asla ulaşılmayacak" deriz.
+        // Eğer bir şekilde ulaşılırsa, panik atar.
+         unreachable!();
+    }
+
+     todo!(); // Bu satırın yorumunu kaldırırsanız panik atar.
+
+    io::println("\nCore module example finished.".to_string());
+}
