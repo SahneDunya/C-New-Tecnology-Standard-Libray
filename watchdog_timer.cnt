@@ -1,0 +1,318 @@
+// watchdog_timer.cnt
+// Gözcü Zamanlayıcısı (Watchdog Timer) Modülü
+// Bir sistemin kilitlenmesini veya takılıp kalmasını önlemek için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli Watchdog Timer donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::watchdog_controller` gibi bir kütüphane/modülü aracılığıyla.
+
+/// `WatchdogError`: Watchdog Timer işlemleri sırasında oluşabilecek hata türleri.
+pub enum WatchdogError {
+    /// Geçersiz zaman aşımı süresi.
+    InvalidTimeout(String),
+    /// Watchdog birimi başlatılmadı veya yapılandırılmadı.
+    NotInitialized(String),
+    /// Watchdog birimi meşgul veya kilitlenmiş.
+    Busy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Watchdog zaten etkin.
+    AlreadyEnabled(String),
+    /// Watchdog devre dışı bırakılamaz (birçok WDT devre dışı bırakılamaz veya sadece bir kez devre dışı bırakılabilir).
+    CannotDisable(String),
+    /// Genel bir Watchdog hatası.
+    Custom(String),
+}
+
+impl Error for WatchdogError {
+    fn description(&self) -> String {
+        match self {
+            WatchdogError::InvalidTimeout(msg) => format!("Invalid Watchdog Timeout: {}", msg),
+            WatchdogError::NotInitialized(msg) => format!("Watchdog Not Initialized: {}", msg),
+            WatchdogError::Busy(msg) => format!("Watchdog Busy: {}", msg),
+            WatchdogError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            WatchdogError::AlreadyEnabled(msg) => format!("Watchdog Already Enabled: {}", msg),
+            WatchdogError::CannotDisable(msg) => format!("Watchdog Cannot Be Disabled: {}", msg),
+            WatchdogError::Custom(msg) => format!("Watchdog Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `Watchdog`: Watchdog Timer birimini temsil eden yapı.
+pub struct Watchdog {
+    id: u8, // Watchdog birimi ID'si (örneğin WDT0)
+    is_initialized: bool,
+    is_enabled: bool,
+    // Gerçek bir implementasyonda, burada WDT biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, control_reg: u32, timeout_reg: u32, feed_reg: u32
+}
+
+// Varsayımsal global statik depolama alanı
+static mut WATCHDOG_INSTANCE: Option<Watchdog> = Option::None; // Tek bir WDT örneği için (singleton)
+
+/// `init(wdt_id: u8, timeout_ms: u32) -> Result<(), WatchdogError>`:
+/// Watchdog Timer modülünü başlatır ve belirtilen WDT birimini yapılandırır.
+/// Ayrıca zaman aşımı süresini ayarlar ve Watchdog'u etkinleştirir.
+/// Genellikle yalnızca bir kez çağrılmalıdır.
+///
+/// `wdt_id`: Watchdog birimi ID'si (örn. 0).
+/// `timeout_ms`: Zamanlayıcının sıfırlama sinyali üretmeden önce beslenmesi gereken maksimum süre (milisaniye cinsinden).
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım Watchdog Timer birimini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init(wdt_id: u8, timeout_ms: u32) -> Result<(), WatchdogError> {
+    if WATCHDOG_INSTANCE.is_some() {
+        return Result::Err(WatchdogError::AlreadyEnabled("Watchdog module already initialized.".to_string()));
+    }
+    if wdt_id >= MAX_WDT_UNITS { // MAX_WDT_UNITS tanımlanmış bir sabit olmalı
+        return Result::Err(WatchdogError::InvalidTimeout(
+            format!("Watchdog ID {} is out of range.", wdt_id.to_string())
+        ));
+    }
+    if timeout_ms == 0 {
+        return Result::Err(WatchdogError::InvalidTimeout("Timeout cannot be zero.".to_string()));
+    }
+
+    io::println(&format!("HW_API: Initializing Watchdog Timer Unit {} with timeout {} ms.", wdt_id.to_string(), timeout_ms.to_string()));
+    // Gerçekte, Watchdog donanımının saatleri açılır, zaman aşımı değeri ayarlanır
+    // ve Watchdog etkinleştirilir.
+     os_api::wdt_init(wdt_id, timeout_ms);
+     os_api::wdt_enable(wdt_id);
+
+    let watchdog = Watchdog {
+        id: wdt_id,
+        is_initialized: true,
+        is_enabled: true,
+    };
+    WATCHDOG_INSTANCE = Option::Some(watchdog);
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), WatchdogError>`:
+/// Watchdog Timer modülünü devre dışı bırakır ve kaynakları serbest bırakır.
+/// **UYARI**: Çoğu gömülü sistemde, Watchdog bir kez etkinleştirildiğinde
+/// yazılımsal olarak devre dışı bırakılamaz. Bu fonksiyon varsayımsal bir senaryo içindir.
+/// Gerçekte bu fonksiyon ya desteklenmez ya da çok kısıtlıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım Watchdog Timer birimini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), WatchdogError> {
+    if WATCHDOG_INSTANCE.is_none() {
+        return Result::Err(WatchdogError::NotInitialized("Watchdog module not initialized.".to_string()));
+    }
+    // Gerçek WDT'ler için burası genellikle mümkün değildir.
+    // return Result::Err(WatchdogError::CannotDisable("Watchdog timer cannot be disabled once enabled.".to_string()));
+
+    io::println("HW_API: De-initializing Watchdog Timer Module.".to_string());
+    // os_api::wdt_disable(WATCHDOG_INSTANCE.as_ref().unwrap().id); // Varsayımsal devre dışı bırakma çağrısı
+    WATCHDOG_INSTANCE = Option::None;
+    Result::Ok(())
+}
+
+impl Watchdog {
+    /// `get_instance() -> Result<&'static mut Watchdog, WatchdogError>`:
+    /// Başlatılmış Watchdog örneğine erişim sağlar (Singleton deseni).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `WATCHDOG_INSTANCE`'a mutlak erişim sağladığından güvenli değildir.
+    pub unsafe fn get_instance() -> Result<&'static mut Watchdog, WatchdogError> {
+        if let Option::Some(ref mut wdt) = WATCHDOG_INSTANCE {
+            Result::Ok(wdt)
+        } else {
+            Result::Err(WatchdogError::NotInitialized("Watchdog module not initialized. Call init() first.".to_string()))
+        }
+    }
+
+    /// `feed(&mut self) -> Result<(), WatchdogError>`:
+    /// Watchdog zamanlayıcısını besler (yeniden başlatır) ve böylece sıfırlama (reset) işlemini önler.
+    /// Bu fonksiyon, sistemin sağlıklı çalıştığını gösterir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım Watchdog kayıtlarını doğrudan değiştirdiğinden güvenli değildir.
+    pub unsafe fn feed(&mut self) -> Result<(), WatchdogError> {
+        if !self.is_initialized || !self.is_enabled {
+            return Result::Err(WatchdogError::NotInitialized("Watchdog not initialized or not enabled.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Feeding Watchdog Timer Unit {}.", self.id.to_string()));
+        // Gerçekte, Watchdog'u beslemek için belirli bir donanım yazma işlemi yapılır.
+        // Bu genellikle tek bir register'a belirli bir "anahtar" değer yazmaktır.
+        // os_api::wdt_feed(self.id);
+        Result::Ok(())
+    }
+
+    /// `set_timeout(&mut self, timeout_ms: u32) -> Result<(), WatchdogError>`:
+    /// Watchdog zamanlayıcısının zaman aşımı süresini değiştirir.
+    /// **UYARI**: Birçok Watchdog Timer'da bu işlem ya hiç desteklenmez ya da
+    /// yalnızca belirli durumlarda yapılabilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım Watchdog kayıtlarını doğrudan değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_timeout(&mut self, timeout_ms: u32) -> Result<(), WatchdogError> {
+        if !self.is_initialized {
+            return Result::Err(WatchdogError::NotInitialized("Watchdog not initialized.".to_string()));
+        }
+        if timeout_ms == 0 {
+            return Result::Err(WatchdogError::InvalidTimeout("Timeout cannot be zero.".to_string()));
+        }
+        // Bazı WDT'ler için timeout değiştirilemez.
+         return Result::Err(WatchdogError::Custom("Changing WDT timeout is not supported on this hardware.".to_string()));
+
+        io::println(&format!("HW_API: Setting Watchdog Timer Unit {} timeout to {} ms.", self.id.to_string(), timeout_ms.to_string()));
+        // os_api::wdt_set_timeout(self.id, timeout_ms);
+        Result::Ok(())
+    }
+
+    /// `get_timeout(&self) -> Result<u32, WatchdogError>`:
+    /// Watchdog zamanlayıcısının mevcut zaman aşımı süresini döndürür.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım Watchdog kayıtlarını doğrudan okuduğundan güvenli değildir.
+    pub unsafe fn get_timeout(&self) -> Result<u32, WatchdogError> {
+        if !self.is_initialized {
+            return Result::Err(WatchdogError::NotInitialized("Watchdog not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Getting Watchdog Timer Unit {} timeout.", self.id.to_string()));
+        // Result::Ok(os_api::wdt_get_timeout(self.id));
+
+        // Simülasyon: Sabit bir değer döndürelim
+        Result::Ok(2000) // 2000 ms = 2 saniye
+    }
+
+    /// `is_enabled(&self) -> bool`:
+    /// Watchdog Timer'ın şu anda etkin olup olmadığını kontrol eder.
+    pub fn is_enabled(&self) -> bool {
+        self.is_enabled
+    }
+
+    /// `_simulate_reset_event(wdt_id: u8)`:
+    /// Bu fonksiyon, geliştirme ve test amacıyla bir Watchdog sıfırlama olayını simüle etmek için kullanılır.
+    /// Gerçek bir donanım üzerinde çağrılmamalıdır!
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Normalde donanım tarafından tetiklenecek bir sıfırlama olayını manuel olarak tetiklediğinden güvenli değildir.
+    /// Sadece test senaryoları için kullanılır. Bu, genellikle sistemin yeniden başlatılmasını tetikler.
+    pub unsafe fn _simulate_reset_event(wdt_id: u8) {
+        io::println(&format!("SIMULATION: Watchdog Timer Unit {} triggered a system reset!", wdt_id.to_string()));
+        // Gerçek bir senaryoda, bu çağrıdan sonra sistem yeniden başlatılır.
+        // os_api::system_reset_by_wdt();
+        io::println("SIMULATION: System is being reset... (Program will now exit or loop)".to_string());
+        // Normalde burada programın yürütülmesi durur ve sıfırlama gerçekleşir.
+        // Test amaçlı bir döngüye sokabiliriz:
+        loop {
+            // Sonsuz döngü: Reset gerçekleşti
+            io::println("SIMULATION: Reset loop...".to_string());
+            std::spirit::sleep_ms(1000);
+        }
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum Watchdog Timer birimi sayısını belirtir.
+const MAX_WDT_UNITS: u8 = 1; // Genellikle tek bir Watchdog Timer birimi olur.
+
+
+// --- Örnek Kullanım ---
+
+import std::watchdog_timer::{self, Watchdog, WatchdogError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting Watchdog Timer example...".to_string());
+
+    // UNSAFE BLOCK - Watchdog altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        let default_wdt_timeout: u32 = 2000; // 2 saniye
+
+        io::println(&format!("\n--- Initializing Watchdog Timer Module with {} ms timeout ---", default_wdt_timeout.to_string()));
+        match watchdog_timer::init(0, default_wdt_timeout) { // WDT Unit 0
+            Result::Ok(_) => io::println("Watchdog Timer module initialized and enabled.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing Watchdog Timer module: {}", e.description()));
+                return;
+            }
+        }
+
+        let mut wdt_instance: Option<&'static mut Watchdog> = Option::None;
+
+        match Watchdog::get_instance() {
+            Result::Ok(instance) => {
+                io::println("Watchdog instance obtained.".to_string());
+                wdt_instance = Option::Some(instance);
+            },
+            Result::Err(e) => io::println(&format!("Error getting Watchdog instance: {}", e.description())),
+        }
+
+        if let Option::Some(wdt) = wdt_instance {
+            io::println(&format!("Is Watchdog enabled? {}", wdt.is_enabled().to_string()));
+
+            // Watchdog'u düzenli olarak besle
+            io::println("\n--- Feeding Watchdog Timer for 5 seconds ---".to_string());
+            for i in 0..5 {
+                io::println(&format!("Feeding Watchdog ({} / 5)...", (i + 1).to_string()));
+                match wdt.feed() {
+                    Result::Ok(_) => {}, // Başarılı, bir şey yapmaya gerek yok
+                    Result::Err(e) => io::println(&format!("Error feeding Watchdog: {}", e.description())),
+                }
+                std::spirit::sleep_ms(default_wdt_timeout / 2); // Zaman aşımının yarısı kadar bekle
+            }
+
+            // Watchdog'u beslemeyi bırak ve sıfırlama olayını bekle (simüle edilmiş)
+            io::println("\n--- Stopping Watchdog feeding and waiting for reset (simulated) ---".to_string());
+            io::println(&format!("Watchdog should trigger a reset in approximately {} ms if not fed.", default_wdt_timeout.to_string()));
+            std::spirit::sleep_ms(default_wdt_timeout + 500); // Zaman aşımını biraz aşacak kadar bekle
+
+            // Bu noktada normalde sistem yeniden başlatılırdı.
+            // Simülasyon için manuel olarak reset olayını tetikleyelim
+            io::println("\n--- Manually triggering simulated Watchdog Reset ---".to_string());
+            watchdog_timer::_simulate_reset_event(wdt.id);
+
+            // Bu satıra asla ulaşılamamalıdır çünkü _simulate_reset_event sonsuz döngüye girer.
+            io::println("This line should not be reached after simulated reset.".to_string());
+        }
+
+        // Modülü de-initialize et (çoğu WDT için geçerli değildir, örnek amaçlı)
+        io::println("\n--- De-initializing Watchdog Module (if supported) ---".to_string());
+        match watchdog_timer::deinit() {
+            Result::Ok(_) => io::println("Watchdog module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing Watchdog module: {}", e.description())),
+        }
+    }
+
+    io::println("\nWatchdog Timer example finished. (This line might not be reached in a real scenario due to reset)".to_string());
+}
