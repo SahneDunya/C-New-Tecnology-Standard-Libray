@@ -1,0 +1,372 @@
+// i2c.cnt
+// Entegre Devreler Arası (I2C) Modülü
+// Düşük hızlı, iki telli seri haberleşme için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli I2C donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::vec::Vec;       // Veri tamponları için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+// Ayrıca, saat (clock) yönetimi modülüne ihtiyaç duyulabilir.
+
+/// `I2cError`: I2C işlemleri sırasında oluşabilecek hata türleri.
+pub enum I2cError {
+    /// Geçersiz I2C ID'si veya pin konfigürasyonu.
+    InvalidConfiguration(String),
+    /// Veri transferi zaman aşımına uğradı.
+    Timeout(String),
+    /// Slave cihazdan ACK (Onay) alınamadı.
+    Nack(String),
+    /// I2C bus meşgul veya kilitlenmiş.
+    BusBusy(String),
+    /// Arbitrasyon kaybı (aynı anda birden fazla master bus'ı ele geçirmeye çalışıyor).
+    ArbitrationLost(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Genel bir I2C hatası.
+    Custom(String),
+}
+
+impl Error for I2cError {
+    fn description(&self) -> String {
+        match self {
+            I2cError::InvalidConfiguration(msg) => format!("Invalid I2C Configuration: {}", msg),
+            I2cError::Timeout(msg) => format!("I2C Timeout: {}", msg),
+            I2cError::Nack(msg) => format!("I2C NACK received: {}", msg),
+            I2cError::BusBusy(msg) => format!("I2C Bus Busy: {}", msg),
+            I2cError::ArbitrationLost(msg) => format!("I2C Arbitration Lost: {}", msg),
+            I2cError::HardwareAccessError(msg) => format!("I2C Hardware Access Error: {}", msg),
+            I2cError::Custom(msg) => format!("I2C Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `I2cClockSpeed`: I2C bus'ının çalışma hızı.
+pub enum I2cClockSpeed {
+    StandardMode100kHz,
+    FastMode400kHz,
+    FastModePlus1MHz, // Bazı modern MCU'lar destekler
+    HighSpeedMode3_4MHz, // Çok daha az yaygın
+    Custom(u32), // Özel saat hızı
+}
+
+impl I2cClockSpeed {
+    fn to_hz(&self) -> u32 {
+        match self {
+            I2cClockSpeed::StandardMode100kHz => 100_000,
+            I2cClockSpeed::FastMode400kHz => 400_000,
+            I2cClockSpeed::FastModePlus1MHz => 1_000_000,
+            I2cClockSpeed::HighSpeedMode3_4MHz => 3_400_000,
+            I2cClockSpeed::Custom(hz) => *hz,
+        }
+    }
+}
+
+/// `I2cConfig`: I2C biriminin yapılandırma ayarları.
+pub struct I2cConfig {
+    pub clock_speed: I2cClockSpeed,
+    // Master/Slave modu gibi ek ayarlar burada eklenebilir.
+    // FIFO ayarları, kesme ayarları vb.
+}
+
+impl Default for I2cConfig {
+    fn default() -> I2cConfig {
+        I2cConfig {
+            clock_speed: I2cClockSpeed::StandardMode100kHz, // Varsayılan 100 kHz
+        }
+    }
+}
+
+/// `I2c`: Tek bir I2C birimini temsil eden yapı.
+/// Bu yapı, I2C'nin durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct I2c {
+    id: u8, // I2C birimi ID'si (örneğin I2C0, I2C1)
+    config: I2cConfig,
+    is_initialized: bool,
+    // Gerçek bir implementasyonda, burada I2C biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, dr_offset: u32, cr_offset: u32, sr_offset: u32
+}
+
+impl I2c {
+    /// `new(id: u8, config: I2cConfig) -> Result<I2c, I2cError>`:
+    /// Belirtilen ID ve yapılandırma için yeni bir `I2c` örneği oluşturur ve başlatır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir I2C birimini başlatmak ve yapılandırmak,
+    /// donanım kaynaklarını ayırabilir, SDA/SCL pinlerini alternatif fonksiyona geçirebilir ve
+    /// varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(id: u8, config: I2cConfig) -> Result<I2c, I2cError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if id >= MAX_I2C_UNITS { // MAX_I2C_UNITS tanımlanmış bir sabit olmalı
+            return Result::Err(I2cError::InvalidConfiguration(
+                format!("I2C ID {} is out of range.", id.to_string())
+            ));
+        }
+
+        // Konfigürasyonun geçerliliğini kontrol et (örn. clock speed)
+        if config.clock_speed.to_hz() == 0 {
+            return Result::Err(I2cError::InvalidConfiguration(
+                "Clock speed cannot be zero.".to_string()
+            ));
+        }
+
+        // I2C donanımını başlat ve yapılandır (saati aç, pinleri I2C moduna ayarla, clock speed vb.).
+        io::println(&format!("HW_API: Initializing I2C Unit {} with clock speed {} Hz.",
+            id.to_string(), config.clock_speed.to_hz().to_string()));
+        // os_api::i2c_init(id, &config);
+
+        Result::Ok(I2c {
+            id,
+            config,
+            is_initialized: true,
+        })
+    }
+
+    /// `write(&self, slave_addr: u8, data: &[u8]) -> Result<(), I2cError>`:
+    /// Belirtilen slave adresine veri yazar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım I2C kontrol ve veri kayıtlarına doğrudan yazma işlemleri içerdiğinden güvenli değildir.
+    /// Yanlış kullanım, bus kilitlenmelerine, veri bozulmasına veya diğer cihazların yanlış çalışmasına neden olabilir.
+    pub unsafe fn write(&self, slave_addr: u8, data: &[u8]) -> Result<(), I2cError> {
+        if !self.is_initialized {
+            return Result::Err(I2cError::Custom("I2C bus not initialized.".to_string()));
+        }
+        if slave_addr > 0x7F { // 7-bit adresleme için
+            return Result::Err(I2cError::InvalidConfiguration(
+                format!("Invalid 7-bit slave address: 0x{:X}", slave_addr)
+            ));
+        }
+        if data.is_empty() {
+            return Result::Ok(()); // Boş yazma, sorun yok
+        }
+
+        io::println(&format!("HW_API: I2C Unit {} writing {} bytes to slave 0x{:X}.",
+            self.id.to_string(), data.len().to_string(), slave_addr));
+
+        // Gerçekte, I2C başlatma koşulu, slave adresi + WRITE bitini gönderme,
+        // her bir veri baytını gönderme ve ACK/NACK durumunu kontrol etme,
+        // ardından durdurma koşulunu gönderme adımları gerçekleşir.
+         if os_api::i2c_start(self.id).is_err() { return Result::Err(I2cError::BusBusy("Failed to start I2C transaction.".to_string())); }
+         if os_api::i2c_send_address(self.id, slave_addr, true).is_err() { // true for WRITE
+             os_api::i2c_stop(self.id);
+             return Result::Err(I2cError::Nack(format!("No ACK from slave 0x{:X} on address phase.", slave_addr)));
+         }
+         for &byte in data.iter() {
+             if os_api::i2c_send_byte(self.id, byte).is_err() {
+                 os_api::i2c_stop(self.id);
+                 return Result::Err(I2cError::Nack("No ACK from slave on data byte.".to_string()));
+             }
+         }
+         os_api::i2c_stop(self.id);
+
+        // Simülasyon: Yazma işlemi başarılı oldu
+        io::println(&format!("  Simulated write data: {:?}", data.as_slice()));
+        Result::Ok(())
+    }
+
+    /// `read(&self, slave_addr: u8, rx_buffer: &mut [u8]) -> Result<(), I2cError>`:
+    /// Belirtilen slave adresinden veri okur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım I2C kontrol ve veri kayıtlarına doğrudan okuma işlemleri içerdiğinden güvenli değildir.
+    /// Yanlış kullanım, bus kilitlenmelerine, veri bozulmasına veya diğer cihazların yanlış çalışmasına neden olabilir.
+    pub unsafe fn read(&self, slave_addr: u8, rx_buffer: &mut [u8]) -> Result<(), I2cError> {
+        if !self.is_initialized {
+            return Result::Err(I2cError::Custom("I2C bus not initialized.".to_string()));
+        }
+        if slave_addr > 0x7F {
+            return Result::Err(I2cError::InvalidConfiguration(
+                format!("Invalid 7-bit slave address: 0x{:X}", slave_addr)
+            ));
+        }
+        if rx_buffer.is_empty() {
+            return Result::Ok(()); // Boş okuma, sorun yok
+        }
+
+        io::println(&format!("HW_API: I2C Unit {} reading {} bytes from slave 0x{:X}.",
+            self.id.to_string(), rx_buffer.len().to_string(), slave_addr));
+
+        // Gerçekte, I2C başlatma koşulu, slave adresi + READ bitini gönderme,
+        // her bir baytı okuma (son bayt hariç ACK, son bayta NACK gönderme),
+        // ardından durdurma koşulunu gönderme adımları gerçekleşir.
+         if os_api::i2c_start(self.id).is_err() { return Result::Err(I2cError::BusBusy("Failed to start I2C transaction.".to_string())); }
+         if os_api::i2c_send_address(self.id, slave_addr, false).is_err() { // false for READ
+             os_api::i2c_stop(self.id);
+             return Result::Err(I2cError::Nack(format!("No ACK from slave 0x{:X} on address phase.", slave_addr)));
+         }
+         for i in 0..rx_buffer.len() {
+             let ack_last_byte = i != (rx_buffer.len() - 1);
+             match os_api::i2c_read_byte(self.id, ack_last_byte) {
+                 Result::Ok(byte) => rx_buffer[i] = byte,
+                 Result::Err(_) => {
+                     os_api::i2c_stop(self.id);
+                     return Result::Err(I2cError::Timeout("I2C read timeout.".to_string()));
+                 }
+             }
+         }
+         os_api::i2c_stop(self.id);
+
+        // Simülasyon: Rastgele verilerle tamponu dolduralım
+        for i in 0..rx_buffer.len() {
+            rx_buffer[i] = (std::time::nanos() % 256) as u8;
+        }
+        io::println(&format!("  Simulated read data: {:?}", rx_buffer.as_slice()));
+        Result::Ok(())
+    }
+
+    /// `write_register(&self, slave_addr: u8, reg_addr: u8, data: &[u8]) -> Result<(), I2cError>`:
+    /// Bir slave cihazın belirli bir register adresine veri yazar.
+    /// Çoğu sensör ve çevre birimi için yaygın bir işlemdir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `write` fonksiyonunu çağırdığı için güvenli değildir.
+    pub unsafe fn write_register(&self, slave_addr: u8, reg_addr: u8, data: &[u8]) -> Result<(), I2cError> {
+        let mut tx_buffer = Vec::new_with_capacity(1 + data.len());
+        tx_buffer.push(reg_addr); // İlk bayt register adresi
+        for &byte in data.iter() {
+            tx_buffer.push(byte);
+        }
+        self.write(slave_addr, tx_buffer.as_slice())
+    }
+
+    /// `read_register(&self, slave_addr: u8, reg_addr: u8, rx_buffer: &mut [u8]) -> Result<(), I2cError>`:
+    /// Bir slave cihazın belirli bir register adresinden veri okur.
+    /// Çoğu sensör ve çevre birimi için yaygın bir işlemdir.
+    /// Önce register adresini yazar, sonra okuma işlemi yapar (aynı I2C transaction içinde tekrar START).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `write` ve `read` fonksiyonlarını çağırdığı için güvenli değildir.
+    pub unsafe fn read_register(&self, slave_addr: u8, reg_addr: u8, rx_buffer: &mut [u8]) -> Result<(), I2cError> {
+        // 1. Adım: Slave'e register adresini yaz.
+        match self.write(slave_addr, &[reg_addr]) {
+            Result::Ok(_) => {},
+            Result::Err(e) => return Result::Err(e),
+        }
+        // 2. Adım: Aynı slave'den istenen sayıda baytı oku.
+        // Bu genellikle bir "Repeat Start" koşulu ile yapılır,
+        // ancak I2C donanım soyutlamasına bağlı olarak ayrı bir yazma/okuma çağrısı da olabilir.
+        self.read(slave_addr, rx_buffer)
+    }
+
+    /// `get_config(&self) -> &I2cConfig`:
+    /// Mevcut I2C yapılandırmasını döndürür.
+    pub fn get_config(&self) -> &I2cConfig {
+        &self.config
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum I2C birimi sayısını belirtir.
+const MAX_I2C_UNITS: u8 = 2; // Örneğin, I2C0 ve I2C1
+
+
+// --- Örnek Kullanım için Gerekli Dummy Modüller ---
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            super::io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting I2C example...".to_string());
+
+    // I2C Unit 0'ı kullanalım
+    io::println("\n--- Initializing I2C Unit 0 ---".to_string());
+
+    // Varsayılan yapılandırma: 100 kHz Standart Mod
+    let mut config = I2cConfig::default();
+    config.clock_speed = I2cClockSpeed::FastMode400kHz; // 400 kHz deneyelim
+
+    // UNSAFE BLOCK - I2C birimini başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let i2c_res = I2c::new(0, config); // I2C Unit 0
+
+        let mut i2c_instance: Option<I2c> = Option::None;
+
+        match i2c_res {
+            Result::Ok(i2c) => {
+                io::println("I2C Unit 0 created successfully.".to_string());
+                i2c_instance = Option::Some(i2c);
+            },
+            Result::Err(e) => io::println(&format!("Error creating I2C: {}", e.description())),
+        }
+
+        if let Option::Some(mut i2c) = i2c_instance {
+            let dummy_slave_addr: u8 = 0x68; // Yaygın bir sensör adresi (örn. MPU6050 ivmeölçer)
+
+            io::println(&format!("\n--- Writing data to I2C slave 0x{:X} ---", dummy_slave_addr));
+            let write_data = [0x01, 0x02, 0x03]; // Gönderilecek veri
+            match i2c.write(dummy_slave_addr, &write_data) {
+                Result::Ok(_) => io::println(&format!("Successfully wrote {:?} to slave 0x{:X}.", write_data.as_slice(), dummy_slave_addr)),
+                Result::Err(e) => io::println(&format!("Error writing to I2C slave: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(50); // Kısa bir gecikme
+
+            io::println(&format!("\n--- Reading data from I2C slave 0x{:X} ---", dummy_slave_addr));
+            let mut read_buffer = Vec::new_with_capacity(4);
+            read_buffer.resize(4); // 4 bayt okuyacağız
+            match i2c.read(dummy_slave_addr, &mut read_buffer.as_slice()) {
+                Result::Ok(_) => io::println(&format!("Successfully read {:?} from slave 0x{:X}.", read_buffer.as_slice(), dummy_slave_addr)),
+                Result::Err(e) => io::println(&format!("Error reading from I2C slave: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(50);
+
+            let dummy_reg_addr: u8 = 0x75; // Varsayımsal bir register adresi (örn. MPU6050 WHO_AM_I)
+            io::println(&format!("\n--- Writing to Register 0x{:X} on slave 0x{:X} ---", dummy_reg_addr, dummy_slave_addr));
+            let reg_write_data = [0xAA];
+            match i2c.write_register(dummy_slave_addr, dummy_reg_addr, &reg_write_data) {
+                Result::Ok(_) => io::println(&format!("Successfully wrote {:?} to register 0x{:X} on slave 0x{:X}.",
+                                                     reg_write_data.as_slice(), dummy_reg_addr, dummy_slave_addr)),
+                Result::Err(e) => io::println(&format!("Error writing to register on I2C slave: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(50);
+
+            io::println(&format!("\n--- Reading from Register 0x{:X} on slave 0x{:X} ---", dummy_reg_addr, dummy_slave_addr));
+            let mut reg_read_buffer = Vec::new_with_capacity(1);
+            reg_read_buffer.resize(1); // 1 bayt okuyacağız
+            match i2c.read_register(dummy_slave_addr, dummy_reg_addr, &mut reg_read_buffer.as_slice()) {
+                Result::Ok(_) => io::println(&format!("Successfully read {:?} from register 0x{:X} on slave 0x{:X}.",
+                                                     reg_read_buffer.as_slice(), dummy_reg_addr, dummy_slave_addr)),
+                Result::Err(e) => io::println(&format!("Error reading from register on I2C slave: {}", e.description())),
+            }
+
+            // Geçersiz ID denemesi
+            io::println("\n--- Attempting to Create I2C with Invalid ID (Expected Error) ---".to_string());
+            match I2c::new(MAX_I2C_UNITS + 1, I2cConfig::default()) { // Maksimumdan büyük ID
+                Result::Ok(_) => io::println("This should not happen: Successfully created I2C with invalid ID!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidConfiguration
+            }
+            i2c_instance = Option::Some(i2c); // Güncellenmiş örneği geri kaydet
+        }
+    }
+
+    io::println("\nI2C example finished.".to_string());
+}
