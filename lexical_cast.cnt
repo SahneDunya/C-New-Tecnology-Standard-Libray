@@ -1,0 +1,262 @@
+// lexical_cast.cnt
+// Metinsel Tip Dönüşümleri Modülü
+// Bir tipin metin gösterimini başka bir tipe dönüştürmek için güvenli fonksiyonlar sağlar.
+
+import std::string::String;  // Temel metin tipi
+import std::result::Result; // Hata yönetimi için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::fmt;            // Hata mesajları için formatlama
+// Varsayımsal olarak sayısal tiplerin `to_string()` ve `parse()` metotlarına ihtiyaç duyarız.
+// CNT'nin temel tipleri zaten bu tür metotlara sahipmiş gibi davranacağız.
+
+/// `CastError`: Metinsel dönüşüm sırasında oluşabilecek hata türlerini temsil eder.
+pub enum CastError {
+    /// Giriş string'i belirtilen tipe dönüştürülemedi.
+    ParseError(String),
+    /// Geçersiz argüman (örn. boş string).
+    InvalidInput(String),
+    /// Genel bir dönüşüm hatası.
+    Custom(String),
+}
+
+/// `ToString`: Bir türün kendini `String`'e dönüştürebileceğini gösteren bir trait.
+/// Bu, `to_string()` metodu ile sağlanır.
+/// CNT'nin temel tiplerinin (i64, f64, bool, String) bu trait'i zaten implemente ettiği varsayılır.
+pub trait ToString {
+    fn to_string(&self) -> String;
+}
+
+// CNT'nin temel tipleri için varsayılan `ToString` implementasyonları (sadece örnek için, normalde yerleşik olur):
+ impl ToString for i64 {
+     fn to_string(&self) -> String {
+//         // Dahili implementasyon (örn. sayıdan string'e dönüştürme algoritması)
+//         // "123".to_string() gibi
+         format!("{}", *self) // Varsayımsal format! makrosu
+     }
+ }
+ impl ToString for f64 {
+     fn to_string(&self) -> String {
+         format!("{}", *self)
+     }
+ }
+ impl ToString for bool {
+     fn to_string(&self) -> String {
+         if *self { "true".to_string() } else { "false".to_string() }
+     }
+ }
+ impl ToString for String {
+     fn to_string(&self) -> String {
+         self.clone() // String zaten string olduğu için klonla
+     }
+ }
+
+
+/// `FromStr`: Bir `String`'den kendini dönüştürebileceğini gösteren bir trait.
+/// Bu, `parse()` metodu ile sağlanır.
+/// CNT'nin temel sayısal tiplerinin bu trait'i implemente ettiği varsayılır.
+pub trait FromStr {
+    fn parse(s: &String) -> Result<Self, CastError>;
+}
+
+// CNT'nin temel tipleri için varsayılan `FromStr` implementasyonları (sadece örnek için, normalde yerleşik olur):
+ impl FromStr for i64 {
+     fn parse(s: &String) -> Result<Self, CastError> {
+//         // Dahili implementasyon (örn. string'den sayıya dönüştürme algoritması)
+//         // "123".parse_i64() gibi
+         s.parse_i64().map_err(|_| CastError::ParseError(format!("Failed to parse i64 from '{}'", s)))
+     }
+ }
+ impl FromStr for f64 {
+     fn parse(s: &String) -> Result<Self, CastError> {
+         s.parse_f64().map_err(|_| CastError::ParseError(format!("Failed to parse f64 from '{}'", s)))
+     }
+ }
+ impl FromStr for bool {
+     fn parse(s: &String) -> Result<Self, CastError> {
+         match s.to_lower().as_str() {
+             "true" => Ok(true),
+             "false" => Ok(false),
+             _ => Err(CastError::ParseError(format!("Failed to parse bool from '{}'", s))),
+         }
+     }
+ }
+
+
+/// `cast<T: ToString, U: FromStr>(value: T) -> Result<U, CastError>`:
+/// Bir `ToString` edilebilir tipi alır, onu `String`'e dönüştürür ve ardından bu `String`'i
+/// `FromStr` edilebilir başka bir tipe dönüştürmeye çalışır.
+/// Örneğin, `cast<i64, f64>(123i64)` veya `cast<bool, String>(true)`.
+/// Bu, bir ara string dönüşümü gerektiren genel bir dönüşüm fonksiyonudur.
+pub fn cast<T, U>(value: T) -> Result<U, CastError>
+where
+    T: ToString,
+    U: FromStr,
+{
+    let s = value.to_string(); // T'yi String'e dönüştür
+    U::parse(&s) // String'i U'ya dönüştür
+}
+
+/// `to_string<T: ToString>(value: T) -> String`:
+/// Herhangi bir `ToString` edilebilir değeri bir `String`'e dönüştürür.
+/// Bu fonksiyon, `value.to_string()`'in bir wrapper'ıdır.
+pub fn to_string<T>(value: T) -> String
+where
+    T: ToString,
+{
+    value.to_string()
+}
+
+/// `parse<T: FromStr>(s: &String) -> Result<T, CastError>`:
+/// Bir `String`'i alır ve onu `FromStr` edilebilir bir tipe dönüştürmeye çalışır.
+/// Bu fonksiyon, `T::parse(s)`'in bir wrapper'ıdır.
+pub fn parse<T>(s: &String) -> Result<T, CastError>
+where
+    T: FromStr,
+{
+    T::parse(s)
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::lexical_cast::{self, CastError, ToString, FromStr};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::fmt;
+
+// Varsayımsal olarak CNT'nin temel tipleri için `ToString` ve `FromStr` implementasyonlarını sağlıyoruz:
+// (Normalde bu, dilin çekirdek kütüphanesinde yerleşik olarak bulunur.)
+
+// i64 için
+impl ToString for i64 {
+    fn to_string(&self) -> String {
+        self.to_string_impl() // Varsayımsal dahili to_string_impl
+    }
+}
+impl FromStr for i64 {
+    fn parse(s: &String) -> Result<Self, CastError> {
+        s.parse_i64().map_err(|_| CastError::ParseError(format!("Failed to parse i64 from '{}'", s)))
+    }
+}
+
+// f64 için
+impl ToString for f64 {
+    fn to_string(&self) -> String {
+        self.to_string_impl() // Varsayımsal dahili to_string_impl
+    }
+}
+impl FromStr for f64 {
+    fn parse(s: &String) -> Result<Self, CastError> {
+        s.parse_f64().map_err(|_| CastError::ParseError(format!("Failed to parse f64 from '{}'", s)))
+    }
+}
+
+// bool için
+impl ToString for bool {
+    fn to_string(&self) -> String {
+        if *self { "true".to_string() } else { "false".to_string() }
+    }
+}
+impl FromStr for bool {
+    fn parse(s: &String) -> Result<Self, CastError> {
+        match s.to_lower().as_str() {
+            "true" => Result::Ok(true),
+            "false" => Result::Ok(false),
+            _ => Result::Err(CastError::ParseError(format!("Failed to parse bool from '{}'", s))),
+        }
+    }
+}
+
+// String için (kendine dönüşüm)
+impl ToString for String {
+    fn to_string(&self) -> String {
+        self.clone()
+    }
+}
+impl FromStr for String {
+    fn parse(s: &String) -> Result<Self, CastError> {
+        Result::Ok(s.clone()) // Zaten string, sadece klonla
+    }
+}
+
+
+fn main() {
+    io::println("Starting Lexical Cast example...".to_string());
+
+    // --- to_string Kullanımı ---
+    io::println("\n--- to_string Usage ---".to_string());
+
+    let num_i64: i64 = 12345;
+    let s_i64 = lexical_cast::to_string(num_i64);
+    io::println(&format!("i64 {} to String: {}", num_i64.to_string(), s_i64)); // Output: "i64 12345 to String: 12345"
+
+    let num_f64: f64 = 98.765;
+    let s_f64 = lexical_cast::to_string(num_f64);
+    io::println(&format!("f64 {} to String: {}", num_f64.to_string(), s_f64)); // Output: "f64 98.765 to String: 98.765"
+
+    let b_val: bool = true;
+    let s_bool = lexical_cast::to_string(b_val);
+    io::println(&format!("bool {} to String: {}", b_val.to_string(), s_bool)); // Output: "bool true to String: true"
+
+
+    // --- parse Kullanımı ---
+    io::println("\n--- parse Usage ---".to_string());
+
+    let str_num_i64 = "67890".to_string();
+    match lexical_cast::parse::<i64>(&str_num_i64) {
+        Result::Ok(val) => io::println(&format!("String \"{}\" to i64: {}", str_num_i64, val.to_string())), // Output: "String "67890" to i64: 67890"
+        Result::Err(e) => io::println(&("Parse Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    let str_num_f64 = "123.45".to_string();
+    match lexical_cast::parse::<f64>(&str_num_f64) {
+        Result::Ok(val) => io::println(&format!("String \"{}\" to f64: {}", str_num_f64, val.to_string())), // Output: "String "123.45" to f64: 123.45"
+        Result::Err(e) => io::println(&("Parse Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    let str_bool_true = "TrUe".to_string();
+    match lexical_cast::parse::<bool>(&str_bool_true) {
+        Result::Ok(val) => io::println(&format!("String \"{}\" to bool: {}", str_bool_true, val.to_string())), // Output: "String "TrUe" to bool: true"
+        Result::Err(e) => io::println(&("Parse Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    let str_invalid_num = "hello".to_string();
+    match lexical_cast::parse::<i64>(&str_invalid_num) {
+        Result::Ok(val) => io::println(&format!("String \"{}\" to i64: {}", str_invalid_num, val.to_string())),
+        Result::Err(e) => io::println(&("Parse Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })), // Output: "Parse Error: Failed to parse i64 from 'hello'"
+    }
+
+
+    // --- cast Kullanımı (Ara Dönüşüm) ---
+    io::println("\n--- cast Usage (Intermediate Conversion) ---".to_string());
+
+    let int_to_float: i64 = 789;
+    match lexical_cast::cast::<i64, f64>(int_to_float) {
+        Result::Ok(val) => io::println(&format!("i64 {} to f64: {}", int_to_float.to_string(), val.to_string())), // Output: "i64 789 to f64: 789.0"
+        Result::Err(e) => io::println(&("Cast Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    let bool_to_string: bool = false;
+    match lexical_cast::cast::<bool, String>(bool_to_string) {
+        Result::Ok(val) => io::println(&format!("bool {} to String: {}", bool_to_string.to_string(), val)), // Output: "bool false to String: false"
+        Result::Err(e) => io::println(&("Cast Error: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    let float_to_int_str = "123.99".to_string(); // float'tan int'e dönüşüm String üzerinden
+    match lexical_cast::parse::<f64>(&float_to_int_str) {
+        Result::Ok(f_val) => {
+            // f_val'ı i64'e dönüştürmek için önce string'e, sonra i64'e parse etmek saçma olurdu.
+            // Bu, lexical_cast'ın tipik kullanım alanı değildir.
+            // Direkt f64'ten i64'e cast gerekiyorsa bu modül dışındadır.
+            // Ancak, "123.99" string'ini i64'e parse etmeye çalışalım (hata vermeli).
+            match lexical_cast::parse::<i64>(&float_to_int_str) {
+                Result::Ok(val) => io::println(&format!("String \"{}\" to i64: {}", float_to_int_str, val.to_string())),
+                Result::Err(e) => io::println(&("Parse Error for float string to i64: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+            }
+        },
+        Result::Err(e) => io::println(&("Parse Error for float_to_int_str: ".to_string() + match e { lexical_cast::CastError::ParseError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    io::println("\nLexical Cast example finished.".to_string());
+}
