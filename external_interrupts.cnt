@@ -1,0 +1,419 @@
+// external_interrupts.cnt
+// Harici Kesmeler (External Interrupts) Modülü
+// Harici pinlerdeki sinyal değişikliklerini algılamak ve bu olaylara anında yanıt vermek için
+// bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli kesme denetleyici donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::collections::HashMap; // ISR'ları kaydetmek için (varsayımsal)
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::interrupt_controller` gibi bir kütüphane/modül aracılığıyla.
+
+/// `InterruptError`: Harici Kesme işlemleri sırasında oluşabilecek hata türleri.
+pub enum InterruptError {
+    /// Geçersiz pin numarası veya kesme ID'si.
+    InvalidPinOrId(String),
+    /// Kesme birimi meşgul veya zaten kullanımda.
+    InterruptBusy(String),
+    /// Kesme işleyicisi zaten kayıtlı.
+    HandlerAlreadyRegistered(String),
+    /// Kesme işleyicisi kayıtlı değil.
+    HandlerNotRegistered(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Genel bir kesme hatası.
+    Custom(String),
+}
+
+impl Error for InterruptError {
+    fn description(&self) -> String {
+        match self {
+            InterruptError::InvalidPinOrId(msg) => format!("Invalid Pin or Interrupt ID: {}", msg),
+            InterruptError::InterruptBusy(msg) => format!("Interrupt Busy: {}", msg),
+            InterruptError::HandlerAlreadyRegistered(msg) => format!("Handler Already Registered: {}", msg),
+            InterruptError::HandlerNotRegistered(msg) => format!("Handler Not Registered: {}", msg),
+            InterruptError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            InterruptError::Custom(msg) => format!("Interrupt Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `InterruptTrigger`: Kesmenin hangi sinyal kenarında tetikleneceğini belirler.
+pub enum InterruptTrigger {
+    /// Yükselen kenar (Low-to-High geçişi).
+    RisingEdge,
+    /// Düşen kenar (High-to-Low geçişi).
+    FallingEdge,
+    /// Her iki kenar (Hem yükselen hem düşen geçiş).
+    BothEdges,
+}
+
+/// `InterruptHandle`: Kayıtlı bir harici kesmeyi yönetmek için bir tanıtıcı (handle).
+/// Bu, kesme işleyicisi devredışı bırakmak veya kaldırmak için kullanılabilir.
+pub struct InterruptHandle {
+    pin_number: u8,
+}
+
+// Varsayımsal global statik depolama alanı ve kilit mekanizması
+// Gerçek bir OS/HAL ortamında, bu statik değerler daha güvenli ve donanım tarafından
+// yönetilen yapılara veya singleton'lara bağlanacaktır.
+static mut INTERRUPT_HANDLERS: Option<HashMap<u8, fn()>> = Option::None; // Pin numarasına göre ISR'ları sakla
+static mut IS_INITIALIZED: bool = false; // Modül başlatıldı mı?
+
+/// `init() -> Result<(), InterruptError>`:
+/// Harici kesme modülünü başlatır. Bu fonksiyon, genellikle global kesme denetleyiciyi yapılandırır.
+/// Yalnızca bir kez çağrılmalıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım kesme denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init() -> Result<(), InterruptError> {
+    if IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module already initialized.".to_string()));
+    }
+
+    io::println("HW_API: Initializing External Interrupt Controller.".to_string());
+    // Gerçekte, genel kesme denetleyici (örneğin NVIC - Nested Vectored Interrupt Controller)
+    // burada başlatılır ve varsayılan ayarlar yapılır.
+     os_api::interrupt_controller_init();
+
+    // HashMap'i başlat
+    INTERRUPT_HANDLERS = Option::Some(HashMap::new());
+    IS_INITIALIZED = true;
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), InterruptError>`:
+/// Harici kesme modülünü devre dışı bırakır ve tüm kayıtlı kesmeleri kaldırır.
+/// Sistem kapanırken veya kesme altyapısını tamamen sıfırlarken kullanılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım kesme denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized.".to_string()));
+    }
+
+    io::println("HW_API: De-initializing External Interrupt Controller and clearing handlers.".to_string());
+    // Tüm aktif kesmeleri devre dışı bırak ve temizle
+     os_api::interrupt_controller_deinit();
+
+    // HashMap'i temizle ve belleği serbest bırak (varsa)
+    INTERRUPT_HANDLERS = Option::None;
+    IS_INITIALIZED = false;
+    Result::Ok(())
+}
+
+/// `register(pin_number: u8, trigger: InterruptTrigger, handler: fn()) -> Result<InterruptHandle, InterruptError>`:
+/// Belirtilen pin numarası için bir harici kesme işleyicisi (ISR) kaydeder.
+///
+/// `pin_number`: Kesmenin tetikleneceği GPIO pini.
+/// `trigger`: Kesmenin hangi sinyal kenarında tetikleneceği (yükselen, düşen, her ikisi).
+/// `handler`: Kesme tetiklendiğinde çağrılacak fonksiyon (ISR).
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Doğrudan donanım kesme vektörlerini veya pin yapılandırma kayıtlarını değiştirdiğinden güvenli değildir.
+/// Ayrıca global statik `INTERRUPT_HANDLERS` HashMap'ini değiştirir.
+/// `handler` fonksiyonunun kesme güvenli (async-signal-safe) olması kritik öneme sahiptir.
+pub unsafe fn register(pin_number: u8, trigger: InterruptTrigger, handler: fn()) -> Result<InterruptHandle, InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized. Call init() first.".to_string()));
+    }
+    if pin_number >= MAX_GPIO_PINS { // Varsayımsal maks pin sayısı
+        return Result::Err(InterruptError::InvalidPinOrId(format!("Invalid pin number {}.", pin_number.to_string())));
+    }
+
+    // HashMap'e erişmek için güvenli bir şekilde Option'ı aç
+    let handlers = INTERRUPT_HANDLERS.as_mut().ok_or(InterruptError::Custom("Handler map not available.".to_string()))?;
+
+    if handlers.contains_key(&pin_number) {
+        return Result::Err(InterruptError::HandlerAlreadyRegistered(
+            format!("Handler already registered for pin {}.", pin_number.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Registering interrupt for pin {} on trigger {:?}.",
+        pin_number.to_string(), trigger));
+    // Gerçekte, ilgili pinin kesme yapılandırma kayıtları (örn. kenar algılama, kesme etkinleştirme)
+    // ve kesme vektör tablosu ayarları yapılır.
+     os_api::interrupt_config_pin(pin_number, trigger);
+     os_api::interrupt_enable_pin(pin_number);
+
+    handlers.insert(pin_number, handler);
+    Result::Ok(InterruptHandle { pin_number })
+}
+
+/// `unregister(handle: &InterruptHandle) -> Result<(), InterruptError>`:
+/// Belirtilen tanıtıcıya (handle) sahip harici kesme işleyicisini kaldırır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Doğrudan donanım kesme vektörlerini veya pin yapılandırma kayıtlarını değiştirdiğinden güvenli değildir.
+/// Ayrıca global statik `INTERRUPT_HANDLERS` HashMap'ini değiştirir.
+pub unsafe fn unregister(handle: &InterruptHandle) -> Result<(), InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized.".to_string()));
+    }
+    let handlers = INTERRUPT_HANDLERS.as_mut().ok_or(InterruptError::Custom("Handler map not available.".to_string()))?;
+
+    if !handlers.contains_key(&handle.pin_number) {
+        return Result::Err(InterruptError::HandlerNotRegistered(
+            format!("No handler registered for pin {}.", handle.pin_number.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Unregistering interrupt for pin {}.", handle.pin_number.to_string()));
+    // Gerçekte, ilgili pinin kesme etkinleştirme kaydı devre dışı bırakılır.
+     os_api::interrupt_disable_pin(handle.pin_number);
+    handlers.remove(&handle.pin_number);
+    Result::Ok(())
+}
+
+/// `enable(handle: &InterruptHandle) -> Result<(), InterruptError>`:
+/// Kayıtlı bir harici kesmeyi etkinleştirir, böylece olaylar algılandığında işleyici çağrılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım kesme kayıtlarını değiştirdiğinden güvenli değildir.
+pub unsafe fn enable(handle: &InterruptHandle) -> Result<(), InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized.".to_string()));
+    }
+    let handlers = INTERRUPT_HANDLERS.as_mut().ok_or(InterruptError::Custom("Handler map not available.".to_string()))?;
+    if !handlers.contains_key(&handle.pin_number) {
+        return Result::Err(InterruptError::HandlerNotRegistered(
+            format!("No handler registered for pin {}. Cannot enable.", handle.pin_number.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Enabling interrupt for pin {}.", handle.pin_number.to_string()));
+     os_api::interrupt_enable_pin(handle.pin_number);
+    Result::Ok(())
+}
+
+/// `disable(handle: &InterruptHandle) -> Result<(), InterruptError>`:
+/// Kayıtlı bir harici kesmeyi devre dışı bırakır. İşleyici kayıtlı kalır ancak çağrılmaz.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım kesme kayıtlarını değiştirdiğinden güvenli değildir.
+pub unsafe fn disable(handle: &InterruptHandle) -> Result<(), InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized.".to_string()));
+    }
+    let handlers = INTERRUPT_HANDLERS.as_mut().ok_or(InterruptError::Custom("Handler map not available.".to_string()))?;
+    if !handlers.contains_key(&handle.pin_number) {
+        return Result::Err(InterruptError::HandlerNotRegistered(
+            format!("No handler registered for pin {}. Cannot disable.", handle.pin_number.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Disabling interrupt for pin {}.", handle.pin_number.to_string()));
+     os_api::interrupt_disable_pin(handle.pin_number);
+    Result::Ok(())
+}
+
+/// `clear_pending(pin_number: u8) -> Result<(), InterruptError>`:
+/// Belirtilen pin için bekleyen (pending) kesme bayrağını temizler.
+/// Her ISR'ın sonunda çağrılması genellikle donanım gereksinimidir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım kesme kayıtlarını değiştirdiğinden güvenli değildir.
+pub unsafe fn clear_pending(pin_number: u8) -> Result<(), InterruptError> {
+    if !IS_INITIALIZED {
+        return Result::Err(InterruptError::Custom("External Interrupts module not initialized.".to_string()));
+    }
+    if pin_number >= MAX_GPIO_PINS {
+        return Result::Err(InterruptError::InvalidPinOrId(format!("Invalid pin number {}.", pin_number.to_string())));
+    }
+    io::println(&format!("HW_API: Clearing pending interrupt for pin {}.", pin_number.to_string()));
+     os_api::interrupt_clear_pending(pin_number);
+    Result::Ok(())
+}
+
+/// `_simulate_interrupt_trigger(pin_number: u8)`:
+/// Bu fonksiyon, geliştirme ve test amacıyla harici bir kesmeyi simüle etmek için kullanılır.
+/// Gerçek bir donanım üzerinde çağrılmamalıdır!
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Normalde donanım tarafından tetiklenecek bir olayı manuel olarak tetiklediğinden güvenli değildir.
+/// Sadece test senaryoları için kullanılır.
+pub unsafe fn _simulate_interrupt_trigger(pin_number: u8) {
+    io::println(&format!("SIMULATION: Interrupt triggered for pin {}.", pin_number.to_string()));
+    if IS_INITIALIZED {
+        if let Option::Some(handlers) = INTERRUPT_HANDLERS.as_ref() {
+            if let Option::Some(handler) = handlers.get(&pin_number) {
+                // İşleyiciyi çağır
+                handler();
+                // Simülasyonda bekleyen bayrağı temizle (gerçek ISR içinde yapılmalı)
+                let _ = clear_pending(pin_number);
+            } else {
+                io::println(&format!("SIMULATION WARNING: No handler registered for pin {}.", pin_number.to_string()));
+            }
+        }
+    } else {
+        io::println("SIMULATION WARNING: External Interrupts module not initialized. Cannot simulate.".to_string());
+    }
+}
+
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum GPIO pin sayısını belirtir.
+const MAX_GPIO_PINS: u8 = 32; // Örneğin, bir mikrodenetleyicide 0-31 arası pinler olabilir.
+
+
+// --- Örnek Kullanım ---
+
+import std::external_interrupts::{self, InterruptTrigger, InterruptHandle, InterruptError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+// Global mutable counter to show ISR effect (for example purposes only, usually avoided in real ISRs)
+static mut INTERRUPT_COUNT: u32 = 0;
+
+// Kesme İşleyicisi Fonksiyonu (ISR)
+// Bir ISR'nin hızlı ve kesme güvenli olması kritik öneme sahiptir.
+// Karmaşık işlemler burada yapılmamalı, bunun yerine bir bayrak set edilip ana döngüde işlenmelidir.
+fn my_button_isr() {
+    unsafe {
+        INTERRUPT_COUNT += 1;
+        io::println(&format!("  >>> ISR: Button pressed! Interrupt Count: {}", INTERRUPT_COUNT.to_string()));
+        // Normalde burada kesme bayrağı temizlenir:
+        // let _ = external_interrupts::clear_pending(BUTTON_PIN);
+    }
+}
+
+fn my_sensor_isr() {
+    unsafe {
+        io::println("  >>> ISR: Sensor data ready!".to_string());
+        // let _ = external_interrupts::clear_pending(SENSOR_PIN);
+    }
+}
+
+const BUTTON_PIN: u8 = 10;
+const SENSOR_PIN: u8 = 12;
+
+fn main() {
+    io::println("Starting External Interrupts example...".to_string());
+
+    // UNSAFE BLOCK - Kesme altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        io::println("\n--- Initializing External Interrupts Module ---".to_string());
+        match external_interrupts::init() {
+            Result::Ok(_) => io::println("External Interrupts module initialized.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing External Interrupts module: {}", e.description()));
+                return;
+            }
+        }
+
+        let mut button_handle: Option<InterruptHandle> = Option::None;
+        let mut sensor_handle: Option<InterruptHandle> = Option::None;
+
+        // Buton için kesme kaydet
+        io::println(&format!("\n--- Registering interrupt for Button on Pin {} (Falling Edge) ---", BUTTON_PIN.to_string()));
+        match external_interrupts::register(BUTTON_PIN, InterruptTrigger::FallingEdge, my_button_isr) {
+            Result::Ok(handle) => {
+                io::println(&format!("Interrupt handler registered for Pin {}.", BUTTON_PIN.to_string()));
+                button_handle = Option::Some(handle);
+            },
+            Result::Err(e) => io::println(&format!("Error registering button interrupt: {}", e.description())),
+        }
+
+        // Sensör için kesme kaydet
+        io::println(&format!("\n--- Registering interrupt for Sensor on Pin {} (Both Edges) ---", SENSOR_PIN.to_string()));
+        match external_interrupts::register(SENSOR_PIN, InterruptTrigger::BothEdges, my_sensor_isr) {
+            Result::Ok(handle) => {
+                io::println(&format!("Interrupt handler registered for Pin {}.", SENSOR_PIN.to_string()));
+                sensor_handle = Option::Some(handle);
+            },
+            Result::Err(e) => io::println(&format!("Error registering sensor interrupt: {}", e.description())),
+        }
+
+        std::spirit::sleep_ms(100);
+
+        // Kesmeleri simüle et
+        io::println("\n--- Simulating Interrupts ---".to_string());
+        external_interrupts::_simulate_interrupt_trigger(BUTTON_PIN);
+        std::spirit::sleep_ms(50);
+        external_interrupts::_simulate_interrupt_trigger(SENSOR_PIN);
+        std::spirit::sleep_ms(50);
+        external_interrupts::_simulate_interrupt_trigger(BUTTON_PIN);
+        std::spirit::sleep_ms(50);
+        external_interrupts::_simulate_interrupt_trigger(SENSOR_PIN); // Tekrar simüle et (BothEdges olduğu için çağrılır)
+
+        std::spirit::sleep_ms(500);
+
+        // Buton kesmesini devre dışı bırak
+        if let Option::Some(ref handle) = button_handle {
+            io::println(&format!("\n--- Disabling interrupt for Button on Pin {} ---", BUTTON_PIN.to_string()));
+            match external_interrupts::disable(handle) {
+                Result::Ok(_) => io::println(&format!("Interrupt disabled for Pin {}.", BUTTON_PIN.to_string())),
+                Result::Err(e) => io::println(&format!("Error disabling button interrupt: {}", e.description())),
+            }
+        }
+
+        std::spirit::sleep_ms(100);
+        io::println("\n--- Simulating Interrupt for Button (should NOT trigger) ---".to_string());
+        external_interrupts::_simulate_interrupt_trigger(BUTTON_PIN); // Devre dışı bırakıldığı için ISR çağrılmamalı
+
+        std::spirit::sleep_ms(100);
+
+        // Sensör kesmesini kaldır
+        if let Option::Some(ref handle) = sensor_handle {
+            io::println(&format!("\n--- Unregistering interrupt for Sensor on Pin {} ---", SENSOR_PIN.to_string()));
+            match external_interrupts::unregister(handle) {
+                Result::Ok(_) => io::println(&format!("Interrupt handler unregistered for Pin {}.", SENSOR_PIN.to_string())),
+                Result::Err(e) => io::println(&format!("Error unregistering sensor interrupt: {}", e.description())),
+            }
+        }
+
+        std::spirit::sleep_ms(100);
+        io::println("\n--- Simulating Interrupt for Sensor (should NOT trigger) ---".to_string());
+        external_interrupts::_simulate_interrupt_trigger(SENSOR_PIN); // Kaldırıldığı için ISR çağrılmamalı
+
+        // Geçersiz pin numarası ile kaydetme denemesi
+        io::println("\n--- Attempting to Register Interrupt with Invalid Pin (Expected Error) ---".to_string());
+        match external_interrupts::register(MAX_GPIO_PINS + 1, InterruptTrigger::FallingEdge, my_button_isr) {
+            Result::Ok(_) => io::println("This should not happen: Successfully registered interrupt with invalid pin!".to_string()),
+            Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidPinOrId
+        }
+
+        // Modülü de-initialize et
+        io::println("\n--- De-initializing External Interrupts Module ---".to_string());
+        match external_interrupts::deinit() {
+            Result::Ok(_) => io::println("External Interrupts module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing External Interrupts module: {}", e.description())),
+        }
+    }
+
+    io::println("\nExternal Interrupts example finished.".to_string());
+}
