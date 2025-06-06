@@ -1,0 +1,359 @@
+// adc.cnt
+// Analogdan Dijitale Çevirici (ADC) Modülü
+// Analog sinyalleri dijital değerlere dönüştürmek için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli ADC donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+
+/// `AdcError`: ADC işlemleri sırasında oluşabilecek hata türleri.
+pub enum AdcError {
+    /// Geçersiz ADC kanalı numarası.
+    InvalidChannelNumber(String),
+    /// ADC kalibre edilemedi.
+    CalibrationFailed(String),
+    /// Dönüştürme zaman aşımına uğradı.
+    ConversionTimeout(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// ADC modülü meşgul.
+    AdcBusy(String),
+    /// Genel bir ADC hatası.
+    Custom(String),
+}
+
+impl Error for AdcError {
+    fn description(&self) -> String {
+        match self {
+            AdcError::InvalidChannelNumber(msg) => format!("Invalid ADC Channel Number: {}", msg),
+            AdcError::CalibrationFailed(msg) => format!("ADC Calibration Failed: {}", msg),
+            AdcError::ConversionTimeout(msg) => format!("ADC Conversion Timeout: {}", msg),
+            AdcError::HardwareAccessError(msg) => format!("ADC Hardware Access Error: {}", msg),
+            AdcError::AdcBusy(msg) => format!("ADC Busy: {}", msg),
+            AdcError::Custom(msg) => format!("ADC Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `AdcResolution`: ADC'nin dönüştürme çözünürlüğü (bit cinsinden).
+pub enum AdcResolution {
+    Bits8,
+    Bits10,
+    Bits12,
+    Bits14, // Bazı gelişmiş ADC'lerde bulunabilir
+    Bits16, // Bazı gelişmiş ADC'lerde bulunabilir
+}
+
+impl AdcResolution {
+    /// Dönüştürme sonucunun maksimum değerini döndürür.
+    pub fn max_value(&self) -> u16 {
+        match self {
+            AdcResolution::Bits8 => 0xFF,       // 2^8 - 1 = 255
+            AdcResolution::Bits10 => 0x3FF,     // 2^10 - 1 = 1023
+            AdcResolution::Bits12 => 0xFFF,     // 2^12 - 1 = 4095
+            AdcResolution::Bits14 => 0x3FFF,    // 2^14 - 1 = 16383
+            AdcResolution::Bits16 => 0xFFFF,    // 2^16 - 1 = 65535
+        }
+    }
+}
+
+/// `AdcSampleRate`: ADC'nin örnekleme hızı (birim: SPS - Saniye Başına Örnek).
+/// Bu, bir dönüştürmenin ne kadar hızlı gerçekleştiğini belirler.
+pub enum AdcSampleRate {
+    Low,    // Örneğin 10 KSPS
+    Medium, // Örneğin 100 KSPS
+    High,   // Örneğin 1 MSPS
+    Custom(u32), // Özel örnekleme hızı (SPS cinsinden)
+}
+
+/// `AdcReference`: ADC'nin referans voltaj kaynağı.
+/// Bu, analog giriş voltajının dijital değerle eşleştirildiği referans noktasıdır.
+pub enum AdcReference {
+    /// Dahili referans (tipik olarak sabit bir voltaj, örneğin 1.2V, 2.5V).
+    Internal,
+    /// Harici pin üzerinden sağlanan referans voltajı.
+    External,
+    /// Güç kaynağı voltajı (VDDA) referans olarak kullanılır.
+    Vdda,
+}
+
+/// `Adc`: ADC çeviriciyi temsil eden yapı.
+/// Bu yapı, ADC'nin durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct Adc {
+    // Gerçek bir implementasyonda, burada ADC biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, control_reg_offset: u32
+    id: u8, // Birden fazla ADC birimi olabileceği için bir ID
+    is_calibrated: bool,
+    current_resolution: AdcResolution,
+    current_reference: AdcReference,
+    // Diğer yapılandırma detayları...
+}
+
+impl Adc {
+    /// `new(adc_id: u8) -> Result<Adc, AdcError>`:
+    /// Belirtilen ADC ID'si için yeni bir `Adc` örneği oluşturur.
+    /// ADC başlangıçta varsayılan bir durumda (örn. devre dışı) olur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir ADC birimini başlatmak,
+    /// donanım kaynaklarını ayırabilir ve varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(adc_id: u8) -> Result<Adc, AdcError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if adc_id >= MAX_ADC_UNITS { // MAX_ADC_UNITS tanımlanmış bir sabit olmalı
+            return Result::Err(AdcError::InvalidChannelNumber(
+                format!("ADC ID {} is out of range.", adc_id.to_string())
+            ));
+        }
+
+        // ADC donanımını başlat (saati aç, varsayılan kayıtları ayarla).
+        io::println(&format!("HW_API: Initializing ADC Unit {}.", adc_id.to_string()));
+         os_api::adc_init(adc_id);
+
+        Result::Ok(Adc {
+            id: adc_id,
+            is_calibrated: false,
+            current_resolution: AdcResolution::Bits12, // Varsayılan çözünürlük
+            current_reference: AdcReference::Vdda,     // Varsayılan referans
+        })
+    }
+
+    /// `calibrate(&mut self) -> Result<(), AdcError>`:
+    /// ADC birimini kalibre eder. Bu, ölçüm doğruluğunu artırmak için genellikle
+    /// başlangıçta yapılması gereken bir adımdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Kalibrasyon, donanım kayıtlarına erişim ve ADC'nin iç durumunu değiştirme
+    /// gerektirdiğinden güvenli değildir. Yanlış kalibrasyon, hatalı okumalara yol açabilir.
+    pub unsafe fn calibrate(&mut self) -> Result<(), AdcError> {
+        io::println(&format!("HW_API: Calibrating ADC Unit {}.", self.id.to_string()));
+        // Gerçekte, bir kalibrasyon rutini çalıştırılır. Bu, belirli kayıtları ayarlamayı,
+        // kısa bir gecikmeyi ve kalibrasyonun tamamlanmasını beklemeyi içerebilir.
+         if !os_api::adc_run_calibration(self.id) {
+             return Result::Err(AdcError::CalibrationFailed("Hardware calibration failed.".to_string()));
+         }
+        // Simülasyon olarak 100ms'lik bir kalibrasyon süresi varsayalım.
+         std::spirit::sleep_ms(100);
+        io::println("  (simulated calibration delay)".to_string());
+        self.is_calibrated = true;
+        Result::Ok(())
+    }
+
+    /// `set_resolution(&mut self, resolution: AdcResolution) -> Result<(), AdcError>`:
+    /// ADC'nin dönüştürme çözünürlüğünü (bit sayısını) ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_resolution(&mut self, resolution: AdcResolution) -> Result<(), AdcError> {
+        io::println(&format!("HW_API: Setting ADC Unit {} resolution to {:?}.", self.id.to_string(), resolution));
+        // Gerçekte, ADC'nin çözünürlük ayar kaydına yazma işlemi gerçekleşir.
+         if !os_api::adc_set_resolution(self.id, resolution) {
+             return Result::Err(AdcError::HardwareAccessError("Failed to set ADC resolution.".to_string()));
+         }
+        self.current_resolution = resolution;
+        Result::Ok(())
+    }
+
+    /// `set_reference(&mut self, reference: AdcReference) -> Result<(), AdcError>`:
+    /// ADC'nin referans voltaj kaynağını ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_reference(&mut self, reference: AdcReference) -> Result<(), AdcError> {
+        io::println(&format!("HW_API: Setting ADC Unit {} reference to {:?}.", self.id.to_string(), reference));
+        // Gerçekte, ADC'nin referans voltaj ayar kaydına yazma işlemi gerçekleşir.
+         if !os_api::adc_set_reference(self.id, reference) {
+             return Result::Err(AdcError::HardwareAccessError("Failed to set ADC reference.".to_string()));
+         }
+        self.current_reference = reference;
+        Result::Ok(())
+    }
+
+    /// `read_channel(&self, channel_num: u8) -> Result<u16, AdcError>`:
+    /// Belirtilen analog giriş kanalından bir dönüştürme başlatır ve sonucu okur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Dönüştürme işlemini başlatmak ve donanım sonuçlarını okumak
+    /// doğrudan donanım kayıtlarına erişim gerektirdiğinden güvenli değildir.
+    /// Yanlış kanal numarası veya zamanlama hatalı okumalara yol açabilir.
+    pub unsafe fn read_channel(&self, channel_num: u8) -> Result<u16, AdcError> {
+        if channel_num >= MAX_ADC_CHANNELS { // MAX_ADC_CHANNELS tanımlanmış bir sabit olmalı
+            return Result::Err(AdcError::InvalidChannelNumber(
+                format!("Channel number {} is out of range.", channel_num.to_string())
+            ));
+        }
+
+        if !self.is_calibrated {
+            io::println(&format!("WARNING: ADC Unit {} is not calibrated. Readings might be inaccurate.", self.id.to_string()));
+        }
+
+        io::println(&format!("HW_API: Starting conversion on ADC Unit {} Channel {}.", self.id.to_string(), channel_num.to_string()));
+
+        // Gerçekte, burada ADC'nin dönüştürme başlatma ve sonuç okuma döngüsü olurdu.
+        // 1. Kanalı seç
+        // 2. Dönüştürmeyi başlat
+        // 3. Dönüştürme tamamlanana kadar bekle (veya zaman aşımı kontrolü)
+        // 4. Sonucu oku
+        
+        // Simülasyon: Rastgele bir analog değer okuyalım (0-max_value arasında)
+        let max_val = self.current_resolution.max_value();
+        // Varsayımsal bir rastgele sayı üreteci:
+        let simulated_raw_value = (std::time::nanos() % (max_val as u64 + 1)) as u16; // Varsayımsal `std::time::nanos()`
+        
+        io::println(&format!("  (simulated conversion delay)".to_string()));
+         if os_api::adc_start_conversion(self.id, channel_num).is_err() {
+             return Result::Err(AdcError::HardwareAccessError("Failed to start conversion.".to_string()));
+         }
+         let result = os_api::adc_read_result(self.id);
+         if result.is_err() {
+             return Result::Err(AdcError::ConversionTimeout("ADC conversion timed out.".to_string()));
+         }
+        Result::Ok(simulated_raw_value)
+    }
+
+    /// `read_channel_mv(&self, channel_num: u8, vref_mv: u16) -> Result<u16, AdcError>`:
+    /// Belirtilen kanaldan analog voltajı okur ve sonucu milivolt (mV) olarak döndürür.
+    /// Harici referans voltajı bilindiğinde kullanışlıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `read_channel`'ı çağırdığı için güvenli değildir.
+    pub unsafe fn read_channel_mv(&self, channel_num: u8, vref_mv: u16) -> Result<u16, AdcError> {
+        if vref_mv == 0 {
+            return Result::Err(AdcError::Custom("Reference voltage cannot be zero.".to_string()));
+        }
+        let raw_value_res = self.read_channel(channel_num);
+        match raw_value_res {
+            Result::Ok(raw_value) => {
+                let max_raw_value = self.current_resolution.max_value();
+                // (Raw Value / Max Raw Value) * Reference Voltage (mV)
+                let mv_value = ((raw_value as u32 * vref_mv as u32) / (max_raw_value as u32)) as u16;
+                Result::Ok(mv_value)
+            },
+            Result::Err(e) => Result::Err(e),
+        }
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum ADC birimi sayısını belirtir.
+const MAX_ADC_UNITS: u8 = 1; // Genellikle bir MCU'da 1 veya 2 ADC birimi bulunur.
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum ADC kanalı sayısını belirtir.
+const MAX_ADC_CHANNELS: u8 = 8; // Örneğin, 8 analog giriş kanalı.
+
+
+// --- Örnek Kullanım ---
+
+import std::adc::{self, Adc, AdcError, AdcResolution, AdcReference};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+
+// Dummy `std::time` and `std::ptr` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment to show progress
+                COUNTER
+            }
+        }
+    }
+    pub mod ptr {
+        pub fn null_mut<T>() -> *mut T {
+            0 as *mut T
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting ADC example...".to_string());
+
+    // ADC Unit 0'ı kullanalım
+    io::println("\n--- Initializing ADC Unit 0 ---".to_string());
+
+    // UNSAFE BLOCK - ADC'yi başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let mut adc_res = Adc::new(0); // ADC Unit 0
+
+        let mut adc_unit: Option<Adc> = Option::None;
+
+        match adc_res {
+            Result::Ok(adc) => {
+                io::println("ADC Unit 0 created successfully.".to_string());
+                adc_unit = Option::Some(adc);
+            },
+            Result::Err(e) => io::println(&format!("Error creating ADC Unit: {}", e.description())),
+        }
+
+        if let Option::Some(mut adc) = adc_unit {
+            // ADC'yi kalibre et
+            io::println("\n--- Calibrating ADC ---".to_string());
+            match adc.calibrate() {
+                Result::Ok(_) => io::println("ADC calibrated successfully.".to_string()),
+                Result::Err(e) => io::println(&format!("Error calibrating ADC: {}", e.description())),
+            }
+
+            // Çözünürlüğü ayarla (örn. 10 bit)
+            io::println("\n--- Setting ADC Resolution to 10-bit ---".to_string());
+            match adc.set_resolution(AdcResolution::Bits10) {
+                Result::Ok(_) => io::println("Resolution set to 10-bit.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting resolution: {}", e.description())),
+            }
+            io::println(&format!("Max raw value for 10-bit resolution: {}", AdcResolution::Bits10.max_value().to_string()));
+
+
+            // Referans voltajını ayarla (örn. dahili)
+            io::println("\n--- Setting ADC Reference to Internal ---".to_string());
+            match adc.set_reference(AdcReference::Internal) {
+                Result::Ok(_) => io::println("Reference set to Internal.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting reference: {}", e.description())),
+            }
+
+            // Analog kanaldan oku (örn. Kanal 0)
+            io::println("\n--- Reading from ADC Channel 0 (Raw Value) ---".to_string());
+            match adc.read_channel(0) {
+                Result::Ok(raw_value) => io::println(&format!("ADC Channel 0 Raw Value: {}", raw_value.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading from ADC Channel 0: {}", e.description())),
+            }
+
+            // Başka bir kanaldan oku (örn. Kanal 3)
+            io::println("\n--- Reading from ADC Channel 3 (Raw Value) ---".to_string());
+            match adc.read_channel(3) {
+                Result::Ok(raw_value) => io::println(&format!("ADC Channel 3 Raw Value: {}", raw_value.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading from ADC Channel 3: {}", e.description())),
+            }
+
+            // Milivolt olarak oku (varsayımsal 3.3V referans)
+            io::println("\n--- Reading from ADC Channel 0 (in mV, with 3300mV Vref) ---".to_string());
+            let vref_mv = 3300; // Örneğin, 3.3V = 3300mV
+            match adc.read_channel_mv(0, vref_mv) {
+                Result::Ok(mv_value) => io::println(&format!("ADC Channel 0 Voltage: {} mV", mv_value.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading from ADC Channel 0 (mV): {}", e.description())),
+            }
+
+            // Geçersiz kanal numarası denemesi
+            io::println("\n--- Attempting to Read from Invalid Channel (Expected Error) ---".to_string());
+            match adc.read_channel(20) { // MAX_ADC_CHANNELS 8 varsayıldı
+                Result::Ok(_) => io::println("This should not happen: Successfully read from invalid channel!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidChannelNumber
+            }
+            adc_unit = Option::Some(adc); // Güncellenmiş ADC birimini geri kaydet
+        }
+    }
+
+    io::println("\nADC example finished.".to_string());
+}
