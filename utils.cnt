@@ -1,0 +1,308 @@
+// utils.cnt
+// Genel Yardımcı Fonksiyonlar ve Araçlar Modülü
+// Çeşitli programlama görevlerinde sıkça ihtiyaç duyulan genel amaçlı işlevler sağlar.
+
+import std::string::String;  // Metin işleme için
+import std::vec::Vec;       // Koleksiyon manipülasyonu için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::result::Result; // Hata yönetimi için (eğer utils'de hata veren fonksiyonlar varsa)
+import std::fmt;            // Biçimlendirme için
+
+// --- Matematiksel Yardımcılar ---
+
+/// `clamp<T: PartialOrd>(value: T, min: T, max: T) -> T`:
+/// Bir değeri belirli bir minimum ve maksimum aralıkta tutar.
+/// Eğer değer `min`'den küçükse `min`'i, `max`'tan büyükse `max`'ı, aksi takdirde değeri döndürür.
+/// `PartialOrd` trait'i, değerlerin kısmi olarak sıralanabilir olmasını sağlar (karşılaştırılabilir).
+pub fn clamp<T>(value: T, min: T, max: T) -> T
+where
+    T: PartialOrd + Copy, // `Copy` trait'i, değerlerin kopyalanabilir olmasını sağlar
+{
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
+/// `abs<T: Signed>(value: T) -> T`:
+/// Bir sayının mutlak değerini (absolute value) döndürür.
+/// `Signed` trait'i, sayının işaretli bir sayı olduğunu varsayar (negatif olabilir).
+/// CNT'de `Signed` gibi bir trait yoksa, bu fonksiyon sadece varsayılan `i64` veya `f64` için yazılmalıdır.
+pub fn abs<T>(value: T) -> T
+where
+    T: PartialOrd + Neg<Output = T> + Copy, // `Neg` trait'i, negatifinin alınabilir olmasını sağlar
+{
+    if value < 0 {
+        -value
+    } else {
+        value
+    }
+}
+
+/// `max<T: PartialOrd>(a: T, b: T) -> T`:
+/// İki değerden büyüğünü döndürür.
+pub fn max<T>(a: T, b: T) -> T
+where
+    T: PartialOrd + Copy,
+{
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `min<T: PartialOrd>(a: T, b: T) -> T`:
+/// İki değerden küçüğünü döndürür.
+pub fn min<T>(a: T, T b: T) -> T
+where
+    T: PartialOrd + Copy,
+{
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// --- String (Metin) Yardımcıları ---
+
+/// `trim(s: &String) -> String`:
+/// Bir string'in başındaki ve sonundaki boşluk karakterlerini kaldırır.
+pub fn trim(s: &String) -> String {
+    let chars: Vec<char> = s.chars().collect(); // Varsayımsal chars() metodu
+    let mut start = 0;
+    let mut end = chars.len();
+
+    while start < end && chars[start].is_whitespace() { // Varsayımsal is_whitespace()
+        start += 1;
+    }
+    while end > start && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+
+    if start >= end {
+        "".to_string()
+    } else {
+        String::from_chars(&chars[start..end]) // Varsayımsal from_chars
+    }
+}
+
+/// `starts_with(s: &String, prefix: &String) -> bool`:
+/// Bir string'in belirli bir önek (prefix) ile başlayıp başlamadığını kontrol eder.
+pub fn starts_with(s: &String, prefix: &String) -> bool {
+    s.starts_with(prefix) // Varsayımsal String metodu
+}
+
+/// `ends_with(s: &String, suffix: &String) -> bool`:
+/// Bir string'in belirli bir sonek (suffix) ile bitip bitmediğini kontrol eder.
+pub fn ends_with(s: &String, suffix: &String) -> bool {
+    s.ends_with(suffix) // Varsayımsal String metodu
+}
+
+/// `to_lower(s: &String) -> String`:
+/// Bir string'deki tüm karakterleri küçük harfe dönüştürür.
+pub fn to_lower(s: &String) -> String {
+    s.to_lower() // Varsayımsal String metodu
+}
+
+/// `to_upper(s: &String) -> String`:
+/// Bir string'deki tüm karakterleri büyük harfe dönüştürür.
+pub fn to_upper(s: &String) -> String {
+    s.to_upper() // Varsayımsal String metodu
+}
+
+/// `split_whitespace(s: &String) -> Vec<String>`:
+/// Bir string'i boşluk karakterlerine göre böler ve bir string vektörü döndürür.
+/// Boşluk karakterleri birden fazla olsa bile tek bir ayırıcı gibi davranır.
+pub fn split_whitespace(s: &String) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current_word = String::new();
+    let mut in_whitespace = true;
+
+    for char_val in s.chars() {
+        if char_val.is_whitespace() {
+            if !in_whitespace {
+                result.push(current_word.clone());
+                current_word = String::new();
+            }
+            in_whitespace = true;
+        } else {
+            current_word.push(char_val);
+            in_whitespace = false;
+        }
+    }
+
+    if !current_word.is_empty() {
+        result.push(current_word);
+    }
+    result
+}
+
+// --- Koleksiyon (Vec) Yardımcıları ---
+
+/// `contains<T: PartialEq>(vec: &Vec<T>, item: &T) -> bool`:
+/// Bir vektörün belirli bir öğeyi içerip içermediğini kontrol eder.
+/// `PartialEq` trait'i, öğelerin eşitlik için karşılaştırılabilir olmasını sağlar.
+pub fn contains<T>(vec: &Vec<T>, item: &T) -> bool
+where
+    T: PartialEq,
+{
+    for elem in vec {
+        if elem == item {
+            return true;
+        }
+    }
+    false
+}
+
+/// `reverse<T: Clone>(vec: &Vec<T>) -> Vec<T>`:
+/// Bir vektörün elemanlarını tersine çevirir ve yeni bir vektör olarak döndürür.
+/// Orijinal vektörü değiştirmez.
+/// `Clone` trait'i, elemanların kopyalanabilir olmasını sağlar.
+pub fn reverse<T>(vec: &Vec<T>) -> Vec<T>
+where
+    T: Clone,
+{
+    let mut reversed_vec = Vec::new();
+    let mut i = vec.len();
+    while i > 0 {
+        i -= 1;
+        reversed_vec.push(vec[i].clone());
+    }
+    reversed_vec
+}
+
+/// `deduplicate<T: PartialEq + Clone>(vec: &Vec<T>) -> Vec<T>`:
+/// Bir vektördeki yinelenen elemanları kaldırır ve benzersiz elemanlardan oluşan yeni bir vektör döndürür.
+/// Elemanların göreceli sırasını korur.
+pub fn deduplicate<T>(vec: &Vec<T>) -> Vec<T>
+where
+    T: PartialEq + Clone,
+{
+    let mut unique_vec = Vec::new();
+    for item in vec {
+        if !contains(&unique_vec, item) {
+            unique_vec.push(item.clone());
+        }
+    }
+    unique_vec
+}
+
+// --- Genel Yardımcılar ---
+
+/// `sleep_ms(ms: u64)`:
+/// Mevcut iş parçacığını belirtilen milisaniye kadar uyutur.
+/// Genellikle `std::spirit` içinde yer alır, ancak burada genel bir yardımcı olarak sunulmuştur.
+pub fn sleep_ms(ms: u64) {
+    // Bu, işletim sistemi düzeyinde bir uyku çağrısını simüle eder.
+    // Gerçek bir implementasyonda, bu fonksiyon `std::spirit` (eğer varsa) veya
+    // doğrudan OS API'leri üzerinden çağrılırdı.
+    io::println(&format!("Sleeping for {} milliseconds...", ms.to_string()));
+    // Varsayımsal OS sleep çağrısı: os_api::sleep(ms);
+}
+
+
+/// `generate_uuid() -> String`:
+/// Evrensel Benzersiz Kimlik (UUID) döndüren varsayımsal bir fonksiyon.
+/// Gerçekte karmaşık algoritmalar veya OS API'leri gerektirir.
+pub fn generate_uuid() -> String {
+    // UUID oluşturma algoritmaları oldukça karmaşıktır.
+    // Burada sadece bir placeholder döndürüyoruz.
+    "123e4567-e89b-12d3-a456-426614174000".to_string() // UUIDv4 örneği
+}
+
+// --- Örnek Kullanım ---
+
+import std::utils;
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::fmt; // For Debug and formatting
+
+// Not: Bu örnek kullanımda, `std::ops::Neg` gibi trait'lerin ve `String`'in
+// `chars()`, `is_whitespace()`, `to_lower()`, `to_upper()`, `starts_with()`,
+// `ends_with()`, `split()` gibi metotlarının varsayımsal olarak var olduğu kabul edilmiştir.
+// Aynı şekilde `String::from_chars()` varsayımsaldır.
+
+fn main() {
+    io::println("Starting Utils example...".to_string());
+
+    // --- Matematiksel Yardımcılar ---
+    io::println("\n--- Mathematical Utilities ---".to_string());
+
+    let clamped_val = utils::clamp(15, 0, 10);
+    io::println(&format!("Clamped 15 between 0 and 10: {}", clamped_val.to_string())); // Output: 10
+
+    let clamped_val2 = utils::clamp(5, 0, 10);
+    io::println(&format!("Clamped 5 between 0 and 10: {}", clamped_val2.to_string())); // Output: 5
+
+    let abs_val = utils::abs(-10);
+    io::println(&format!("Absolute value of -10: {}", abs_val.to_string())); // Output: 10
+
+    let max_val = utils::max(25, 17);
+    io::println(&format!("Max of 25 and 17: {}", max_val.to_string())); // Output: 25
+
+    let min_val = utils::min(25, 17);
+    io::println(&format!("Min of 25 and 17: {}", min_val.to_string())); // Output: 17
+
+    // --- String Yardımcıları ---
+    io::println("\n--- String Utilities ---".to_string());
+
+    let raw_string = "   Hello, World!   ".to_string();
+    let trimmed_string = utils::trim(&raw_string);
+    io::println(&format!("Trimmed '{}': '{}'", raw_string, trimmed_string)); // Output: "Hello, World!"
+
+    let check_prefix = "programming".to_string();
+    io::println(&format!("'{}' starts with 'prog': {}", check_prefix, utils::starts_with(&check_prefix, &"prog".to_string()).to_string())); // Output: true
+
+    let check_suffix = "development".to_string();
+    io::println(&format!("'{}' ends with 'ment': {}", check_suffix, utils::ends_with(&check_suffix, &"ment".to_string()).to_string())); // Output: true
+
+    let mixed_case = "CoMpUtEr ScIeNcE".to_string();
+    io::println(&format!("'{}' to lower: '{}'", mixed_case, utils::to_lower(&mixed_case))); // Output: "computer science"
+    io::println(&format!("'{}' to upper: '{}'", mixed_case, utils::to_upper(&mixed_case))); // Output: "COMPUTER SCIENCE"
+
+    let sentence = "  This   is  a  test  sentence.  ".to_string();
+    let words = utils::split_whitespace(&sentence);
+    io::println(&format!("Words in '{}': {:?}", sentence, words)); // Output: ["This", "is", "a", "test", "sentence."]
+
+    // --- Koleksiyon Yardımcıları ---
+    io::println("\n--- Collection Utilities ---".to_string());
+
+    let my_vec = Vec::new();
+    my_vec.push(10);
+    my_vec.push(20);
+    my_vec.push(30);
+    io::println(&format!("Vector: {:?}", my_vec)); // Output: [10, 20, 30]
+
+    io::println(&format!("Vector contains 20: {}", utils::contains(&my_vec, &20).to_string())); // Output: true
+    io::println(&format!("Vector contains 50: {}", utils::contains(&my_vec, &50).to_string())); // Output: false
+
+    let reversed_vec = utils::reverse(&my_vec);
+    io::println(&format!("Reversed vector: {:?}", reversed_vec)); // Output: [30, 20, 10]
+
+    let dupe_vec = Vec::new();
+    dupe_vec.push(1);
+    dupe_vec.push(2);
+    dupe_vec.push(1);
+    dupe_vec.push(3);
+    dupe_vec.push(2);
+    io::println(&format!("Original (with dupes): {:?}", dupe_vec)); // Output: [1, 2, 1, 3, 2]
+    let unique_vec = utils::deduplicate(&dupe_vec);
+    io::println(&format!("Deduplicated vector: {:?}", unique_vec)); // Output: [1, 2, 3]
+
+
+    // --- Genel Yardımcılar ---
+    io::println("\n--- General Utilities ---".to_string());
+
+    utils::sleep_ms(100); // 100 milisaniye uyut
+
+    let uuid = utils::generate_uuid();
+    io::println(&format!("Generated UUID: {}", uuid)); // Output: (örnek) "123e4567-e89b-12d3-a456-426614174000"
+
+    io::println("\nUtils example finished.".to_string());
+}
