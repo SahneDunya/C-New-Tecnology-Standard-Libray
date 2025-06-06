@@ -1,0 +1,350 @@
+// interrupt.cnt
+// Kesme Yönetimi Modülü
+// Donanım ve yazılım kesmelerini (interrupts) yönetmek, kesme işleyicilerini kaydetmek
+// ve kesmeleri etkinleştirmek/devre dışı bırakmak için araçlar sağlar.
+// Bu fonksiyonlar işletim sistemi/donanım ile doğrudan etkileşime girer ve 'unsafe' kullanım gerektirir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de fonksiyon işaretçisi türleri (örn. `fn()`),
+// donanım kayıtlarına doğrudan erişim (`Port::write`, `register::read`)
+// ve düşük seviyeli atomik operasyonlar (eğer gerekliyse) mevcuttur.
+
+/// `InterruptError`: Kesme işlemleri sırasında oluşabilecek hata türleri.
+pub enum InterruptError {
+    /// Geçersiz kesme numarası (veya vektör numarası).
+    InvalidInterruptNumber(String),
+    /// Kesme işleyicisi zaten kayıtlı.
+    HandlerAlreadyRegistered(String),
+    /// Kesme işleyicisi kaydedilemedi (örn. yetki sorunu, sistem kaynağı eksikliği).
+    HandlerRegistrationFailed(String),
+    /// İşletim sistemi çağrısı başarısız oldu.
+    OsError(SystemError),
+    /// Genel bir kesme hatası.
+    Custom(String),
+}
+
+impl Error for InterruptError {
+    fn description(&self) -> String {
+        match self {
+            InterruptError::InvalidInterruptNumber(msg) => format!("Invalid Interrupt Number: {}", msg),
+            InterruptError::HandlerAlreadyRegistered(msg) => format!("Handler Already Registered: {}", msg),
+            InterruptError::HandlerRegistrationFailed(msg) => format!("Handler Registration Failed: {}", msg),
+            InterruptError::OsError(e) => format!("OS Error: {}", e.description()),
+            InterruptError::Custom(msg) => format!("Interrupt Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        match self {
+            InterruptError::OsError(e) => Option::Some(e),
+            _ => Option::None,
+        }
+    }
+}
+
+/// `InterruptHandler`: Kesme olaylarına yanıt vermek için çağrılan fonksiyonun tipi.
+/// Çoğu işletim sistemi çekirdeğinde, bu fonksiyonlar özel bir bağlamda (kesme bağlamı) çalışır
+/// ve çok hızlı ve kısıtlı olmalıdır.
+/// Fonksiyon, kesme hakkında bilgi alabilir (örn. kesme numarası, CPU durumu).
+/// Basitlik adına, burada `fn()` olarak tanımlanmıştır.
+pub type InterruptHandler = fn();
+
+// İç veri yapısı: Kesme işleyicilerini tutmak için (Çekirdek düzeyinde bir dizi veya harita)
+// Bu, genellikle işletim sistemi çekirdeğinin belleğinde bulunur ve doğrudan erişilemez.
+// Simülasyon için:
+static mut INTERRUPT_HANDLERS: Vec<Option<InterruptHandler>>;
+static MAX_INTERRUPT_NUMBER: u32 = 256; // Örneğin, 256 kesme vektörü
+
+// Statik olarak başlatma bloğu (CNT'de varsa)
+// `main`'den önce veya modül yüklendiğinde çalıştırılır.
+pub fn init() {
+    unsafe {
+        if INTERRUPT_HANDLERS.is_empty() { // Sadece bir kere başlat
+             INTERRUPT_HANDLERS = Vec::new();
+             INTERRUPT_HANDLERS.resize(MAX_INTERRUPT_NUMBER as usize, Option::None);
+        }
+    }
+    io::println("Interrupt module initialized.".to_string());
+}
+
+
+// --- Kesme Yönetimi Fonksiyonları ---
+
+/// `register_handler(interrupt_num: u32, handler: InterruptHandler) -> Result<(), InterruptError>`:
+/// Belirtilen kesme numarası için bir kesme işleyicisini kaydeder.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `interrupt_num` geçerli ve ayrılmış bir kesme vektör numarası olmalıdır.
+/// - İşleyicinin kodu kesme bağlamında güvenli bir şekilde çalışmalıdır (örn. çok uzun sürmemeli, kilitlenmeleri tetiklememeli).
+/// - Aynı kesme numarasını iki kez kaydetmek beklenmedik davranışlara neden olabilir.
+/// - Çekirdek düzeyindeki veri yapılarına erişim gerektirir.
+pub unsafe fn register_handler(interrupt_num: u32, handler: InterruptHandler) -> Result<(), InterruptError> {
+    if interrupt_num >= MAX_INTERRUPT_NUMBER {
+        return Result::Err(InterruptError::InvalidInterruptNumber(
+            format!("Interrupt number {} is out of range (0-{})", interrupt_num.to_string(), (MAX_INTERRUPT_NUMBER - 1).to_string())
+        ));
+    }
+
+    // Gerçekte, bu işlem genellikle bir Kesme Tanımlayıcı Tablosu (IDT) veya
+    // Vektör Tablosu'nu (Vector Table) doğrudan modifiye etmeyi içerir.
+    // Bu, çekirdek ayrıcalıkları gerektirir.
+
+    if INTERRUPT_HANDLERS[interrupt_num as usize].is_some() {
+        return Result::Err(InterruptError::HandlerAlreadyRegistered(
+            format!("Handler for interrupt {} is already registered.", interrupt_num.to_string())
+        ));
+    }
+
+    INTERRUPT_HANDLERS[interrupt_num as usize] = Option::Some(handler);
+    io::println(&format!("OS_API: Registered handler for interrupt {}.", interrupt_num.to_string()));
+    Result::Ok(())
+}
+
+/// `unregister_handler(interrupt_num: u32) -> Result<(), InterruptError>`:
+/// Belirtilen kesme numarası için kayıtlı bir kesme işleyicisini kaldırır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `interrupt_num` geçerli bir kesme vektör numarası olmalıdır.
+/// - Var olmayan bir işleyiciyi kaldırmaya çalışmak hataya neden olabilir.
+/// - Çekirdek düzeyindeki veri yapılarına erişim gerektirir.
+pub unsafe fn unregister_handler(interrupt_num: u32) -> Result<(), InterruptError> {
+    if interrupt_num >= MAX_INTERRUPT_NUMBER {
+        return Result::Err(InterruptError::InvalidInterruptNumber(
+            format!("Interrupt number {} is out of range (0-{})", interrupt_num.to_string(), (MAX_INTERRUPT_NUMBER - 1).to_string())
+        ));
+    }
+
+    if INTERRUPT_HANDLERS[interrupt_num as usize].is_none() {
+        return Result::Err(InterruptError::Custom(
+            format!("No handler registered for interrupt {}.", interrupt_num.to_string())
+        ));
+    }
+
+    INTERRUPT_HANDLERS[interrupt_num as usize] = Option::None;
+    io::println(&format!("OS_API: Unregistered handler for interrupt {}.", interrupt_num.to_string()));
+    Result::Ok(())
+}
+
+/// `enable_interrupts() -> Result<(), InterruptError>`:
+/// CPU'nun genel kesme bayrağını ayarlar, böylece kesmeler işlenebilir hale gelir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - Kesmelerin yanlış zamanda etkinleştirilmesi, sistemin kararsız hale gelmesine yol açabilir.
+/// - Çekirdek ayrıcalıkları gerektirir.
+pub unsafe fn enable_interrupts() -> Result<(), InterruptError> {
+    // Varsayımsal olarak CPU'nun FLAGS/EFLAGS/RFLAGS kaydını manipüle eder.
+    // X86'da `sti` (set interrupt flag) komutu.
+    io::println("OS_API: Enabling CPU interrupts.".to_string());
+     if !os_api::enable_cpu_interrupts() {
+        return Result::Err(InterruptError::OsError(
+            SystemError::new(os_api::get_last_error_code(), "Failed to enable interrupts".to_string())
+        ));
+     }
+    Result::Ok(())
+}
+
+/// `disable_interrupts() -> Result<(), InterruptError>`:
+/// CPU'nun genel kesme bayrağını temizler, böylece kesmeler geçici olarak engellenir.
+/// Kritik bölümlerin atomik olarak işlenmesi için kullanılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - Kesmelerin çok uzun süre devre dışı bırakılması, sistem duyarlılığını azaltabilir,
+///   zamanlama hatalarına ve donma/kilitlenmelere yol açabilir.
+/// - Çekirdek ayrıcalıkları gerektirir.
+pub unsafe fn disable_interrupts() -> Result<(), InterruptError> {
+    // Varsayımsal olarak CPU'nun FLAGS/EFLAGS/RFLAGS kaydını manipüle eder.
+    // X86'da `cli` (clear interrupt flag) komutu.
+    io::println("OS_API: Disabling CPU interrupts.".to_string());
+     if !os_api::disable_cpu_interrupts() {
+        return Result::Err(InterruptError::OsError(
+            SystemError::new(os_api::get_last_error_code(), "Failed to disable interrupts".to_string())
+        ));
+     }
+    Result::Ok(())
+}
+
+/// `trigger_software_interrupt(interrupt_num: u32) -> Result<(), InterruptError>`:
+/// Belirtilen yazılımsal kesmeyi tetikler.
+/// Genellikle sistem çağrıları (syscall) veya hata ayıklama için kullanılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - Geçersiz bir kesme numarası, tanımsız davranışlara yol açabilir.
+/// - Bazı kesmelerin tetiklenmesi, özel ayrıcalıklar gerektirebilir veya sistem kararlılığını bozabilir.
+pub unsafe fn trigger_software_interrupt(interrupt_num: u32) -> Result<(), InterruptError> {
+    if interrupt_num >= MAX_INTERRUPT_NUMBER {
+        return Result::Err(InterruptError::InvalidInterruptNumber(
+            format!("Interrupt number {} is out of range (0-{})", interrupt_num.to_string(), (MAX_INTERRUPT_NUMBER - 1).to_string())
+        ));
+    }
+
+    // Varsayımsal olarak CPU'ya bir yazılımsal kesme komutu gönderir.
+    // X86'da `int N` komutu.
+    io::println(&format!("OS_API: Triggering software interrupt {}.", interrupt_num.to_string()));
+    
+    // Gerçekte, bu çağrı CPU tarafından yakalanır ve ilgili işleyiciye yönlendirilir.
+    // Eğer bir işleyici kayıtlıysa onu çağırırız.
+    if let Option::Some(handler) = INTERRUPT_HANDLERS[interrupt_num as usize] {
+        io::println(&format!("  -> Calling handler for interrupt {}.", interrupt_num.to_string()));
+        handler(); // Kesme işleyicisini çağır
+    } else {
+        io::println(&format!("  -> No handler registered for interrupt {}. Default action (e.g., panic) would occur.", interrupt_num.to_string()));
+        // Gerçek bir OS'ta burada bir panic (çekirdek paniği) veya varsayılan hata işleyici tetiklenirdi.
+    }
+    Result::Ok(())
+}
+
+// --- Örnek Kullanım ---
+
+import std::interrupt::{self, InterruptHandler, ProtectionFlags, InterruptError};
+import std::io;
+import std::string::String;
+import std::vec::Vec; // For the static INTERRUPT_HANDLERS
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing
+
+// Dummy `std::ptr` for null_mut from memory_protection example
+pub mod std {
+    pub mod ptr {
+        pub fn null_mut<T>() -> *mut T {
+            0 as *mut T
+        }
+    }
+}
+
+// Örnek Kesme İşleyicileri
+fn timer_interrupt_handler() {
+    io::println("  (Kernel) Timer interrupt received!".to_string());
+    // Zamanlayıcı kesme işleyicisi: görev zamanlayıcıyı tetikle, zamanı güncelle vb.
+}
+
+fn keyboard_interrupt_handler() {
+    io::println("  (Kernel) Keyboard interrupt received!".to_string());
+    // Klavye kesme işleyicisi: klavye tamponundan karakter oku vb.
+}
+
+fn custom_software_interrupt_handler() {
+    io::println("  (Application) Custom software interrupt (INT 0x80) received!".to_string());
+    // Bu genellikle bir sistem çağrısı işleyicisi olurdu.
+    // Parametreleri okuyup ilgili sistem hizmetini çağırır.
+}
+
+fn divide_by_zero_handler() {
+    io::println("  (Kernel) DIVIDE BY ZERO ERROR! Program will terminate.".to_string());
+    // Hata işleyici: hata mesajı yazdır, programı güvenli bir şekilde sonlandır.
+    // std::process::exit(1); // Varsayımsal
+}
+
+
+fn main() {
+    io::println("Starting Interrupt Management example...".to_string());
+
+    // Interrupt modülünü başlat
+    interrupt::init();
+
+    // UNSAFE BLOCK - Kesme işleyicilerini kaydetmek ve kesmeleri yönetmek unsafe'dir.
+    unsafe {
+        io::println("\n--- Registering Interrupt Handlers ---".to_string());
+
+        // Zamanlayıcı kesme işleyicisini kaydet (örneğin INT 0x20)
+        match interrupt::register_handler(0x20, timer_interrupt_handler) {
+            Result::Ok(_) => io::println("Timer interrupt handler registered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error registering timer handler: {}", e.description())),
+        }
+
+        // Klavye kesme işleyicisini kaydet (örneğin INT 0x21)
+        match interrupt::register_handler(0x21, keyboard_interrupt_handler) {
+            Result::Ok(_) => io::println("Keyboard interrupt handler registered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error registering keyboard handler: {}", e.description())),
+        }
+
+        // Özel yazılım kesme işleyicisini kaydet (örneğin INT 0x80 - Linux syscall gibi)
+        match interrupt::register_handler(0x80, custom_software_interrupt_handler) {
+            Result::Ok(_) => io::println("Custom software interrupt handler registered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error registering custom handler: {}", e.description())),
+        }
+        
+        // Sıfıra bölme hatası işleyicisini kaydet (örneğin INT 0x00)
+        match interrupt::register_handler(0x00, divide_by_zero_handler) {
+            Result::Ok(_) => io::println("Divide-by-zero handler registered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error registering divide-by-zero handler: {}", e.description())),
+        }
+
+        // Zaten kayıtlı olan bir numarayı tekrar kaydetmeye çalış
+        match interrupt::register_handler(0x20, timer_interrupt_handler) {
+            Result::Ok(_) => io::println("This should not happen: Timer handler re-registered.".to_string()),
+            Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: HandlerAlreadyRegistered
+        }
+
+        io::println("\n--- Enabling/Disabling Interrupts ---".to_string());
+
+        // Kesmeleri devre dışı bırak
+        match interrupt::disable_interrupts() {
+            Result::Ok(_) => io::println("Interrupts disabled.".to_string()),
+            Result::Err(e) => io::println(&format!("Error disabling interrupts: {}", e.description())),
+        }
+
+        // Kritik işlem (örneğin, paylaşılan veri yapısına atomik erişim)
+        io::println("Performing critical operation with interrupts disabled...".to_string());
+
+        // Kesmeleri etkinleştir
+        match interrupt::enable_interrupts() {
+            Result::Ok(_) => io::println("Interrupts enabled.".to_string()),
+            Result::Err(e) => io::println(&format!("Error enabling interrupts: {}", e.description())),
+        }
+
+        io::println("\n--- Triggering Software Interrupts (Simulated) ---".to_string());
+
+        // Zamanlayıcı kesmesini simüle et (uygun zamanlayıcı donanımını tetikleyerek)
+        io::println("Simulating a timer interrupt (INT 0x20)...".to_string());
+        match interrupt::trigger_software_interrupt(0x20) {
+            Result::Ok(_) => io::println("Simulated interrupt triggered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error triggering interrupt: {}", e.description())),
+        }
+
+        // Özel yazılım kesmesini tetikle (sistem çağrısını simüle et)
+        io::println("\nTriggering custom software interrupt (INT 0x80)...".to_string());
+        match interrupt::trigger_software_interrupt(0x80) {
+            Result::Ok(_) => io::println("Custom interrupt triggered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error triggering custom interrupt: {}", e.description())),
+        }
+
+        // Kayıtlı olmayan bir kesmeyi tetiklemeye çalış
+        io::println("\nTriggering unregistered interrupt (INT 0xFF)...".to_string());
+        match interrupt::trigger_software_interrupt(0xFF) {
+            Result::Ok(_) => io::println("Unregistered interrupt triggered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error triggering unregistered interrupt: {}", e.description())), // Expected: No handler registered
+        }
+
+        // Sıfıra bölme hatasını simüle et
+        io::println("\nSimulating a divide-by-zero error (INT 0x00)...".to_string());
+        match interrupt::trigger_software_interrupt(0x00) {
+            Result::Ok(_) => io::println("Divide-by-zero interrupt triggered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error triggering divide-by-zero interrupt: {}", e.description())),
+        }
+
+        // --- Unregistering Handlers ---
+        io::println("\n--- Unregistering Interrupt Handlers ---".to_string());
+
+        match interrupt::unregister_handler(0x20) {
+            Result::Ok(_) => io::println("Timer interrupt handler unregistered.".to_string()),
+            Result::Err(e) => io::println(&format!("Error unregistering handler: {}", e.description())),
+        }
+
+        match interrupt::unregister_handler(0x20) { // Tekrar kaldırmaya çalış
+            Result::Ok(_) => io::println("This should not happen: Timer handler re-unregistered.".to_string()),
+            Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: No handler registered
+        }
+    }
+
+    io::println("\nInterrupt Management example finished.".to_string());
+}
