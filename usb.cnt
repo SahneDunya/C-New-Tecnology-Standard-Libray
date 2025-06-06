@@ -1,0 +1,682 @@
+// usb.cnt
+// Evrensel Seri Yol (USB) Modülü
+// USB ana bilgisayar veya cihaz işlevselliği için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli USB denetleyicisi donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::collections::HashMap; // Uç nokta (endpoint) geri çağırmalarını saklamak için (varsayımsal)
+import std::vec::Vec;      // Veri tamponları için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::usb_controller` gibi bir kütüphane/modül aracılığıyla.
+
+/// `UsbError`: USB işlemleri sırasında oluşabilecek hata türleri.
+pub enum UsbError {
+    /// Geçersiz USB yapılandırması veya parametreleri.
+    InvalidConfig(String),
+    /// USB birimi başlatılmadı veya yapılandırılmadı.
+    NotInitialized(String),
+    /// USB meşgul veya kilitlenmiş.
+    Busy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Zaman aşımı hatası.
+    Timeout(String),
+    /// Transfer hatası (örneğin, NAK, STALL, CRC hatası).
+    TransferError(String),
+    /// Uç nokta zaten kullanımda veya geçersiz.
+    InvalidEndpoint(String),
+    /// Cihaz takılı değil veya bağlantı kesildi.
+    DeviceDisconnected(String),
+    /// Geri çağırma (callback) hatası.
+    CallbackError(String),
+    /// Genel bir USB hatası.
+    Custom(String),
+}
+
+impl Error for UsbError {
+    fn description(&self) -> String {
+        match self {
+            UsbError::InvalidConfig(msg) => format!("Invalid USB Configuration: {}", msg),
+            UsbError::NotInitialized(msg) => format!("USB Not Initialized: {}", msg),
+            UsbError::Busy(msg) => format!("USB Busy: {}", msg),
+            UsbError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            UsbError::Timeout(msg) => format!("USB Timeout: {}", msg),
+            UsbError::TransferError(msg) => format!("USB Transfer Error: {}", msg),
+            UsbError::InvalidEndpoint(msg) => format!("Invalid USB Endpoint: {}", msg),
+            UsbError::DeviceDisconnected(msg) => format!("USB Device Disconnected: {}", msg),
+            UsbError::CallbackError(msg) => format!("USB Callback Error: {}", msg),
+            UsbError::Custom(msg) => format!("USB Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `UsbRole`: USB denetleyicisinin çalışma rolü.
+pub enum UsbRole {
+    /// USB Ana Bilgisayar (Host): Çevre birimlerini bağlar ve yönetir (örneğin, bilgisayar).
+    Host,
+    /// USB Cihaz (Device): Ana bilgisayara bağlanır (örneğin, klavye, fare, USB bellek).
+    Device,
+    /// Hem Ana Bilgisayar hem de Cihaz rolünü destekler (OTG - On-The-Go).
+    /// Genellikle daha karmaşık donanım gerektirir.
+    Otg,
+}
+
+/// `UsbSpeed`: USB iletişim hızı.
+pub enum UsbSpeed {
+    /// Düşük Hız (Low-Speed): 1.5 Mbps
+    LowSpeed,
+    /// Tam Hız (Full-Speed): 12 Mbps
+    FullSpeed,
+    /// Yüksek Hız (High-Speed): 480 Mbps (USB 2.0)
+    HighSpeed,
+    // SuperSpeed: 5 Gbps (USB 3.0) - Bu örnekte yer almaz, karmaşıklığı artırır.
+}
+
+/// `EndpointType`: USB Uç Noktasının (Endpoint) türü.
+/// Uç noktalar, USB cihazındaki veri yollarıdır.
+pub enum EndpointType {
+    /// Kontrol Uç Noktası: Cihaz yapılandırması ve durumu için kullanılır.
+    Control,
+    /// Kesme Uç Noktası: Küçük, düzenli, düşük gecikmeli veri (örn. klavye girişi) için.
+    Interrupt,
+    /// Toplu (Bulk) Uç Noktası: Büyük, güvenilir, hataya dayanıklı veri (örn. depolama) için.
+    Bulk,
+    /// Eşzamanlı (Isochronous) Uç Noktası: Zaman hassasiyeti olan, hata toleranslı veri (örn. ses/video) için.
+    Isochronous,
+}
+
+/// `EndpointDirection`: USB Uç Noktasının veri yönü.
+pub enum EndpointDirection {
+    /// Veri, Ana Bilgisayardan Cihaza (OUT) veya Cihazdan Ana Bilgisayara (IN) olabilir.
+    /// Uç nokta numarası ve yönü birleştirilerek benzersiz bir adres oluşturulur.
+    Out, // Ana bilgisayardan cihaza veya host mode'da cihazdan okunur
+    In,  // Cihazdan ana bilgisayara veya host mode'da cihaza yazılır
+}
+
+/// `EndpointConfig`: Bir USB Uç Noktasının yapılandırma ayarları.
+pub struct EndpointConfig {
+    pub address: u8, // Uç nokta adresi (0-15), bit 7 yön için kullanılır (örn. 0x81 IN, 0x01 OUT)
+    pub ep_type: EndpointType,
+    pub direction: EndpointDirection,
+    pub max_packet_size: u16, // Uç noktanın tek bir işlemde gönderebileceği/alabileceği maksimum bayt sayısı
+    pub interval_ms: u8,      // Kesme ve Eşzamanlı uç noktalar için polling aralığı (milisaniye)
+}
+
+/// `UsbConfig`: USB denetleyicisinin genel yapılandırma ayarları.
+pub struct UsbConfig {
+    pub role: UsbRole,
+    pub speed: UsbSpeed,
+    pub max_endpoints: u8, // Desteklenen maksimum uç nokta sayısı (donanıma bağlı)
+    // Diğer yapılandırma ayarları (örn. USB OTG için VBUS algılama pini, vb.)
+}
+
+impl Default for UsbConfig {
+    fn default() -> UsbConfig {
+        UsbConfig {
+            role: UsbRole::Device, // Varsayılan olarak cihaz modu
+            speed: UsbSpeed::FullSpeed, // Varsayılan olarak tam hız
+            max_endpoints: 4, // Varsayılan olarak 4 uç nokta (0 kontrol, 3 diğer)
+        }
+    }
+}
+
+/// `Usb`: USB denetleyicisini temsil eden yapı.
+pub struct Usb {
+    id: u8, // USB birimi ID'si (örneğin USB0)
+    config: UsbConfig,
+    is_initialized: bool,
+    is_active: bool, // USB iletişim kuruyor mu?
+    // endpoint_callbacks: HashMap<u8, fn(u8, Result<usize, UsbError>)>, // Uç nokta ID'sine göre callback'ler (ID: 0-15)
+    // Gerçek bir implementasyonda, burada USB denetleyicisinin register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+}
+
+// Varsayımsal global statik depolama alanı ve kilit mekanizması
+// Gerçek bir OS/HAL ortamında, bu statik değerler daha güvenli ve donanım tarafından
+// yönetilen yapılara veya singleton'lara bağlanacaktır.
+static mut USB_INSTANCE: Option<Usb> = Option::None; // Tek bir USB örneği için (singleton)
+static mut ENDPOINT_CALLBACKS: Option<HashMap<u8, fn(u8, Result<usize, UsbError>)>> = Option::None; // Uç nokta ID'sine göre callback'ler
+
+/// `init(usb_id: u8, config: UsbConfig) -> Result<(), UsbError>`:
+/// USB modülünü başlatır ve belirtilen USB birimini yapılandırır.
+/// Yalnızca bir kez çağrılmalıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım USB denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init(usb_id: u8, config: UsbConfig) -> Result<(), UsbError> {
+    if USB_INSTANCE.is_some() {
+        return Result::Err(UsbError::Custom("USB module already initialized.".to_string()));
+    }
+    if usb_id >= MAX_USB_UNITS { // MAX_USB_UNITS tanımlanmış bir sabit olmalı
+        return Result::Err(UsbError::InvalidConfig(
+            format!("USB ID {} is out of range.", usb_id.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Initializing USB Controller Unit {} with role {:?} and speed {:?}.",
+        usb_id.to_string(), config.role, config.speed));
+    // Gerçekte, USB denetleyicisi (USB Controller) burada başlatılır, saatleri açılır,
+    // ve varsayılan ayarlar (rol, hız) yapılır.
+     os_api::usb_controller_init(usb_id, &config);
+
+    // Callback HashMap'ini başlat
+    ENDPOINT_CALLBACKS = Option::Some(HashMap::new());
+
+    let usb = Usb {
+        id: usb_id,
+        config,
+        is_initialized: true,
+        is_active: false,
+    };
+    USB_INSTANCE = Option::Some(usb);
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), UsbError>`:
+/// USB modülünü devre dışı bırakır ve tüm aktif iletişimleri durdurur, kaynakları serbest bırakır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım USB denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), UsbError> {
+    if USB_INSTANCE.is_none() {
+        return Result::Err(UsbError::NotInitialized("USB module not initialized.".to_string()));
+    }
+
+    io::println("HW_API: De-initializing USB Controller.".to_string());
+     os_api::usb_disable_controller(USB_INSTANCE.as_ref().unwrap().id);
+
+    ENDPOINT_CALLBACKS = Option::None;
+    USB_INSTANCE = Option::None;
+    Result::Ok(())
+}
+
+impl Usb {
+    /// `get_instance() -> Result<&'static mut Usb, UsbError>`:
+    /// Başlatılmış USB örneğine erişim sağlar (Singleton deseni).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `USB_INSTANCE`'a mutlak erişim sağladığından güvenli değildir.
+    pub unsafe fn get_instance() -> Result<&'static mut Usb, UsbError> {
+        if let Option::Some(ref mut usb) = USB_INSTANCE {
+            Result::Ok(usb)
+        } else {
+            Result::Err(UsbError::NotInitialized("USB module not initialized. Call init() first.".to_string()))
+        }
+    }
+
+    /// `enable(&mut self) -> Result<(), UsbError>`:
+    /// USB denetleyicisini etkinleştirir ve USB bağlantılarını dinlemeye/yapmaya başlar.
+    /// Cihaz modunda, ana bilgisayara bağlanmak için D+/D- hatlarını etkinleştirir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım USB kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn enable(&mut self) -> Result<(), UsbError> {
+        if !self.is_initialized {
+            return Result::Err(UsbError::NotInitialized("USB not initialized.".to_string()));
+        }
+        if self.is_active {
+            return Result::Err(UsbError::Busy("USB is already enabled.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Enabling USB Unit {}.", self.id.to_string()));
+         os_api::usb_enable(self.id);
+        self.is_active = true;
+        Result::Ok(())
+    }
+
+    /// `disable(&mut self) -> Result<(), UsbError>`:
+    /// USB denetleyicisini devre dışı bırakır ve aktif iletişimleri keser.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım USB kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn disable(&mut self) -> Result<(), UsbError> {
+        if !self.is_active {
+            return Result::Err(UsbError::NotInitialized("USB is not enabled.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Disabling USB Unit {}.", self.id.to_string()));
+         os_api::usb_disable(self.id);
+        self.is_active = false;
+        Result::Ok(())
+    }
+
+    /// `configure_endpoint(&mut self, ep_config: &EndpointConfig) -> Result<(), UsbError>`:
+    /// Belirtilen yapılandırmaya sahip bir USB uç noktasını (endpoint) başlatır veya yeniden yapılandırır.
+    /// Uç noktalar, USB iletişiminin temel kanallarıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım USB uç nokta kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn configure_endpoint(&mut self, ep_config: &EndpointConfig) -> Result<(), UsbError> {
+        if !self.is_initialized {
+            return Result::Err(UsbError::NotInitialized("USB not initialized.".to_string()));
+        }
+        if ep_config.address >= self.config.max_endpoints {
+            return Result::Err(UsbError::InvalidEndpoint(
+                format!("Endpoint address {} is out of range for this USB controller.", ep_config.address.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Configuring USB Endpoint {} (Type: {:?}, Dir: {:?}, MaxPktSize: {}) for Unit {}.",
+            ep_config.address.to_string(), ep_config.ep_type, ep_config.direction,
+            ep_config.max_packet_size.to_string(), self.id.to_string()));
+         os_api::usb_configure_endpoint(self.id, ep_config);
+        Result::Ok(())
+    }
+
+    /// `send_data(&mut self, endpoint_addr: u8, data: &[u8]) -> Result<usize, UsbError>`:
+    /// Belirtilen USB uç noktası üzerinden veri gönderir (OUT veya IN yönlü, duruma göre).
+    /// `endpoint_addr` genellikle 0-15 arasında bir değerdir, yönü 7. bit belirler (0x80 IN, 0x00 OUT).
+    /// Döndürülen `usize`, başarıyla gönderilen bayt sayısıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bellek tamponları ve donanım USB kayıtları ile doğrudan çalıştığından güvenli değildir.
+    pub unsafe fn send_data(&mut self, endpoint_addr: u8, data: &[u8]) -> Result<usize, UsbError> {
+        if !self.is_active {
+            return Result::Err(UsbError::NotInitialized("USB is not enabled.".to_string()));
+        }
+        if data.is_empty() {
+            return Result::Ok(0);
+        }
+        if (endpoint_addr & 0x7F) >= self.config.max_endpoints { // Adres kontrolü
+            return Result::Err(UsbError::InvalidEndpoint(
+                format!("Endpoint address {} is out of range for this USB controller.", (endpoint_addr & 0x7F).to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Sending {} bytes to USB Endpoint 0x{:X} on Unit {}.",
+            data.len().to_string(), endpoint_addr.to_string(), self.id.to_string()));
+         os_api::usb_send_data(self.id, endpoint_addr, data); // Bu bloklar
+        // Verinin donanım FIFO'suna veya DMA tamponuna yazılması
+        // Transferin başlatılması
+
+        // Simülasyon: Başarıyla gönderildiğini varsayalım
+        Result::Ok(data.len())
+    }
+
+    /// `receive_data(&mut self, endpoint_addr: u8, buffer: &mut [u8]) -> Result<usize, UsbError>`:
+    /// Belirtilen USB uç noktasından veri alır (IN veya OUT yönlü, duruma göre).
+    /// Alınan bayt sayısı döndürülür.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bellek tamponları ve donanım USB kayıtları ile doğrudan çalıştığından güvenli değildir.
+    pub unsafe fn receive_data(&mut self, endpoint_addr: u8, buffer: &mut [u8]) -> Result<usize, UsbError> {
+        if !self.is_active {
+            return Result::Err(UsbError::NotInitialized("USB is not enabled.".to_string()));
+        }
+        if buffer.is_empty() {
+            return Result::Ok(0);
+        }
+        if (endpoint_addr & 0x7F) >= self.config.max_endpoints {
+            return Result::Err(UsbError::InvalidEndpoint(
+                format!("Endpoint address {} is out of range for this USB controller.", (endpoint_addr & 0x7F).to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Receiving data from USB Endpoint 0x{:X} on Unit {} (Buffer size: {}).",
+            endpoint_addr.to_string(), self.id.to_string(), buffer.len().to_string()));
+         os_api::usb_receive_data(self.id, endpoint_addr, buffer); // Bu bloklar
+        // Verinin donanım FIFO'sundan veya DMA tamponundan okunması
+        // Transferin başlatılması
+
+        // Simülasyon: Rastgele baytlar alalım
+        let received_len = std::cmp::min(buffer.len(), 8); // Simülasyon için 8 bayt alalım
+        for i in 0..received_len {
+            buffer[i] = (i + endpoint_addr) as u8; // Basit örnek veri
+        }
+        Result::Ok(received_len)
+    }
+
+    /// `register_endpoint_callback(&self, endpoint_addr: u8, callback: fn(u8, Result<usize, UsbError>)) -> Result<(), UsbError>`:
+    /// Belirli bir uç nokta için bir veri transferi tamamlandığında veya bir hata oluştuğunda
+    /// çağrılacak bir geri çağırma (callback) fonksiyonu kaydeder.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `ENDPOINT_CALLBACKS` HashMap'ini değiştirdiğinden güvenli değildir.
+    /// `callback` fonksiyonunun kesme güvenli (async-signal-safe) olması kritik öneme sahiptir.
+    pub unsafe fn register_endpoint_callback(&self, endpoint_addr: u8, callback: fn(u8, Result<usize, UsbError>)) -> Result<(), UsbError> {
+        if !self.is_initialized {
+            return Result::Err(UsbError::NotInitialized("USB module not initialized.".to_string()));
+        }
+        let callbacks = ENDPOINT_CALLBACKS.as_mut().ok_or(UsbError::Custom("Callback map not available.".to_string()))?;
+        if callbacks.contains_key(&endpoint_addr) {
+            return Result::Err(UsbError::CallbackError(
+                format!("Callback already registered for Endpoint 0x{:X}.", endpoint_addr.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Registering callback for USB Endpoint 0x{:X} on Unit {}.", endpoint_addr.to_string(), self.id.to_string()));
+         os_api::usb_enable_endpoint_interrupt(self.id, endpoint_addr); // Uç nokta kesmelerini etkinleştir
+        callbacks.insert(endpoint_addr, callback);
+        Result::Ok(())
+    }
+
+    /// `unregister_endpoint_callback(&self, endpoint_addr: u8) -> Result<(), UsbError>`:
+    /// Belirli bir uç nokta için kayıtlı geri çağırma fonksiyonunu kaldırır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `ENDPOINT_CALLBACKS` HashMap'ini değiştirdiğinden güvenli değildir.
+    pub unsafe fn unregister_endpoint_callback(&self, endpoint_addr: u8) -> Result<(), UsbError> {
+        if !self.is_initialized {
+            return Result::Err(UsbError::NotInitialized("USB module not initialized.".to_string()));
+        }
+        let callbacks = ENDPOINT_CALLBACKS.as_mut().ok_or(UsbError::Custom("Callback map not available.".to_string()))?;
+        if !callbacks.contains_key(&endpoint_addr) {
+            return Result::Err(UsbError::CallbackError(
+                format!("No callback registered for Endpoint 0x{:X}.", endpoint_addr.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Unregistering callback for USB Endpoint 0x{:X} on Unit {}.", endpoint_addr.to_string(), self.id.to_string()));
+        // os_api::usb_disable_endpoint_interrupt(self.id, endpoint_addr);
+        callbacks.remove(&endpoint_addr);
+        Result::Ok(())
+    }
+
+    /// `set_device_address(&mut self, address: u8) -> Result<(), UsbError>`:
+    /// USB cihaz modunda, ana bilgisayar tarafından atanan cihaz adresini ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım USB kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_device_address(&mut self, address: u8) -> Result<(), UsbError> {
+        if !self.is_initialized || self.config.role != UsbRole::Device {
+            return Result::Err(UsbError::InvalidConfig("USB not initialized or not in Device role.".to_string()));
+        }
+        if address > 127 { // USB adresleri 1-127 arası geçerlidir, 0 atanmamış demektir
+            return Result::Err(UsbError::InvalidConfig("Invalid USB device address.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Setting USB Device address to {}.", address.to_string()));
+         os_api::usb_set_device_address(self.id, address);
+        Result::Ok(())
+    }
+
+    /// `_simulate_endpoint_interrupt(usb_id: u8, endpoint_addr: u8, success: bool, transferred_bytes: usize)`:
+    /// Bu fonksiyon, geliştirme ve test amacıyla bir USB uç nokta transfer tamamlama/hata kesmesini simüle etmek için kullanılır.
+    /// Gerçek bir donanım üzerinde çağrılmamalıdır!
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Normalde donanım tarafından tetiklenecek bir olayı manuel olarak tetiklediğinden güvenli değildir.
+    /// Sadece test senaryoları için kullanılır.
+    pub unsafe fn _simulate_endpoint_interrupt(usb_id: u8, endpoint_addr: u8, success: bool, transferred_bytes: usize) {
+        io::println(&format!("SIMULATION: USB Interrupt triggered for Endpoint 0x{:X}. Success: {}, Bytes: {}",
+            endpoint_addr.to_string(), success.to_string(), transferred_bytes.to_string()));
+        if let Option::Some(usb) = &mut USB_INSTANCE {
+            if usb.id == usb_id {
+                if let Option::Some(callbacks) = ENDPOINT_CALLBACKS.as_ref() {
+                    if let Option::Some(callback) = callbacks.get(&endpoint_addr) {
+                        if success {
+                            callback(endpoint_addr, Result::Ok(transferred_bytes));
+                        } else {
+                            callback(endpoint_addr, Result::Err(UsbError::TransferError(format!("Simulated error on Endpoint 0x{:X}.", endpoint_addr.to_string()))));
+                        }
+                    } else {
+                        io::println(&format!("SIMULATION WARNING: No callback registered for USB Endpoint 0x{:X}.", endpoint_addr.to_string()));
+                    }
+                }
+            } else {
+                io::println(&format!("SIMULATION WARNING: USB ID {} does not match current instance ID {}.", usb_id.to_string(), usb.id.to_string()));
+            }
+        } else {
+            io::println("SIMULATION WARNING: USB module not initialized. Cannot simulate.".to_string());
+        }
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum USB denetleyici birimi sayısını belirtir.
+const MAX_USB_UNITS: u8 = 1; // Genellikle tek bir USB denetleyici birimi olur.
+
+
+// --- Örnek Kullanım ---
+/*
+import std::usb::{self, Usb, UsbConfig, UsbRole, UsbSpeed, UsbError, EndpointConfig, EndpointType, EndpointDirection};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+import std::vec::Vec; // For Vec::new()
+import std::collections::HashMap; // For HashMap
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+    // Simple comparison for vectors (needed for PartialEq on &[u8])
+    pub mod cmp {
+        pub fn min<T: PartialOrd>(a: T, b: T) -> T {
+            if a < b { a } else { b }
+        }
+    }
+}
+
+// Global flag to indicate transfer completion (for synchronous waiting example)
+static mut EP_TRANSFER_DONE: HashMap<u8, bool> = HashMap::new();
+
+// USB Endpoint Transfer Tamamlama Geri Çağırması (Callback)
+fn usb_ep_completion_callback(endpoint_addr: u8, result: Result<usize, UsbError>) {
+    unsafe {
+        match result {
+            Result::Ok(bytes_transferred) => {
+                io::println(&format!("  >>> USB Callback: Endpoint 0x{:X} Transfer Completed Successfully! Transferred: {} bytes.",
+                    endpoint_addr.to_string(), bytes_transferred.to_string()));
+                EP_TRANSFER_DONE.insert(endpoint_addr, true);
+            },
+            Result::Err(e) => {
+                io::println(&format!("  >>> USB Callback: Endpoint 0x{:X} Transfer Failed! Error: {}", endpoint_addr.to_string(), e.description()));
+                EP_TRANSFER_DONE.insert(endpoint_addr, true);
+            },
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting USB example...".to_string());
+
+    // UNSAFE BLOCK - USB altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        let usb_config = UsbConfig {
+            role: UsbRole::Device,
+            speed: UsbSpeed::FullSpeed,
+            max_endpoints: 4,
+        };
+
+        io::println("\n--- Initializing USB Module (as Device) ---".to_string());
+        match usb::init(0, usb_config) { // USB Unit 0
+            Result::Ok(_) => io::println("USB module initialized.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing USB module: {}", e.description()));
+                return;
+            }
+        }
+
+        let mut usb_instance: Option<&'static mut Usb> = Option::None;
+        match Usb::get_instance() {
+            Result::Ok(instance) => {
+                io::println("USB instance obtained.".to_string());
+                usb_instance = Option::Some(instance);
+            },
+            Result::Err(e) => io::println(&format!("Error getting USB instance: {}", e.description())),
+        }
+
+        if let Option::Some(usb) = usb_instance {
+            io::println("\n--- Configuring USB Endpoints ---".to_string());
+
+            // Endpoint 0: Kontrol Uç Noktası (varsayılan olarak zaten yapılandırılmış olabilir)
+            let ep0_config = EndpointConfig {
+                address: 0x00, // OUT yönlü (0x80 for IN, 0x00 for OUT)
+                ep_type: EndpointType::Control,
+                direction: EndpointDirection::Out,
+                max_packet_size: 64, // Control EP genellikle 8, 16, 32 veya 64 bayt destekler
+                interval_ms: 0,
+            };
+            match usb.configure_endpoint(&ep0_config) {
+                Result::Ok(_) => io::println("Endpoint 0 (Control) configured.".to_string()),
+                Result::Err(e) => io::println(&format!("Error configuring Endpoint 0: {}", e.description())),
+            }
+            // Endpoint 0 için hem IN hem OUT yönleri olabilir, genelde tek bir konfigürasyon yeterlidir.
+            // Ama gerçek bir USB sürücüsünde IN ve OUT FIFOs/tamponları ayrı ele alınır.
+            let ep0_in_config = EndpointConfig {
+                address: 0x80, // IN yönlü
+                ep_type: EndpointType::Control,
+                direction: EndpointDirection::In,
+                max_packet_size: 64,
+                interval_ms: 0,
+            };
+            match usb.configure_endpoint(&ep0_in_config) {
+                Result::Ok(_) => io::println("Endpoint 0 IN (Control) configured.".to_string()),
+                Result::Err(e) => io::println(&format!("Error configuring Endpoint 0 IN: {}", e.description())),
+            }
+
+
+            // Endpoint 1: Bulk OUT (Ana bilgisayardan cihaza veri alma)
+            let ep1_out_config = EndpointConfig {
+                address: 0x01,
+                ep_type: EndpointType::Bulk,
+                direction: EndpointDirection::Out,
+                max_packet_size: 64,
+                interval_ms: 0,
+            };
+            match usb.configure_endpoint(&ep1_out_config) {
+                Result::Ok(_) => io::println("Endpoint 1 (Bulk OUT) configured.".to_string()),
+                Result::Err(e) => io::println(&format!("Error configuring Endpoint 1: {}", e.description())),
+            }
+
+            // Endpoint 2: Bulk IN (Cihazdan ana bilgisayara veri gönderme)
+            let ep2_in_config = EndpointConfig {
+                address: 0x82, // 0x80 + 2
+                ep_type: EndpointType::Bulk,
+                direction: EndpointDirection::In,
+                max_packet_size: 64,
+                interval_ms: 0,
+            };
+            match usb.configure_endpoint(&ep2_in_config) {
+                Result::Ok(_) => io::println("Endpoint 2 (Bulk IN) configured.".to_string()),
+                Result::Err(e) => io::println(&format!("Error configuring Endpoint 2: {}", e.description())),
+            }
+
+            // USB'yi etkinleştir
+            io::println("\n--- Enabling USB Controller ---".to_string());
+            match usb.enable() {
+                Result::Ok(_) => io::println("USB controller enabled.".to_string()),
+                Result::Err(e) => io::println(&format!("Error enabling USB controller: {}", e.description())),
+            }
+
+            // Cihaz adresini ayarla (normalde ana bilgisayar tarafından atanır, simülasyon amaçlı)
+            io::println("\n--- Setting USB Device Address (Simulated) ---".to_string());
+            match usb.set_device_address(5) { // Örnek adres
+                Result::Ok(_) => io::println("USB device address set to 5.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting device address: {}", e.description())),
+            }
+
+            // Endpoint callback'lerini kaydet
+            io::println("\n--- Registering Endpoint Callbacks ---".to_string());
+            match usb.register_endpoint_callback(0x82, usb_ep_completion_callback) {
+                Result::Ok(_) => io::println("Callback registered for Endpoint 0x82 (Bulk IN).".to_string()),
+                Result::Err(e) => io::println(&format!("Error registering callback: {}", e.description())),
+            }
+            match usb.register_endpoint_callback(0x01, usb_ep_completion_callback) {
+                Result::Ok(_) => io::println("Callback registered for Endpoint 0x01 (Bulk OUT).".to_string()),
+                Result::Err(e) => io::println(&format!("Error registering callback: {}", e.description())),
+            }
+
+            // Veri Gönderme (Endpoint 0x82 - Bulk IN)
+            io::println("\n--- Sending Data via USB (Endpoint 0x82) ---".to_string());
+            let send_data: [u8; 10] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01, 0x23, 0x45, 0x67];
+            EP_TRANSFER_DONE.insert(0x82, false); // Bayrağı sıfırla
+            match usb.send_data(0x82, &send_data) {
+                Result::Ok(bytes_sent) => io::println(&format!("Send initiated for {} bytes. (Actually sent: {})", send_data.len().to_string(), bytes_sent.to_string())),
+                Result::Err(e) => io::println(&format!("Error initiating send: {}", e.description())),
+            }
+
+            // Simülasyon: Transferin tamamlanmasını bekle
+            io::println("Waiting for send transfer to complete (simulated)...".to_string());
+            let mut timeout_count = 0;
+            while !EP_TRANSFER_DONE.get(&0x82).unwrap_or(&false) && timeout_count < 5 {
+                std::spirit::sleep_ms(100);
+                // Gerçekte burada transferin tamamlanmasını bekleriz (kesme veya polling ile)
+                // For simulation, we'll manually trigger the interrupt.
+                usb::_simulate_endpoint_interrupt(usb.id, 0x82, true, send_data.len()); // Simüle et
+                timeout_count += 1;
+            }
+
+            // Veri Alma (Endpoint 0x01 - Bulk OUT)
+            io::println("\n--- Receiving Data via USB (Endpoint 0x01) ---".to_string());
+            let mut recv_buffer: [u8; 16] = [0; 16];
+            EP_TRANSFER_DONE.insert(0x01, false); // Bayrağı sıfırla
+            match usb.receive_data(0x01, &mut recv_buffer) {
+                Result::Ok(bytes_received) => io::println(&format!("Receive initiated. Received {} bytes: {:?}", bytes_received.to_string(), &recv_buffer[..bytes_received])),
+                Result::Err(e) => io::println(&format!("Error initiating receive: {}", e.description())),
+            }
+
+            // Simülasyon: Transferin tamamlanmasını bekle
+            io::println("Waiting for receive transfer to complete (simulated)...".to_string());
+            let mut timeout_count = 0;
+            while !EP_TRANSFER_DONE.get(&0x01).unwrap_or(&false) && timeout_count < 5 {
+                std::spirit::sleep_ms(100);
+                usb::_simulate_endpoint_interrupt(usb.id, 0x01, true, 8); // Simüle et (8 bayt aldık)
+                timeout_count += 1;
+            }
+
+            // Hata simülasyonu
+            io::println("\n--- Simulating a USB Endpoint Transfer Error ---".to_string());
+            EP_TRANSFER_DONE.insert(0x82, false); // Bayrağı sıfırla
+            usb::_simulate_endpoint_interrupt(usb.id, 0x82, false, 0); // Simüle et: hata oluştu
+
+            io::println("Waiting for error simulation to complete...".to_string());
+            while !EP_TRANSFER_DONE.get(&0x82).unwrap_or(&false) {
+                std::spirit::sleep_ms(50);
+            }
+
+            // Endpoint callback'lerini kaldır
+            io::println("\n--- Unregistering Endpoint Callbacks ---".to_string());
+            match usb.unregister_endpoint_callback(0x82) {
+                Result::Ok(_) => io::println("Callback unregistered for Endpoint 0x82.".to_string()),
+                Result::Err(e) => io::println(&format!("Error unregistering callback: {}", e.description())),
+            }
+            match usb.unregister_endpoint_callback(0x01) {
+                Result::Ok(_) => io::println("Callback unregistered for Endpoint 0x01.".to_string()),
+                Result::Err(e) => io::println(&format!("Error unregistering callback: {}", e.description())),
+            }
+
+            // USB'yi devre dışı bırak
+            io::println("\n--- Disabling USB Controller ---".to_string());
+            match usb.disable() {
+                Result::Ok(_) => io::println("USB controller disabled.".to_string()),
+                Result::Err(e) => io::println(&format!("Error disabling USB controller: {}", e.description())),
+            }
+        }
+
+        // Modülü de-initialize et
+        io::println("\n--- De-initializing USB Module ---".to_string());
+        match usb::deinit() {
+            Result::Ok(_) => io::println("USB module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing USB module: {}", e.description())),
+        }
+    }
+
+    io::println("\nUSB example finished.".to_string());
+}
