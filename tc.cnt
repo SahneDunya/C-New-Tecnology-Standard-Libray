@@ -1,0 +1,426 @@
+// tc.cnt
+// Zamanlayıcılar/Sayıcılar (Timers/Counters) Modülü
+// Zaman tabanlı olayları, periyodik görevleri ve sayma işlemlerini yönetmek için
+// bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli zamanlayıcı/sayıcı donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+// Ayrıca, frekans hesaplamaları için saat (clock) yönetimi modülüne ihtiyaç duyulabilir.
+
+/// `TcError`: Zamanlayıcı/Sayıcı işlemleri sırasında oluşabilecek hata türleri.
+pub enum TcError {
+    /// Geçersiz zamanlayıcı/sayıcı ID'si veya kanalı.
+    InvalidId(String),
+    /// Geçersiz parametre (örn. frekans, periyot).
+    InvalidParameter(String),
+    /// Zamanlayıcı/Sayıcı birimi meşgul veya zaten kullanımda.
+    TcBusy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Zamanlayıcı kalibre edilemedi veya başlatılamadı.
+    InitializationFailed(String),
+    /// Genel bir hata.
+    Custom(String),
+}
+
+impl Error for TcError {
+    fn description(&self) -> String {
+        match self {
+            TcError::InvalidId(msg) => format!("Invalid Timer/Counter ID: {}", msg),
+            TcError::InvalidParameter(msg) => format!("Invalid Timer/Counter Parameter: {}", msg),
+            TcError::TcBusy(msg) => format!("Timer/Counter Busy: {}", msg),
+            TcError::HardwareAccessError(msg) => format!("Timer/Counter Hardware Access Error: {}", msg),
+            TcError::InitializationFailed(msg) => format!("Timer/Counter Initialization Failed: {}", msg),
+            TcError::Custom(msg) => format!("Timer/Counter Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `TcMode`: Zamanlayıcının veya sayıcının çalışma modu.
+pub enum TcMode {
+    /// Zamanlayıcı modu: Belirli bir frekansta sayar ve periyodik olayları tetikler.
+    Timer,
+    /// Sayıcı modu: Harici pinlerden veya yazılım olaylarından gelen darbeleri sayar.
+    Counter,
+    /// PWM modu: PWM modülasyonu için özel bir zamanlayıcı modu.
+    /// (Bu genellikle `std::pwm` tarafından dahili olarak kullanılır.)
+    Pwm,
+}
+
+/// `TcPrescaler`: Zamanlayıcı giriş saatini bölmek için kullanılan ön ölçekleyici değeri.
+/// Bu, zamanlayıcının ne kadar hızlı saydığını belirler.
+pub enum TcPrescaler {
+    Div1,
+    Div8,
+    Div64,
+    Div256,
+    Div1024,
+    Custom(u16), // Özel bölücü değeri
+}
+
+impl TcPrescaler {
+    fn to_value(&self) -> u16 {
+        match self {
+            TcPrescaler::Div1 => 1,
+            TcPrescaler::Div8 => 8,
+            TcPrescaler::Div64 => 64,
+            TcPrescaler::Div256 => 256,
+            TcPrescaler::Div1024 => 1024,
+            TcPrescaler::Custom(val) => *val,
+        }
+    }
+}
+
+
+/// `TimerCounter`: Tek bir Zamanlayıcı/Sayıcı birimini veya kanalını temsil eden yapı.
+/// Bu yapı, TC'nin durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct TimerCounter {
+    id: u8, // Zamanlayıcı/Sayıcı birimi ID'si (örneğin TIMER0, TIMER1)
+    channel: u8, // Eğer TC birden fazla kanala sahipse (örneğin Capture/Compare kanalları)
+    current_mode: TcMode,
+    is_running: bool,
+    current_prescaler: TcPrescaler,
+    current_period: u32, // Sayma limit değeri (timer modunda)
+    // Gerçek bir implementasyonda, burada TC biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+}
+
+impl TimerCounter {
+    /// `new(id: u8, channel: u8) -> Result<TimerCounter, TcError>`:
+    /// Belirtilen ID ve kanal için yeni bir `TimerCounter` örneği oluşturur.
+    /// TC birimi başlangıçta varsayılan bir durumda (örn. durdurulmuş, varsayılan modda) olur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir zamanlayıcı/sayıcı birimini başlatmak,
+    /// ilgili donanımı yapılandırabilir ve varsayılan donanım kayıtlarını etkileyebilir.
+    pub unsafe fn new(id: u8, channel: u8) -> Result<TimerCounter, TcError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if id >= MAX_TC_UNITS || channel >= MAX_TC_CHANNELS {
+            return Result::Err(TcError::InvalidId(
+                format!("Invalid TC ID {} or Channel {}.", id.to_string(), channel.to_string())
+            ));
+        }
+
+        // TC donanımını başlat (saati aç, varsayılan kayıtları ayarla).
+        io::println(&format!("HW_API: Initializing Timer/Counter Unit {} Channel {}.", id.to_string(), channel.to_string()));
+         os_api::tc_init(id, channel);
+
+        Result::Ok(TimerCounter {
+            id,
+            channel,
+            current_mode: TcMode::Timer, // Varsayılan olarak zamanlayıcı modu
+            is_running: false,
+            current_prescaler: TcPrescaler::Div64, // Varsayılan ön ölçekleyici
+            current_period: 0, // Varsayılan periyot
+        })
+    }
+
+    /// `set_mode(&mut self, mode: TcMode) -> Result<(), TcError>`:
+    /// Zamanlayıcının/sayıcının çalışma modunu ayarlar (Zamanlayıcı veya Sayıcı).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_mode(&mut self, mode: TcMode) -> Result<(), TcError> {
+        io::println(&format!("HW_API: Setting TC Unit {} Channel {} mode to {:?}.",
+            self.id.to_string(), self.channel.to_string(), mode));
+        // Gerçekte, TC'nin mod ayar kaydına yazma işlemi gerçekleşir.
+         if !os_api::tc_set_mode(self.id, self.channel, mode) {
+             return Result::Err(TcError::HardwareAccessError("Failed to set TC mode.".to_string()));
+         }
+        self.current_mode = mode;
+        Result::Ok(())
+    }
+
+    /// `set_prescaler(&mut self, prescaler: TcPrescaler) -> Result<(), TcError>`:
+    /// Zamanlayıcı giriş saatini bölmek için kullanılan ön ölçekleyiciyi ayarlar.
+    /// Daha büyük bir ön ölçekleyici, daha yavaş sayma hızına ve daha uzun periyotlara yol açar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_prescaler(&mut self, prescaler: TcPrescaler) -> Result<(), TcError> {
+        io::println(&format!("HW_API: Setting TC Unit {} Channel {} prescaler to {:?}.",
+            self.id.to_string(), self.channel.to_string(), prescaler));
+        // Gerçekte, TC'nin ön ölçekleyici ayar kaydına yazma işlemi gerçekleşir.
+         if !os_api::tc_set_prescaler(self.id, self.channel, prescaler) {
+             return Result::Err(TcError::HardwareAccessError("Failed to set TC prescaler.".to_string()));
+         }
+        self.current_prescaler = prescaler;
+        Result::Ok(())
+    }
+
+    /// `set_period_ms(&mut self, period_ms: u32) -> Result<(), TcError>`:
+    /// Zamanlayıcı periyodunu milisaniye (ms) cinsinden ayarlar.
+    /// Bu, zamanlayıcının ne kadar sürede bir taşma (overflow) veya eşleşme (match) kesmesi üreteceğini belirler.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını (örn. otomatik yeniden yükleme kaydı - ARR) doğrudan değiştirdiğinden güvenli değildir.
+    /// Yanlış periyot değerleri, istenmeyen zamanlama davranışlarına neden olabilir.
+    pub unsafe fn set_period_ms(&mut self, period_ms: u32) -> Result<(), TcError> {
+        if let TcMode::Counter = self.current_mode {
+            return Result::Err(TcError::WrongMode("Cannot set period in Counter mode.".to_string()));
+        }
+        if period_ms == 0 {
+            return Result::Err(TcError::InvalidParameter("Period cannot be zero.".to_string()));
+        }
+
+        // Varsayımsal sistem saati frekansı (örneğin 100 MHz)
+        const SYSTEM_CLOCK_HZ: u64 = 100_000_000;
+        let prescaler_val = self.current_prescaler.to_value() as u64;
+
+        // Periyot değeri hesaplama: count = (Clock_HZ / (Prescaler * (1000ms / period_ms))) - 1
+        // Veya daha basit: period_counts = (system_clock_hz / prescaler_val) * (period_ms / 1000.0)
+        // Burada bir tamsayı yaklaştırması yapılıyor:
+        let counts_per_ms = (SYSTEM_CLOCK_HZ / prescaler_val) / 1000;
+        let period_counts = period_ms as u64 * counts_per_ms;
+
+        if period_counts > u32::MAX as u64 { // u32 taşmasını kontrol et
+            return Result::Err(TcError::InvalidParameter(
+                format!("Calculated period value {} exceeds u32 maximum.", period_counts.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Setting TC Unit {} Channel {} period to {} ms ({} counts).",
+            self.id.to_string(), self.channel.to_string(), period_ms.to_string(), period_counts.to_string()));
+         if !os_api::tc_set_period(self.id, self.channel, period_counts as u32) {
+             return Result::Err(TcError::HardwareAccessError("Failed to set TC period.".to_string()));
+         }
+        self.current_period = period_counts as u32;
+        Result::Ok(())
+    }
+
+    /// `start(&mut self) -> Result<(), TcError>`:
+    /// Zamanlayıcıyı/sayıcıyı başlatır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn start(&mut self) -> Result<(), TcError> {
+        if self.is_running {
+            return Result::Ok(()); // Zaten çalışıyor
+        }
+        io::println(&format!("HW_API: Starting TC Unit {} Channel {}.", self.id.to_string(), self.channel.to_string()));
+         if !os_api::tc_start(self.id, self.channel) {
+             return Result::Err(TcError::HardwareAccessError("Failed to start TC.".to_string()));
+         }
+        self.is_running = true;
+        Result::Ok(())
+    }
+
+    /// `stop(&mut self) -> Result<(), TcError>`:
+    /// Zamanlayıcıyı/sayıcıyı durdurur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn stop(&mut self) -> Result<(), TcError> {
+        if !self.is_running {
+            return Result::Ok(()); // Zaten durdurulmuş
+        }
+        io::println(&format!("HW_API: Stopping TC Unit {} Channel {}.", self.id.to_string(), self.channel.to_string()));
+        // if !os_api::tc_stop(self.id, self.channel) {
+        //     return Result::Err(TcError::HardwareAccessError("Failed to stop TC.".to_string()));
+        // }
+        self.is_running = false;
+        Result::Ok(())
+    }
+
+    /// `reset(&mut self) -> Result<(), TcError>`:
+    /// Zamanlayıcıyı/sayıcıyı sıfırlar (sayma değerini 0'a getirir).
+    /// Çalışıyorsa durdurup tekrar başlatabilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydını değiştirdiğinden güvenli değildir.
+    pub unsafe fn reset(&mut self) -> Result<(), TcError> {
+        io::println(&format!("HW_API: Resetting TC Unit {} Channel {}.", self.id.to_string(), self.channel.to_string()));
+         if !os_api::tc_reset(self.id, self.channel) {
+             return Result::Err(TcError::HardwareAccessError("Failed to reset TC.".to_string()));
+         }
+        Result::Ok(())
+    }
+
+    /// `get_count(&self) -> Result<u32, TcError>`:
+    /// Zamanlayıcının/sayıcının mevcut sayım değerini okur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım kaydından okuduğundan güvenli değildir.
+    pub unsafe fn get_count(&self) -> Result<u32, TcError> {
+        io::println(&format!("HW_API: Reading count from TC Unit {} Channel {}.", self.id.to_string(), self.channel.to_string()));
+        // Gerçekte, zamanlayıcının sayım kaydından okuma işlemi gerçekleşir.
+         let count = os_api::tc_read_count(self.id, self.channel);
+        let simulated_count = (std::time::nanos() % 10000) as u32; // Simülasyon
+        Result::Ok(simulated_count)
+    }
+
+    /// `is_running(&self) -> bool`:
+    /// Zamanlayıcının/sayıcının şu anda çalışıp çalışmadığını döndürür.
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    /// `get_current_mode(&self) -> &TcMode`:
+    /// Zamanlayıcının/sayıcının mevcut çalışma modunu döndürür.
+    pub fn get_current_mode(&self) -> &TcMode {
+        &self.current_mode
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum Zamanlayıcı/Sayıcı birimi sayısını belirtir.
+const MAX_TC_UNITS: u8 = 2; // Örneğin, TIMER0 ve TIMER1
+// Varsayımsal bir sabit, her bir Zamanlayıcı/Sayıcı birimindeki kanal sayısını belirtir.
+const MAX_TC_CHANNELS: u8 = 1; // Basitlik adına, her birimin tek kanallı olduğunu varsayalım.
+                                // Bazı MCU'lar her zamanlayıcı için birden fazla Capture/Compare kanalına sahip olabilir.
+
+
+// --- Örnek Kullanım ---
+
+import std::tc::{self, TimerCounter, TcError, TcMode, TcPrescaler};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::fmt; // For Debug printing (e.g. {:?})
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 100000; // Increment to show progress
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting Timers/Counters example...".to_string());
+
+    // Timer/Counter Unit 0, Channel 0'ı kullanalım
+    io::println("\n--- Initializing Timer/Counter Unit 0 Channel 0 ---".to_string());
+
+    // UNSAFE BLOCK - TC birimini başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let mut tc_res = TimerCounter::new(0, 0); // TC Unit 0, Channel 0
+
+        let mut timer_counter: Option<TimerCounter> = Option::None;
+
+        match tc_res {
+            Result::Ok(tc) => {
+                io::println("Timer/Counter Unit 0 Channel 0 created successfully.".to_string());
+                timer_counter = Option::Some(tc);
+            },
+            Result::Err(e) => io::println(&format!("Error creating Timer/Counter: {}", e.description())),
+        }
+
+        if let Option::Some(mut tc) = timer_counter {
+            // Zamanlayıcı modunu ayarla
+            io::println("\n--- Setting TC to Timer Mode ---".to_string());
+            match tc.set_mode(TcMode::Timer) {
+                Result::Ok(_) => io::println("TC set to Timer mode.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting TC mode: {}", e.description())),
+            }
+
+            // Ön ölçekleyiciyi ayarla
+            io::println("\n--- Setting TC Prescaler to Div256 ---".to_string());
+            match tc.set_prescaler(TcPrescaler::Div256) {
+                Result::Ok(_) => io::println("Prescaler set to Div256.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting prescaler: {}", e.description())),
+            }
+
+            // Periyodu 500 ms olarak ayarla
+            io::println("\n--- Setting TC Period to 500 ms ---".to_string());
+            match tc.set_period_ms(500) {
+                Result::Ok(_) => io::println("Period set to 500 ms.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting period: {}", e.description())),
+            }
+
+            // Zamanlayıcıyı başlat
+            io::println("\n--- Starting TC ---".to_string());
+            match tc.start() {
+                Result::Ok(_) => io::println("TC started.".to_string()),
+                Result::Err(e) => io::println(&format!("Error starting TC: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(1200); // 1.2 saniye bekle
+
+            // Sayım değerini oku
+            io::println("\n--- Reading TC Count ---".to_string());
+            match tc.get_count() {
+                Result::Ok(count) => io::println(&format!("Current TC count: {}", count.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading TC count: {}", e.description())),
+            }
+
+            // Zamanlayıcıyı durdur
+            io::println("\n--- Stopping TC ---".to_string());
+            match tc.stop() {
+                Result::Ok(_) => io::println("TC stopped.".to_string()),
+                Result::Err(e) => io::println(&format!("Error stopping TC: {}", e.description())),
+            }
+
+            // Sayım değerini tekrar oku (durdurulduktan sonra)
+            io::println("\n--- Reading TC Count after stop ---".to_string());
+            match tc.get_count() {
+                Result::Ok(count) => io::println(&format!("Current TC count: {}", count.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading TC count: {}", e.description())),
+            }
+
+            // Zamanlayıcıyı sıfırla
+            io::println("\n--- Resetting TC ---".to_string());
+            match tc.reset() {
+                Result::Ok(_) => io::println("TC reset.".to_string()),
+                Result::Err(e) => io::println(&format!("Error resetting TC: {}", e.description())),
+            }
+
+            // Sayıcı modunu dene
+            io::println("\n--- Setting TC to Counter Mode and Reading ---".to_string());
+            match tc.set_mode(TcMode::Counter) {
+                Result::Ok(_) => io::println("TC set to Counter mode.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting TC mode: {}", e.description())),
+            }
+            // Sayıcı modunda başlatma ve sayım değerlerini okuma mantığı burada daha çok dış darbe simülasyonu gerektirir.
+            // Şimdilik sadece get_count'ı çağırıp simüle edilmiş bir değer alıyoruz.
+            match tc.start() {
+                Result::Ok(_) => io::println("TC (Counter mode) started.".to_string()),
+                Result::Err(e) => io::println(&format!("Error starting TC in counter mode: {}", e.description())),
+            }
+            std::spirit::sleep_ms(500);
+            match tc.get_count() {
+                Result::Ok(count) => io::println(&format!("Current TC (Counter mode) count: {}", count.to_string())),
+                Result::Err(e) => io::println(&format!("Error reading TC count in counter mode: {}", e.description())),
+            }
+            match tc.stop() {
+                Result::Ok(_) => io::println("TC (Counter mode) stopped.".to_string()),
+                Result::Err(e) => io::println(&format!("Error stopping TC in counter mode: {}", e.description())),
+            }
+
+
+            // Geçersiz ID denemesi
+            io::println("\n--- Attempting to Create Invalid TC (Expected Error) ---".to_string());
+            match TimerCounter::new(MAX_TC_UNITS + 1, 0) { // Maksimumdan büyük ID
+                Result::Ok(_) => io::println("This should not happen: Successfully created invalid TC!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidId
+            }
+            timer_counter = Option::Some(tc); // Güncellenmiş birimi geri kaydet
+        }
+    }
+
+    io::println("\nTimers/Counters example finished.".to_string());
+}
