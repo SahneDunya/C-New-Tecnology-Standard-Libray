@@ -1,0 +1,382 @@
+// spirit.cnt
+// Temel Çalışma Zamanı Soyutlamaları Modülü
+// İş parçacıkları, senkronizasyon primitifleri ve eşzamanlılık araçları sağlar.
+
+import std::string::String;  // Hata mesajları veya veri transferi için
+import std::vec::Vec;       // Koleksiyonlar için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::result::Result; // Hata yönetimi için
+import std::fmt;            // Hata mesajları için formatlama
+
+/// `SpiritError`: İş parçacığı veya eşzamanlılık işlemleri sırasında oluşabilecek hata türlerini temsil eder.
+pub enum SpiritError {
+    /// İş parçacığı oluşturma veya birleştirme hatası.
+    ThreadError(String),
+    /// Mutex kilitlenme hatası (poisoned).
+    MutexPoisoned(String),
+    /// Kanal gönderme veya alma hatası.
+    ChannelError(String),
+    /// Genel bir eşzamanlılık hatası.
+    Custom(String),
+}
+
+// --- İş Parçacığı (Threading) ---
+
+/// `ThreadId`: Bir iş parçacığını benzersiz şekilde tanımlayan bir tür.
+type ThreadId = u64;
+
+/// `Thread`: Bir işletim sistemi iş parçacığını temsil eden yapı.
+pub struct Thread {
+    id: ThreadId,
+    // Dahili OS thread handle (varsayımsal)
+    // Bu, işletim sisteminin iş parçacığı kimliği veya tutamacı olabilir.
+    // Dışarıya maruz bırakılmaz, sadece dahili olarak kullanılır.
+}
+
+impl Thread {
+    /// `spawn<F, T>(f: F) -> Result<Thread, SpiritError>`:
+    /// Yeni bir işletim sistemi iş parçacığı oluşturur ve verilen closure'ı (kapanışı) bu iş parçacığında çalıştırır.
+    /// Closure'ın bağımsız değişken almaması ve bir değer döndürmemesi varsayılır.
+    /// Gerçek bir implementasyonda, closure'lar veri yakalayabilir ve döndürebilir.
+    /// `f`: Yeni iş parçacığında çalıştırılacak fonksiyon veya closure.
+    pub fn spawn<F: FnOnce() + Send + 'static>(f: F) -> Result<Thread, SpiritError> {
+        // Bu fonksiyonun implementasyonu, CNT'nin çalışma zamanının
+        // işletim sistemi API'lerini (örn. POSIX threads, Windows threads) nasıl kullandığına bağlıdır.
+        // Burada varsayımsal bir implementasyon gösteriyoruz.
+
+        // Gerçek implementasyonda, `f` bir closure olduğundan,
+        // yakaladığı (moved) veriyi iş parçacığı sınırları arasında güvenli bir şekilde aktarması gerekir.
+        // 'static yaşam süresi kısıtlaması, closure'ın iş parçacığının ömrü boyunca geçerli kalacak verilere sahip olmasını sağlar.
+        // Send kısıtlaması, closure'ın iş parçacıkları arasında güvenle taşınabilir olduğunu belirtir.
+
+        io::println("Spawning new thread...".to_string()); // Debug için
+
+        // Varsayımsal bir OS API çağrısı simülasyonu:
+         let os_thread_handle = os_api::create_thread(f);
+         if os_thread_handle.is_err() {
+             return Result::Err(SpiritError::ThreadError("Failed to create OS thread.".to_string()));
+         }
+         let thread_id = os_api::get_thread_id(os_thread_handle.unwrap());
+
+        // Geçici olarak sabit bir ID atayalım:
+        static mut NEXT_THREAD_ID: ThreadId = 1; // Basit bir thread ID generator
+        let thread_id: ThreadId;
+        unsafe {
+            thread_id = NEXT_THREAD_ID;
+            NEXT_THREAD_ID += 1;
+        }
+
+        // Bu iş parçacığında `f`'yi çalıştıracak bir mekanizma (işletim sistemi tarafından yönetilir)
+        // CNT'nin gerçek çalışma zamanında bu, bir görevi bir thread pool'a göndermek veya
+        // doğrudan bir OS thread'i başlatmak anlamına gelebilir.
+        // `f` burada çağrılmaz, sadece simülasyon olarak bir "başarılı" döneriz.
+        f(); // Normalde bu, yeni iş parçacığında çağrılacaktı.
+
+        Result::Ok(Thread { id: thread_id })
+    }
+
+    /// `join(self) -> Result<(), SpiritError>`:
+    /// İş parçacığının bitmesini bekler. Bu, diğer iş parçacıklarının bu iş parçacığının
+    /// işini bitirmesini senkronize etmek için kullanılır.
+    /// İş parçacığının kendi kontrolünü transfer eder (self).
+    pub fn join(self) -> Result<(), SpiritError> {
+        io::println(&format!("Joining thread with ID: {}", self.id.to_string()));
+        // Varsayımsal bir OS API çağrısı simülasyonu:
+        // os_api::join_thread(self.os_handle);
+        // if os_api_call_failed {
+        //     return Result::Err(SpiritError::ThreadError("Failed to join thread.".to_string()));
+        // }
+        Result::Ok(())
+    }
+
+    /// `current() -> ThreadId`:
+    /// Mevcut iş parçacığının kimliğini döndürür.
+    pub fn current() -> ThreadId {
+        // Varsayımsal: OS'tan mevcut thread ID'sini al
+        // os_api::get_current_thread_id();
+        0 // Ana iş parçacığı için 0 veya dinamik bir değer
+    }
+
+    /// `sleep(ms: u64)`:
+    /// Mevcut iş parçacığını belirtilen milisaniye kadar uyutur.
+    pub fn sleep(ms: u64) {
+        io::println(&format!("Sleeping current thread for {}ms...", ms.to_string()));
+        // Varsayımsal bir OS API çağrısı:
+        // os_api::sleep_ms(ms);
+    }
+}
+
+// --- Senkronizasyon: Mutex (Mutual Exclusion) ---
+
+/// `MutexGuard<'a, T>`: Bir Mutex'in koruduğu veriye erişim sağlayan akıllı işaretçi.
+/// Guard düştüğünde (scope dışına çıktığında) kilit otomatik olarak serbest bırakılır.
+pub struct MutexGuard<'a, T> {
+    data: &'a mut T, // Kilitlenen veriye mutable referans
+    // Dahili kilit bilgisi (varsayımsal)
+}
+
+impl<'a, T> MutexGuard<'a, T> {
+    /// `deref_mut(&mut self) -> &mut T`: Veriye mutable referans döndürür.
+    /// CNT'de Deref trait'i olmayabilir, bu yüzden açık bir metot.
+    pub fn deref_mut(&mut self) -> &mut T {
+        self.data
+    }
+}
+
+// MutexGuard düştüğünde kilidin serbest bırakılması için Drop trait'i (varsayımsal)
+ impl<'a, T> Drop for MutexGuard<'a, T> {
+     fn drop(&mut self) {
+//         // Kilit açma işlemini burada yap
+         io::println("Mutex unlocked.".to_string());
+     }
+ }
+
+/// `Mutex<T>`: Karşılıklı dışlama (mutual exclusion) sağlayan bir senkronizasyon ilkelidir.
+/// Bir kerede sadece bir iş parçacığının belirli bir veri parçasına erişmesine izin verir.
+pub struct Mutex<T> {
+    inner_data: T,
+    // Dahili OS mutex handle veya atomic flag (varsayımsal)
+    // Bu, iş parçacığı güvenliği için kullanılır.
+    is_locked: bool, // Basit simülasyon için
+}
+
+impl<T> Mutex<T> {
+    /// `new(data: T) -> Mutex<T>`:
+    /// Yeni bir `Mutex` oluşturur ve içine verilen veriyi korur.
+    pub fn new(data: T) -> Mutex<T> {
+        Mutex {
+            inner_data: data,
+            is_locked: false,
+        }
+    }
+
+    /// `lock(&self) -> Result<MutexGuard<T>, SpiritError>`:
+    /// Mutex'i kilitler ve korunan veriye bir `MutexGuard` döndürür.
+    /// Eğer başka bir iş parçacığı zaten kilide sahipse, mevcut iş parçacığı bekler.
+    /// "Poisoned" durumu: Eğer bir iş parçacığı kilidi tutarken paniklerse,
+    /// Mutex "zehirlenebilir". Bu, veri tutarsızlığını önlemek içindir.
+    pub fn lock(&self) -> Result<MutexGuard<T>, SpiritError> {
+        // Varsayımsal kilit mekanizması
+        // Gerçekte burada bir OS mutex kilitlenir.
+        io::println("Attempting to lock mutex...".to_string());
+        // Bu örnekte basitleştirilmiş bir simülasyon.
+        // `&self` immutable referans olduğu için, `is_locked`'ı değiştirebilmek için
+        // dahili mutasyon (örn. UnsafeCell, AtomicBool) gerekir.
+        // CNT'de bunlar yerleşik değilse, implementasyon karmaşıklaşır.
+        // Rust'ta `Mutex` genellikle `Sync` ve `Send` trait'lerini otomatik olarak sağlar.
+
+        // Basitlik adına, doğrudan mutable referans dönüyoruz ve kilitlenme simülasyonu yapmıyoruz.
+        // Bu, gerçek bir Mutex'in güvenlik özelliklerini sağlamaz!
+        // `MutexGuard` burada bir ömür kısıtlamasına sahip olmalı (`'a`),
+        // böylece `Mutex`'in kendisi MutexGuard'dan daha uzun yaşar.
+        // self.is_locked = true; // Gerçekte atomik olmalı
+
+        // Varsayımsal olarak kilitlendiğini ve veriye erişildiğini varsayalım.
+        // Unsafe block, mutable referansı almak için burada gerekli olabilir.
+        let data_ptr: *mut T = &self.inner_data as *const T as *mut T;
+        Ok(MutexGuard { data: unsafe { &mut *data_ptr } })
+    }
+}
+
+// --- Eşzamanlı Mesajlaşma: Kanallar (Channels) ---
+
+/// `Sender<T>`: Bir kanalın gönderme tarafı. Mesajları kanala göndermek için kullanılır.
+/// Birden fazla `Sender` klonlanabilir (Multiple Producer).
+pub struct Sender<T> {
+    // Dahili kanal referansı (varsayımsal)
+    // T: Send + 'static // Gönderilen verinin iş parçacıkları arasında taşınabilir ve statik ömre sahip olması.
+}
+
+impl<T> Sender<T> {
+    /// `send(&self, value: T) -> Result<(), SpiritError>`:
+    /// Bir değeri kanal üzerinden gönderir.
+    pub fn send(&self, value: T) -> Result<(), SpiritError> {
+        io::println(&format!("Sending value: {}", value.to_string())); // Varsayımsal to_string()
+        // Gerçek implementasyonda, değer bir kuyruğa veya tampona yerleştirilir.
+        Ok(())
+    }
+}
+
+// Sender klonlanabilir olmalı (birden fazla üretici için)
+// impl<T> Clone for Sender<T> { ... }
+
+/// `Receiver<T>`: Bir kanalın alma tarafı. Mesajları kanaldan almak için kullanılır.
+/// Genellikle tek bir `Receiver` vardır (Single Consumer).
+pub struct Receiver<T> {
+    // Dahili kanal referansı (varsayımsal)
+    // T: Send + 'static
+}
+
+impl<T> Receiver<T> {
+    /// `recv(&self) -> Result<T, SpiritError>`:
+    /// Kanal üzerinden bir değer alır. Eğer kanal boşsa, yeni bir değer gelene kadar bekler.
+    pub fn recv(&self) -> Result<T, SpiritError> {
+        io::println("Receiving value...".to_string());
+        // Gerçek implementasyonda, bir kuyruktan veya tampondan değer çekilir.
+        // Kanal boşsa bekler.
+        // Bu örnekte, sadece bir "başarılı" değeri döndürüyoruz.
+        // Normalde bu fonksiyon, değerin türünü bilmeli ve ona göre bir T döndürmelidir.
+        // Simülasyon olduğu için doğrudan bir T oluşturamıyoruz.
+        // Bu yüzden, çağrıldığında bir hata döndürüyor, böylece bir örnekte nasıl kullanılacağını göstermek zorlaşıyor.
+        // Varsayımsal olarak bir "işlem başarılı" mesajı gibi bir değer dönelim.
+        // Burayı düzeltmek için T'nin `Default` veya `From<String>` gibi bir trait'i olması gerekir.
+        // Şimdilik hata döndürelim ve kullanımda yorumlayalım.
+        Result::Err(SpiritError::ChannelError("Receive not implemented for arbitrary T.".to_string()))
+    }
+
+    /// `try_recv(&self) -> Option<T>`:
+    /// Kanal üzerinden bir değeri alır. Eğer kanal boşsa hemen `Option::None` döndürür, beklemez.
+    pub fn try_recv(&self) -> Option<T> {
+        io::println("Attempting to receive value (non-blocking)...".to_string());
+        Option::None // Simülasyon
+    }
+}
+
+/// `channel<T>() -> (Sender<T>, Receiver<T>)`:
+/// Yeni bir Multiple Producer, Single Consumer (MPSC) kanalı oluşturur.
+/// Bir `Sender` ve bir `Receiver` çifti döndürür.
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    // Bu, iş parçacıkları arasında iletişimi sağlayan bir kuyruk yapısı oluşturur.
+    io::println("Creating new channel.".to_string());
+    (Sender { /* dahili kanal referansı */ }, Receiver { /* dahili kanal referansı */ })
+}
+
+// --- Örnek Kullanım ---
+
+import std::spirit::{self, Thread, Mutex, Sender, Receiver};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::option::Option;
+import std::result::Result; // Error handling for main
+
+// Mutex için paylaşılan bir sayaç
+static mut GLOBAL_COUNTER: Mutex<u64> = Mutex::new(0); // static mut kullanmak genelde unsafe'dir.
+
+fn main() {
+    io::println("Starting Spirit example...".to_string());
+
+    // --- İş Parçacığı Oluşturma ve Birleştirme ---
+    io::println("\n--- Thread Spawning and Joining ---".to_string());
+
+    let handle1 = Thread::spawn(|| {
+        io::println("Thread 1: Doing some work...".to_string());
+        Thread::sleep(500); // 500ms bekle
+        io::println("Thread 1: Work finished.".to_string());
+    });
+
+    let handle2 = Thread::spawn(|| {
+        io::println("Thread 2: Doing other work...".to_string());
+        Thread::sleep(200); // 200ms bekle
+        io::println("Thread 2: Work finished.".to_string());
+    });
+
+    // İş parçacıklarının bitmesini bekle
+    match handle1 {
+        Result::Ok(h) => { h.join(); }, // handle1.join()
+        Result::Err(e) => io::println(&("Failed to spawn thread 1: ".to_string() + match e { spirit::SpiritError::ThreadError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+    match handle2 {
+        Result::Ok(h) => { h.join(); }, // handle2.join()
+        Result::Err(e) => io::println(&("Failed to spawn thread 2: ".to_string() + match e { spirit::SpiritError::ThreadError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+    io::println("All spawned threads have finished.".to_string());
+
+
+    // --- Mutex Kullanımı (Paylaşılan Veri Senkronizasyonu) ---
+    io::println("\n--- Mutex Usage (Shared Data Synchronization) ---".to_string());
+
+    // birden fazla iş parçacığından sayaç artırma
+    let num_threads = 5;
+    let mut thread_handles = Vec::new();
+
+    for i in 0..num_threads {
+        let handle = Thread::spawn(move || {
+            io::println(&format!("Thread {} trying to lock mutex...", i.to_string()));
+            unsafe { // `static mut` kullanmak için unsafe block gerekir
+                match GLOBAL_COUNTER.lock() {
+                    Result::Ok(mut guard) => { // MutexGuard döndürür
+                        let current_val = *guard.deref_mut(); // Değere eriş
+                        *guard.deref_mut() = current_val + 1; // Değeri artır
+                        io::println(&format!("Thread {}: Counter incremented to {}.", i.to_string(), (*guard.deref_mut()).to_string()));
+                        // MutexGuard scope dışına çıkınca kilit otomatik olarak serbest bırakılır.
+                    },
+                    Result::Err(e) => io::println(&("Thread ".to_string() + i.to_string() + " Mutex lock error: ".to_string() + match e { spirit::SpiritError::MutexPoisoned(s) => s, _ => "Unknown error.".to_string() })),
+                }
+            }
+        });
+        thread_handles.push(handle);
+    }
+
+    for handle in thread_handles {
+        match handle {
+            Result::Ok(h) => { h.join(); },
+            Result::Err(e) => io::println(&("Failed to join mutex thread: ".to_string() + match e { spirit::SpiritError::ThreadError(s) => s, _ => "Unknown error.".to_string() })),
+        }
+    }
+
+    unsafe {
+        io::println(&format!("Final Global Counter Value: {}.", GLOBAL_COUNTER.inner_data.to_string())); // `inner_data` doğrudan erişim (test amaçlı)
+    }
+
+
+    // --- Kanal Kullanımı (Mesajlaşma) ---
+    io::println("\n--- Channel Usage (Messaging) ---".to_string());
+
+    let (tx, rx) = spirit::channel::<String>(); // String mesajları için kanal oluştur
+
+    let producer_thread_handle = Thread::spawn(move || {
+        let messages = Vec::new();
+        messages.push("Hello from producer!".to_string());
+        messages.push("Another message.".to_string());
+        messages.push("Last one!".to_string());
+
+        for msg in messages {
+            match tx.send(msg) { // tx clone() edilmiş gibi davranır
+                Result::Ok(_) => io::println("Producer: Message sent successfully.".to_string()),
+                Result::Err(e) => io::println(&("Producer: Failed to send message: ".to_string() + match e { spirit::SpiritError::ChannelError(s) => s, _ => "Unknown error.".to_string() })),
+            }
+            Thread::sleep(100); // Küçük bir gecikme
+        }
+    });
+
+    let consumer_thread_handle = Thread::spawn(move || {
+        // Alıcı, kanal kapanana veya tüm mesajlar alınana kadar bekler
+        // `recv` bloklayıcıdır. Simülasyon olduğu için burada döngü sonsuz kalabilir.
+        // Gerçek bir implementasyonda, kanalın kapanması durumunda `recv` bir `Err` dönecektir.
+        io::println("Consumer: Waiting for messages...".to_string());
+        let mut received_count = 0;
+        loop {
+            // `try_recv` ile beklemesiz deneme yapabiliriz
+            match rx.try_recv() {
+                Option::Some(msg) => {
+                    io::println(&("Consumer: Received: ".to_string() + &msg));
+                    received_count += 1;
+                },
+                Option::None => {
+                    // io::println("Consumer: No messages yet, sleeping...".to_string());
+                    Thread::sleep(50); // Biraz bekle, sonra tekrar dene
+                    if received_count >= 3 { // Örnek için 3 mesaj bekliyoruz
+                        break;
+                    }
+                },
+            }
+             if received_count >= 3 {
+                break;
+            }
+        }
+        io::println("Consumer: Finished receiving messages.".to_string());
+    });
+
+    // İş parçacıklarının bitmesini bekle
+    match producer_thread_handle {
+        Result::Ok(h) => { h.join(); },
+        Result::Err(e) => io::println(&("Failed to join producer thread: ".to_string() + match e { spirit::SpiritError::ThreadError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+    match consumer_thread_handle {
+        Result::Ok(h) => { h.join(); },
+        Result::Err(e) => io::println(&("Failed to join consumer thread: ".to_string() + match e { spirit::SpiritError::ThreadError(s) => s, _ => "Unknown error.".to_string() })),
+    }
+
+    io::println("\nSpirit example finished.".to_string());
+}
