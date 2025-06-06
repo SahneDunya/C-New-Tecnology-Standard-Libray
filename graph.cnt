@@ -1,0 +1,350 @@
+// graph.cnt
+// Graf Veri Yapıları ve Algoritmaları Modülü
+// Düğümler (vertices) ve kenarlar (edges) aracılığıyla ilişkileri modellemek için araçlar sağlar.
+
+import std::string::String;  // Düğüm isimleri veya etiketleri için
+import std::vec::Vec;       // Komşuluk listeleri ve koleksiyonlar için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::result::Result; // Hata yönetimi için
+import std::collections::HashMap; // Düğüm ve kenar verilerini depolamak için (varsayımsal)
+import std::cmp::{self, Ord, Ordering}; // Karşılaştırma için
+import std::fmt; // Hata mesajları için formatlama
+
+/// `EdgeWeight`: Bir kenara atanabilecek ağırlığı temsil eder.
+/// Kayan nokta veya tamsayı ağırlıkları olabilir.
+type EdgeWeight = f64; // Şimdilik sadece f64 kullanıyoruz.
+
+/// `NodeIndex`: Bir graf içindeki düğümün benzersiz kimliğini temsil eder.
+/// Bu genellikle bir tamsayıdır.
+type NodeIndex = u64;
+
+/// `Edge`: Graf içindeki bir kenarı temsil eder.
+pub struct Edge {
+    pub from: NodeIndex,
+    pub to: NodeIndex,
+    pub weight: EdgeWeight,
+}
+
+impl Edge {
+    /// Yeni bir `Edge` oluşturur.
+    pub fn new(from: NodeIndex, to: NodeIndex, weight: EdgeWeight) -> Edge {
+        Edge { from, to, weight }
+    }
+}
+
+/// `GraphError`: Graf işlemleri sırasında oluşabilecek hata türlerini temsil eder.
+pub enum GraphError {
+    /// Düğüm bulunamadı hatası.
+    NodeNotFound(NodeIndex),
+    /// Kenar bulunamadı hatası.
+    EdgeNotFound(NodeIndex, NodeIndex),
+    /// Geçersiz argüman hatası.
+    InvalidInput(String),
+    /// Genel bir graf hatası.
+    Custom(String),
+}
+
+/// `Graph`: Bir graf veri yapısını temsil eder.
+/// Komşuluk listesi yaklaşımını kullanır.
+/// `V` tipi düğüm verisi (vertex data) için generic bir parametredir (örn. String isim).
+/// `E` tipi kenar verisi (edge data) için generic bir parametredir (örn. EdgeWeight).
+pub struct Graph<V, E> {
+    next_node_idx: NodeIndex,                                     // Yeni düğümler için artan indeks
+    nodes: HashMap<NodeIndex, V>,                                 // Düğüm indeksini düğüm verisine eşler
+    adjacency_list: HashMap<NodeIndex, Vec<(NodeIndex, E)>>,     // Komşuluk listesi: düğüm -> (komşu düğüm, kenar verisi)
+    is_directed: bool,                                            // Grafın yönlü olup olmadığı
+}
+
+impl<V, E> Graph<V, E> {
+    /// Yeni bir `Graph` oluşturur.
+    pub fn new(is_directed: bool) -> Graph<V, E> {
+        Graph {
+            next_node_idx: 0,
+            nodes: HashMap::new(),
+            adjacency_list: HashMap::new(),
+            is_directed: is_directed,
+        }
+    }
+
+    /// `add_node(&mut self, data: V) -> NodeIndex`:
+    /// Grafa yeni bir düğüm ekler ve düğümün indeksini döndürür.
+    pub fn add_node(&mut self, data: V) -> NodeIndex {
+        let new_idx = self.next_node_idx;
+        self.nodes.insert(new_idx, data);
+        self.adjacency_list.insert(new_idx, Vec::new());
+        self.next_node_idx += 1;
+        new_idx
+    }
+
+    /// `get_node_data(&self, index: NodeIndex) -> Option<&V>`:
+    /// Belirtilen indeksteki düğümün verisini döndürür.
+    pub fn get_node_data(&self, index: NodeIndex) -> Option<&V> {
+        self.nodes.get(&index)
+    }
+
+    /// `add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge_data: E) -> Result<(), GraphError>`:
+    /// Grafa yeni bir kenar ekler.
+    /// Eğer graf yönlü ise sadece `from`'dan `to`'ya bir kenar ekler.
+    /// Eğer graf yönsüz ise hem `from`'dan `to`'ya hem de `to`'dan `from`'a bir kenar ekler.
+    pub fn add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge_data: E) -> Result<(), GraphError>
+    where E: Clone // Kenar verisinin kopyalanabilir olması gerekir (yönsüz graf için)
+    {
+        if !self.nodes.contains_key(&from) {
+            return Result::Err(GraphError::NodeNotFound(from));
+        }
+        if !self.nodes.contains_key(&to) {
+            return Result::Err(GraphError::NodeNotFound(to));
+        }
+
+        // `from` düğümünün komşuluk listesine kenarı ekle
+        self.adjacency_list.get_mut(&from).unwrap().push((to, edge_data.clone()));
+
+        if !self.is_directed {
+            // Yönsüz graf ise, ters yöne de kenar ekle
+            self.adjacency_list.get_mut(&to).unwrap().push((from, edge_data));
+        }
+        Result::Ok(())
+    }
+
+    /// `get_neighbors(&self, node_idx: NodeIndex) -> Result<&Vec<(NodeIndex, E)>, GraphError>`:
+    /// Belirtilen düğümün komşularını (ve kenar verilerini) döndürür.
+    pub fn get_neighbors(&self, node_idx: NodeIndex) -> Result<&Vec<(NodeIndex, E)>, GraphError> {
+        self.adjacency_list.get(&node_idx).ok_or_else(|| GraphError::NodeNotFound(node_idx))
+    }
+
+    /// `get_node_count(&self) -> u64`: Grafın düğüm sayısını döndürür.
+    pub fn get_node_count(&self) -> u64 {
+        self.nodes.len() as u64
+    }
+
+    /// `get_edge_count(&self) -> u64`: Grafın kenar sayısını döndürür.
+    /// Yönsüz graf için her kenar iki kez sayılır (çift kenar), bu yüzden ikiye bölünür.
+    pub fn get_edge_count(&self) -> u64 {
+        let mut count = 0;
+        for (_, neighbors) in self.adjacency_list.iter() {
+            count += neighbors.len() as u64;
+        }
+        if self.is_directed {
+            count
+        } else {
+            count / 2
+        }
+    }
+
+    /// `has_edge(&self, from: NodeIndex, to: NodeIndex) -> bool`:
+    /// İki düğüm arasında bir kenar olup olmadığını kontrol eder.
+    pub fn has_edge(&self, from: NodeIndex, to: NodeIndex) -> bool {
+        if let Option::Some(neighbors) = self.adjacency_list.get(&from) {
+            for (neighbor_idx, _) in neighbors.iter() {
+                if *neighbor_idx == to {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+// --- Graf Algoritmaları (Basit Örnekler) ---
+
+/// `bfs<V, E>(graph: &Graph<V, E>, start_node: NodeIndex, visit_fn: fn(NodeIndex, &V))`
+/// Genişlik Öncelikli Arama (Breadth-First Search - BFS) algoritması.
+/// Başlangıç düğümünden başlayarak grafı katman katman ziyaret eder.
+/// `visit_fn`: Ziyaret edilen her düğüm için çağrılacak bir closure/fonksiyon.
+pub fn bfs<V: Clone, E>(graph: &Graph<V, E>, start_node: NodeIndex, visit_fn: fn(NodeIndex, &V)) -> Result<(), GraphError> {
+    if !graph.nodes.contains_key(&start_node) {
+        return Result::Err(GraphError::NodeNotFound(start_node));
+    }
+
+    let mut visited: HashMap<NodeIndex, bool> = HashMap::new(); // Ziyaret edilenleri izler
+    let mut queue: Vec<NodeIndex> = Vec::new(); // Kuyruk yapısı
+
+    queue.push(start_node);
+    visited.insert(start_node, true);
+
+    while !queue.is_empty() {
+        let u = queue.remove(0); // Kuyruğun başından çıkar
+
+        // Düğümü ziyaret et
+        if let Option::Some(node_data) = graph.get_node_data(u) {
+            visit_fn(u, node_data);
+        }
+
+        // Komşuları kuyruğa ekle
+        let neighbors = graph.get_neighbors(u)?;
+        for (v, _) in neighbors.iter() {
+            if !visited.contains_key(v) || !visited.get(v).unwrap() {
+                visited.insert(*v, true);
+                queue.push(*v);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `dfs<V, E>(graph: &Graph<V, E>, start_node: NodeIndex, visit_fn: fn(NodeIndex, &V))`
+/// Derinlik Öncelikli Arama (Depth-First Search - DFS) algoritması.
+/// Başlangıç düğümünden başlayarak olabildiğince derine iner.
+/// `visit_fn`: Ziyaret edilen her düğüm için çağrılacak bir closure/fonksiyon.
+pub fn dfs<V: Clone, E>(graph: &Graph<V, E>, start_node: NodeIndex, visit_fn: fn(NodeIndex, &V)) -> Result<(), GraphError> {
+    if !graph.nodes.contains_key(&start_node) {
+        return Result::Err(GraphError::NodeNotFound(start_node));
+    }
+
+    let mut visited: HashMap<NodeIndex, bool> = HashMap::new(); // Ziyaret edilenleri izler
+    let mut stack: Vec<NodeIndex> = Vec::new(); // Yığın yapısı
+
+    stack.push(start_node);
+    visited.insert(start_node, true);
+
+    while !stack.is_empty() {
+        let u = stack.pop().unwrap(); // Yığının tepesinden çıkar
+
+        // Düğümü ziyaret et
+        if let Option::Some(node_data) = graph.get_node_data(u) {
+            visit_fn(u, node_data);
+        }
+
+        // Komşuları yığına ekle (ters sırada eklemek, doğal okuma sırasını koruyabilir)
+        let neighbors = graph.get_neighbors(u)?;
+        // Not: HashMap iterasyonu sırası garanti edilmediğinden, bu sadece bir örnek.
+        // Gerçekte komşuları belirli bir sıraya göre işlemek için sıralanabilir.
+        for (v, _) in neighbors.iter() {
+            if !visited.contains_key(v) || !visited.get(v).unwrap() {
+                visited.insert(*v, true);
+                stack.push(*v);
+            }
+        }
+    }
+    Ok(())
+}
+
+
+/// `dijkstra<V>(graph: &Graph<V, EdgeWeight>, start_node: NodeIndex) -> Result<HashMap<NodeIndex, f64>, GraphError>`
+/// Dijkstra'nın En Kısa Yol Algoritması.
+/// Tek bir başlangıç düğümünden diğer tüm düğümlere olan en kısa yolları bulur.
+/// Sadece pozitif kenar ağırlıklarına sahip graflar için çalışır.
+/// Dönüş değeri: `HashMap<NodeIndex, f64>` - her düğüm için en kısa mesafe.
+pub fn dijkstra<V>(graph: &Graph<V, EdgeWeight>, start_node: NodeIndex) -> Result<HashMap<NodeIndex, f64>, GraphError> {
+    if !graph.nodes.contains_key(&start_node) {
+        return Result::Err(GraphError::NodeNotFound(start_node));
+    }
+
+    let mut distances: HashMap<NodeIndex, f64> = HashMap::new();
+    let mut priority_queue: Vec<(f64, NodeIndex)> = Vec::new(); // (distance, node_idx)
+
+    // Tüm mesafeleri sonsuz olarak başlat
+    for (node_idx, _) in graph.nodes.iter() {
+        distances.insert(*node_idx, f64::MAX); // Varsayımsal f64::MAX
+    }
+
+    distances.insert(start_node, 0.0);
+    priority_queue.push((0.0, start_node));
+
+    while !priority_queue.is_empty() {
+        // En küçük mesafeye sahip düğümü bul (basit implementasyon)
+        // Gerçek bir PQ için `std::collections::BinaryHeap` gibi bir yapı kullanılır.
+        priority_queue.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let (current_dist, u) = priority_queue.remove(0);
+
+        if current_dist > *distances.get(&u).unwrap() {
+            continue; // Zaten daha kısa bir yol bulundu
+        }
+
+        let neighbors = graph.get_neighbors(u)?;
+        for (v, weight) in neighbors.iter() {
+            let new_dist = current_dist + *weight;
+            if new_dist < *distances.get(v).unwrap() {
+                distances.insert(*v, new_dist);
+                priority_queue.push((new_dist, *v));
+            }
+        }
+    }
+
+    Ok(distances)
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::graph::{self, NodeIndex, Edge, GraphError};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::option::Option;
+import std::result::Result;
+import std::collections::HashMap; // test için
+
+fn main() {
+    io::println("Starting Graph example...".to_string());
+
+    // 1. Yönlü bir graf oluşturalım (şehirler ve tek yönlü yollar)
+    io::println("\n--- Directed Graph Example ---".to_string());
+    let mut city_graph = graph::Graph::<String, f64>::new(true); // Düğüm verisi String (şehir adı), Kenar verisi f64 (mesafe)
+
+    let istanbul = city_graph.add_node("Istanbul".to_string());
+    let ankara = city_graph.add_node("Ankara".to_string());
+    let izmir = city_graph.add_node("Izmir".to_string());
+    let antalya = city_graph.add_node("Antalya".to_string());
+
+    city_graph.add_edge(istanbul, ankara, 450.0);
+    city_graph.add_edge(ankara, izmir, 500.0);
+    city_graph.add_edge(istanbul, izmir, 600.0);
+    city_graph.add_edge(izmir, antalya, 400.0);
+    city_graph.add_edge(ankara, antalya, 650.0);
+
+    io::println(&format!("Graph has {} nodes and {} edges.", city_graph.get_node_count().to_string(), city_graph.get_edge_count().to_string()));
+
+    // BFS (Genişlik Öncelikli Arama)
+    io::println("\nBFS starting from Istanbul:");
+    let bfs_result = graph::bfs(&city_graph, istanbul, |idx, data| {
+        io::print(&format!("Visited: {} ({}) -> ", idx.to_string(), data));
+    });
+    match bfs_result {
+        Result::Ok(_) => io::println("BFS Finished.".to_string()),
+        Result::Err(e) => io::println(&("BFS Error: ".to_string() + match e { graph::GraphError::NodeNotFound(i) => "Node not found: ".to_string() + i.to_string(), _ => "Custom error.".to_string() })),
+    }
+
+    // DFS (Derinlik Öncelikli Arama)
+    io::println("\nDFS starting from Istanbul:");
+    let dfs_result = graph::dfs(&city_graph, istanbul, |idx, data| {
+        io::print(&format!("Visited: {} ({}) -> ", idx.to_string(), data));
+    });
+    match dfs_result {
+        Result::Ok(_) => io::println("DFS Finished.".to_string()),
+        Result::Err(e) => io::println(&("DFS Error: ".to_string() + match e { graph::GraphError::NodeNotFound(i) => "Node not found: ".to_string() + i.to_string(), _ => "Custom error.".to_string() })),
+    }
+
+    // Dijkstra (En Kısa Yol)
+    io::println("\nDijkstra's Shortest Paths from Istanbul:");
+    match graph::dijkstra(&city_graph, istanbul) {
+        Result::Ok(distances) => {
+            for (node_idx, dist) in distances.iter() {
+                if let Option::Some(node_data) = city_graph.get_node_data(*node_idx) {
+                    io::println(&format!("  To {} ({}): {}", node_data, node_idx.to_string(), dist.to_string()));
+                }
+            }
+        },
+        Result::Err(e) => io::println(&("Dijkstra Error: ".to_string() + match e { graph::GraphError::NodeNotFound(i) => "Node not found: ".to_string() + i.to_string(), _ => "Custom error.".to_string() })),
+    }
+
+    // 2. Yönsüz bir graf oluşturalım (sosyal ağ)
+    io::println("\n--- Undirected Graph Example ---".to_string());
+    let mut social_graph = graph::Graph::<String, u64>::new(false); // Düğüm verisi String (kişi adı), Kenar verisi u64 (ilişki gücü)
+
+    let ali = social_graph.add_node("Ali".to_string());
+    let ayse = social_graph.add_node("Ayşe".to_string());
+    let can = social_graph.add_node("Can".to_string());
+    let deniz = social_graph.add_node("Deniz".to_string());
+
+    social_graph.add_edge(ali, ayse, 10); // Ali ve Ayşe arkadaş
+    social_graph.add_edge(ayse, can, 5);  // Ayşe ve Can arkadaş
+    social_graph.add_edge(ali, deniz, 8); // Ali ve Deniz arkadaş
+
+    io::println(&format!("Social Graph has {} nodes and {} edges.", social_graph.get_node_count().to_string(), social_graph.get_edge_count().to_string()));
+
+    io::println(&("Ali has edge to Ayşe: ".to_string() + social_graph.has_edge(ali, ayse).to_string())); // true
+    io::println(&("Ayşe has edge to Ali: ".to_string() + social_graph.has_edge(ayse, ali).to_string())); // true (yönsüz)
+
+    io::println("Graph example finished.".to_string());
+}
