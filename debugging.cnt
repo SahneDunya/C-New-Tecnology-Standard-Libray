@@ -1,0 +1,474 @@
+// debugging.cnt
+// Standart Hata Ayıklama (Debugging) Fonksiyonları
+// Gömülü sistemlerde hata tespiti, izleme ve teşhis için temel araçları sağlar.
+// Bu fonksiyonlar genellikle düşük seviyeli G/Ç (seri port gibi) ile etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::io;             // Konsol çıktısı için (varsayımsal)
+import std::time;           // Zaman bilgisi için (varsayımsal)
+import std::vec::Vec;      // Bellek dökümü için
+
+// Varsayımsal olarak, CNT'de konsol çıktısı için bir `io::print_raw` veya benzeri bir fonksiyonun
+// veya seri port kontrolüne doğrudan erişimin olduğu varsayılır.
+// `sys::uart_driver` veya `debug_probe_interface` gibi bir kütüphane/modül aracılığıyla.
+
+/// `DebugError`: Hata ayıklama işlemleri sırasında oluşabilecek hata türleri.
+pub enum DebugError {
+    /// Hata ayıklama modülü başlatılmadı.
+    NotInitialized(String),
+    /// G/Ç (I/O) hatası (örn. seri port yazma hatası).
+    IoError(String),
+    /// Geçersiz parametre.
+    InvalidParameter(String),
+    /// Desteklenmeyen hata ayıklama işlemi.
+    Unsupported(String),
+    /// Genel bir hata ayıklama hatası.
+    Custom(String),
+}
+
+impl Error for DebugError {
+    fn description(&self) -> String {
+        match self {
+            DebugError::NotInitialized(msg) => format!("Debug module not initialized: {}", msg),
+            DebugError::IoError(msg) => format!("Debug I/O Error: {}", msg),
+            DebugError::InvalidParameter(msg) => format!("Invalid Debug Parameter: {}", msg),
+            DebugError::Unsupported(msg) => format!("Unsupported Debug Operation: {}", msg),
+            DebugError::Custom(msg) => format!("Debug Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `DebugLevel`: Hata ayıklama mesajlarının öncelik seviyeleri.
+/// Daha düşük seviyeler (örn. ERROR) her zaman gösterilirken, daha yüksek seviyeler (örn. DEBUG, TRACE)
+/// yalnızca hata ayıklama modu etkinse veya seviye yeterince yüksekse gösterilir.
+#[derive(PartialEq, PartialOrd, Debug, Copy, Clone)]
+pub enum DebugLevel {
+    /// Kritik bir hata, sistem durabilir.
+    CRITICAL = 0,
+    /// Ciddi bir hata, sistemin kararlılığını etkileyebilir.
+    ERROR = 1,
+    /// Önemli bir olay veya sorun, ancak kritik değil.
+    WARNING = 2,
+    /// Genel bilgi mesajları.
+    INFO = 3,
+    /// Detaylı hata ayıklama bilgisi, üretimde kullanılmaz.
+    DEBUG = 4,
+    /// Çok detaylı izleme bilgisi, performans etkileyebilir.
+    TRACE = 5,
+}
+
+// Global statik hata ayıklama seviyesi
+static mut GLOBAL_DEBUG_LEVEL: DebugLevel = DebugLevel::INFO;
+static mut IS_INITIALIZED: bool = false;
+
+/// `init(level: DebugLevel) -> Result<(), DebugError>`:
+/// Hata ayıklama modülünü başlatır ve varsayılan hata ayıklama seviyesini ayarlar.
+/// Genellikle uygulamanın başlangıcında bir kez çağrılır.
+///
+/// `level`: Gösterilecek minimum hata ayıklama mesajı seviyesi.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Global statik değişkenleri değiştirdiğinden güvenli değildir.
+pub unsafe fn init(level: DebugLevel) -> Result<(), DebugError> {
+    if IS_INITIALIZED {
+        return Result::Err(DebugError::Custom("Debugging module already initialized.".to_string()));
+    }
+    GLOBAL_DEBUG_LEVEL = level;
+    // Varsayılan olarak seri port veya JTAG/SWD bağlantısı başlatılabilir.
+    io::println(&format!("DEBUG: Debugging module initialized with level: {:?}.", level));
+    IS_INITIALIZED = true;
+    Result::Ok(())
+}
+
+/// `set_debug_level(level: DebugLevel) -> Result<(), DebugError>`:
+/// Hata ayıklama modülünün çalışma zamanı hata ayıklama seviyesini değiştirir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Global statik değişkeni değiştirdiğinden güvenli değildir.
+pub unsafe fn set_debug_level(level: DebugLevel) -> Result<(), DebugError> {
+    if !IS_INITIALIZED {
+        return Result::Err(DebugError::NotInitialized("Debugging module not initialized.".to_string()));
+    }
+    GLOBAL_DEBUG_LEVEL = level;
+    io::println(&format!("DEBUG: Debug level set to {:?}.", level));
+    Result::Ok(())
+}
+
+/// `print_message(level: DebugLevel, file: &'static str, line: u32, message: &str)`:
+/// Belirtilen seviyede bir hata ayıklama mesajı yazdırır.
+/// Mesaj, yalnızca ayarlanan `GLOBAL_DEBUG_LEVEL`'den daha yüksek veya ona eşitse yazdırılır.
+/// Zaman damgası ve dosya/satır bilgisi eklenir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Düşük seviyeli G/Ç işlemleri yaptığından ve global zaman fonksiyonlarını çağırdığından güvenli değildir.
+pub unsafe fn print_message(level: DebugLevel, file: &'static str, line: u32, message: &str) {
+    if !IS_INITIALIZED {
+        // Init çağrılmadıysa minimum çıktı
+        io::println(&format!("[NOT_INIT] {} - {}", level.to_string(), message));
+        return;
+    }
+    if level as u8 <= GLOBAL_DEBUG_LEVEL as u8 {
+        let timestamp = time::nanos(); // Varsayımsal nanosecond zaman damgası
+        let level_str = match level {
+            DebugLevel::CRITICAL => "CRITICAL",
+            DebugLevel::ERROR => "ERROR",
+            DebugLevel::WARNING => "WARN",
+            DebugLevel::INFO => "INFO",
+            DebugLevel::DEBUG => "DEBUG",
+            DebugLevel::TRACE => "TRACE",
+        };
+        io::println(&format!("[{}] [{}] {}:{}: {}", timestamp.to_string(), level_str, file, line.to_string(), message));
+    }
+}
+
+/// Makro benzeri yardımcı fonksiyonlar
+/// Geliştiricinin her seferinde dosya ve satır numaralarını manuel olarak girmesini önler.
+
+/// `log_critical!(message: &str)`: Kritik bir hata mesajı yazdırır.
+#[macro_export]
+macro_rules! log_critical {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::CRITICAL, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::CRITICAL, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+/// `log_error!(message: &str)`: Bir hata mesajı yazdırır.
+#[macro_export]
+macro_rules! log_error {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::ERROR, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::ERROR, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+/// `log_warn!(message: &str)`: Bir uyarı mesajı yazdırır.
+#[macro_export]
+macro_rules! log_warn {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::WARNING, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::WARNING, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+/// `log_info!(message: &str)`: Bilgi mesajı yazdırır.
+#[macro_export]
+macro_rules! log_info {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::INFO, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::INFO, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+/// `log_debug!(message: &str)`: Hata ayıklama mesajı yazdırır.
+#[macro_export]
+macro_rules! log_debug {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::DEBUG, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::DEBUG, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+/// `log_trace!(message: &str)`: Çok detaylı izleme mesajı yazdırır.
+#[macro_export]
+macro_rules! log_trace {
+    ($message:expr) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::TRACE, file!(), line!(), $message);
+        }
+    };
+    ($($arg:tt)*) => {
+        unsafe {
+            std::debugging::print_message(std::debugging::DebugLevel::TRACE, file!(), line!(), &format!($($arg)*));
+        }
+    };
+}
+
+
+/// `assert!(condition: bool, message: &str)`:
+/// Belirtilen koşul doğru değilse bir hata mesajı yazdırır ve programı durdurur veya yeniden başlatır.
+/// Geliştirme aşamasında hataları erken yakalamak için kullanılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Sistemin durmasına veya yeniden başlatılmasına neden olabilir.
+#[macro_export]
+macro_rules! assert {
+    ($condition:expr, $message:expr) => {
+        unsafe {
+            if !$condition {
+                log_critical!("ASSERTION FAILED: {} at {}:{}", $message, file!(), line!());
+                // Gerçek bir sistemde, burada sistem sıfırlanabilir veya bir hata ayıklama tuzağına girilebilir.
+                 os_api::system_reset();
+                // Alternatif olarak, sonsuz bir döngüye girilebilir:
+                std::spirit::halt_system_debug_only(); // Simüle edilmiş sistem durdurma
+            }
+        }
+    };
+    ($condition:expr, $($arg:tt)*) => {
+        unsafe {
+            if !$condition {
+                log_critical!("ASSERTION FAILED: {} at {}:{}", &format!($($arg)*), file!(), line!());
+                std::spirit::halt_system_debug_only();
+            }
+        }
+    };
+}
+
+/// `dump_memory(address: u64, size: usize) -> Result<(), DebugError>`:
+/// Belirtilen bellek adresinden başlayarak belirli bir boyutta bellek içeriğini onaltılık (hex) olarak yazdırır.
+/// Bellek dökümü, sistem durumunu incelemek için çok faydalıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Rastgele bellek adreslerine eriştiğinden güvenli değildir ve donanım yazmaclarına erişebilir.
+pub unsafe fn dump_memory(address: u64, size: usize) -> Result<(), DebugError> {
+    if !IS_INITIALIZED {
+        return Result::Err(DebugError::NotInitialized("Debugging module not initialized.".to_string()));
+    }
+    if size == 0 {
+        return Result::Ok(());
+    }
+
+    log_info!("Dumping memory from 0x{:X} for {} bytes:", address.to_string(), size.to_string());
+
+    // Varsayımsal bellek erişimi
+    // Gerçekte, burada donanım bağımlı bellek okuma fonksiyonları kullanılır.
+    // Örneğin, `core::ptr::read_volatile` veya özel bir donanım bellek okuma API'si.
+    let ptr = address as *const u8;
+
+    for i in 0..size {
+        if i % 16 == 0 {
+            if i != 0 {
+                io::print("\n"); // Yeni satır
+            }
+            io::print(&format!("0x{:X}: ", (address + i as u64).to_string()));
+        }
+        let byte = *ptr.add(i); // unsafe dereference
+        io::print(&format!("{:02X} ", byte.to_string()));
+    }
+    io::print("\n");
+    Result::Ok(())
+}
+
+/// `measure_execution_time<F>(f: F, description: &str) -> Result<u64, DebugError>`:
+/// Verilen bir closure (kapatma) fonksiyonunun yürütme süresini nanosaniye cinsinden ölçer ve yazdırır.
+/// Basit performans profil oluşturma için kullanılır.
+///
+/// `f`: Yürütme süresi ölçülecek closure.
+/// `description`: Ölçülen işlem için bir açıklama.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Zaman ölçümü için düşük seviyeli zamanlayıcı donanımına eriştiğinden güvenli değildir.
+pub unsafe fn measure_execution_time<F>(f: F, description: &str) -> Result<u64, DebugError>
+where
+    F: FnOnce() -> (),
+{
+    if !IS_INITIALIZED {
+        return Result::Err(DebugError::NotInitialized("Debugging module not initialized.".to_string()));
+    }
+
+    log_info!("Measuring execution time for: {}", description);
+    let start_time = time::nanos(); // Varsayımsal nanosecond zaman damgası
+    f(); // Closure'ı çalıştır
+    let end_time = time::nanos();
+    let duration = end_time - start_time;
+
+    log_info!("Execution time for '{}': {} ns.", description, duration.to_string());
+    Result::Ok(duration)
+}
+
+/// `breakpoint()`:
+/// Geliştiricinin kodda belirli bir noktada yürütmeyi durdurmasına olanak tanıyan bir "yazılım kesme noktası" görevi görür.
+/// Gerçek bir donanım hata ayıklayıcısı bağlıysa, yürütmeyi durdurur.
+/// Bağlı değilse, genellikle bir sonsuz döngüye girer veya sistemin sıfırlanmasına neden olur.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Sistemin durmasına veya yeniden başlatılmasına neden olabilir.
+pub unsafe fn breakpoint() {
+    log_warn!("DEBUG: Breakpoint hit!");
+    // Gerçekte, burada `__bkpt(0)` ARM için veya benzer bir mimariye özgü talimat olurdu.
+    // Veya hata ayıklayıcı arayüzü (örn. JTAG) ile bir iletişim.
+    std::spirit::halt_system_debug_only(); // Simüle edilmiş sistem durdurma
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::debugging::{self, DebugLevel};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+             io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+
+        // Simulate a system halt for debugging purposes
+        pub fn halt_system_debug_only() {
+            io::println("\n!!! SYSTEM HALTED by DEBUG ASSERTION/BREAKPOINT !!!\n".to_string());
+            // In a real embedded system, this might jump to a debug monitor,
+            // cause a watchdog reset, or enter an infinite loop.
+            loop {
+                // Infinite loop to simulate halt
+                 io::println("System is halted...".to_string());
+                 std::spirit::sleep_ms(1000);
+            }
+        }
+    }
+}
+
+// Global olarak makroları etkinleştir
+use log_critical;
+use log_error;
+use log_warn;
+use log_info;
+use log_debug;
+use log_trace;
+use assert;
+
+fn some_function_to_debug() {
+    log_info!("Entering some_function_to_debug.");
+    let mut counter = 0;
+    for i in 0..5 {
+        counter += i;
+        log_debug!("  Inside loop, i: {}, counter: {}", i.to_string(), counter.to_string());
+        std::spirit::sleep_ms(1); // Simulate some work
+    }
+    log_info!("Exiting some_function_to_debug. Final counter: {}", counter.to_string());
+}
+
+fn main() {
+    io::println("Starting Debugging example...".to_string());
+
+    // UNSAFE BLOCK - Debugging altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        // Hata ayıklama modülünü başlat
+        io::println("\n--- Initializing Debugging Module ---".to_string());
+        match debugging::init(DebugLevel::INFO) { // Başlangıç seviyesi INFO
+            Result::Ok(_) => io::println("Debugging module initialized with INFO level.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing debugging module: {}", e.description()));
+                return;
+            }
+        }
+
+        log_info!("This is an INFO message.");
+        log_debug!("This is a DEBUG message (should not be shown if level is INFO).");
+        log_trace!("This is a TRACE message (should not be shown if level is INFO).");
+        log_warn!("This is a WARNING message.");
+        log_error!("This is an ERROR message.");
+        log_critical!("This is a CRITICAL message.");
+
+        // Hata ayıklama seviyesini DEBUG olarak ayarla
+        io::println("\n--- Setting Debug Level to DEBUG ---".to_string());
+        match debugging::set_debug_level(DebugLevel::DEBUG) {
+            Result::Ok(_) => io::println("Debug level successfully set to DEBUG.".to_string()),
+            Result::Err(e) => io::println(&format!("Error setting debug level: {}", e.description())),
+        }
+
+        log_info!("This is an INFO message after level change.");
+        log_debug!("This is a DEBUG message (should now be shown).");
+        log_trace!("This is a TRACE message (should still not be shown).");
+
+
+        // Bellek Dökümü
+        io::println("\n--- Performing Memory Dump (simulated) ---".to_string());
+        let mut data: [u8; 32] = [0; 32];
+        for i in 0..32 {
+            data[i] = (i * 2) as u8;
+        }
+        let data_ptr = &data as *const u8 as u64; // Pointer'ı u64'e dönüştür
+
+        match debugging::dump_memory(data_ptr, data.len()) {
+            Result::Ok(_) => io::println("Memory dump completed.".to_string()),
+            Result::Err(e) => io::println(&format!("Error performing memory dump: {}", e.description())),
+        }
+
+        // Fonksiyon yürütme süresini ölç
+        io::println("\n--- Measuring Function Execution Time ---".to_string());
+        match debugging::measure_execution_time(|| {
+            some_function_to_debug();
+        }, "some_function_to_debug_call") {
+            Result::Ok(duration) => io::println(&format!("'some_function_to_debug_call' took {} ns.", duration.to_string())),
+            Result::Err(e) => io::println(&format!("Error measuring execution time: {}", e.description())),
+        }
+
+        // Assert testi (geçen durum)
+        io::println("\n--- Testing Assertions (Passing) ---".to_string());
+        let value_a = 10;
+        let value_b = 5;
+        assert!(value_a > value_b, "Value A should be greater than Value B");
+        io::println("Assertion 1 passed: value_a > value_b".to_string());
+
+        assert!(value_a + value_b == 15, "Sum should be 15, but is {}", (value_a + value_b).to_string());
+        io::println("Assertion 2 passed: sum is 15".to_string());
+
+        // Breakpoint (simüle edilmiş)
+        io::println("\n--- Hitting a Simulated Breakpoint ---".to_string());
+        // debugging::breakpoint(); // Bu, programı durdururdu (simülasyonda sonsuz döngüye girer)
+        io::println("Breakpoint skipped for demonstration. Uncomment to test.".to_string());
+
+
+        // Assert testi (başarısız olan durum - bu kod çalıştırılırsa program durur)
+        io::println("\n--- Testing Assertions (Failing - Will halt execution) ---".to_string());
+        let divisor = 0;
+        // Bu assertion başarısız olacak ve programı durduracaktır.
+        // assert!(divisor != 0, "Divisor should not be zero! Current value: {}", divisor.to_string());
+        io::println("Failing assertion is commented out. Uncomment to see system halt.".to_string());
+    }
+
+    io::println("\nDebugging example finished. (This line might not be reached if an assertion fails)".to_string());
+}
