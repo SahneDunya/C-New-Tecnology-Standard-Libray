@@ -1,0 +1,691 @@
+// serialization.cnt
+// Veri Yapılarını Serileştirme ve Deserileştirme Modülü
+// Çeşitli formatlara (örneğin JSON) dönüştürmek için trait'ler ve yardımcılar sağlar.
+
+import std::string::String;  // Metin işlemleri için
+import std::vec::Vec;       // Koleksiyonlar için
+import std::option::Option; // Opsiyonel değerler için
+import std::result::Result; // Hata yönetimi için
+import std::fmt;            // Hata mesajları ve debugging için
+
+// --- Yardımcı Tipler ve Trait'ler ---
+
+/// `Error`: Serileştirme veya Deserileştirme sırasında oluşabilecek hata türlerini temsil eder.
+pub enum Error {
+    /// Geçersiz giriş verisi (örn. bozuk JSON).
+    InvalidData(String),
+    /// Beklenmeyen veri türü.
+    TypeError(String),
+    /// Okunacak veya yazılacak değer bulunamadı.
+    MissingValue(String),
+    /// Genel bir serileştirme/deserileştirme hatası.
+    Custom(String),
+    /// Bir veri alanı ayrıştırılamadı (örn. sayı beklenirken metin).
+    ParseError(String),
+}
+
+/// `Serializer`: Veri türlerini serileştirilmiş bir formata (örn. JSON string'i) yazmak için bir arayüz sağlar.
+/// `Ok(())` dönüş tipi başarılı işlemi, `Err(Error)` ise bir hatayı belirtir.
+pub trait Serializer {
+    /// Bir boolean değerini serileştirir.
+    fn serialize_bool(&mut self, v: bool) -> Result<(), Error>;
+    /// Bir tamsayı değerini serileştirir.
+    fn serialize_i64(&mut self, v: i64) -> Result<(), Error>;
+    /// Bir kayan nokta değerini serileştirir.
+    fn serialize_f64(&mut self, v: f64) -> Result<(), Error>;
+    /// Bir string değerini serileştirir.
+    fn serialize_string(&mut self, v: String) -> Result<(), Error>;
+    /// Bir `Option` değerini serileştirir.
+    fn serialize_option<T: Serialize>(&mut self, v: Option<T>) -> Result<(), Error>;
+    /// Bir `Vec` (dizi) değerini serileştirir.
+    fn serialize_vec<T: Serialize>(&mut self, v: Vec<T>) -> Result<(), Error>;
+    /// Bir struct'ın başlangıcını serileştirir (örn. `{`).
+    fn serialize_struct_start(&mut self) -> Result<(), Error>;
+    /// Bir struct'ın sonunu serileştirir (örn. `}`).
+    fn serialize_struct_end(&mut self) -> Result<(), Error>;
+    /// Bir struct alanının anahtarını serileştirir (örn. `"key":`).
+    fn serialize_field_key(&mut self, key: String) -> Result<(), Error>;
+}
+
+/// `Deserializer`: Serileştirilmiş bir formattan (örn. JSON string'i) veri türlerini okumak için bir arayüz sağlar.
+pub trait Deserializer {
+    /// Bir boolean değerini deserileştirir.
+    fn deserialize_bool(&mut self) -> Result<bool, Error>;
+    /// Bir tamsayı değerini deserileştirir.
+    fn deserialize_i64(&mut self) -> Result<i64, Error>;
+    /// Bir kayan nokta değerini deserileştirir.
+    fn deserialize_f64(&mut self) -> Result<f64, Error>;
+    /// Bir string değerini deserileştirir.
+    fn deserialize_string(&mut self) -> Result<String, Error>;
+    /// Bir `Option` değerini deserileştirir.
+    fn deserialize_option<T: Deserialize>(&mut self) -> Result<Option<T>, Error>;
+    /// Bir `Vec` (dizi) değerini deserileştirir.
+    fn deserialize_vec<T: Deserialize>(&mut self) -> Result<Vec<T>, Error>;
+    /// Bir struct'ın başlangıcını deserileştirir (örn. `{`).
+    fn deserialize_struct_start(&mut self) -> Result<(), Error>;
+    /// Bir struct'ın sonunu deserileştirir (örn. `}`).
+    fn deserialize_struct_end(&mut self) -> Result<(), Error>;
+    /// Bir struct alanının anahtarını deserileştirir.
+    fn deserialize_field_key(&mut self) -> Result<String, Error>;
+}
+
+/// `Serialize`: Bir türün kendini belirli bir formata serileştirebileceğini gösteren bir trait.
+pub trait Serialize {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error>;
+}
+
+/// `Deserialize`: Bir türün belirli bir formattan kendini deserileştirebileceğini gösteren bir trait.
+pub trait Deserialize {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error>;
+}
+
+// --- JSON Serileştirici Implementasyonu ---
+
+/// `JsonSerializer`: JSON formatına serileştirmek için kullanılan bir `Serializer` implementasyonu.
+pub struct JsonSerializer {
+    output: String,
+    // JSON formatının doğru olmasını sağlamak için state bilgileri
+    is_first_field_in_struct: bool,
+    is_first_element_in_vec: bool,
+}
+
+impl JsonSerializer {
+    pub fn new() -> JsonSerializer {
+        JsonSerializer {
+            output: String::new(),
+            is_first_field_in_struct: true,
+            is_first_element_in_vec: true,
+        }
+    }
+
+    /// Serileştirilmiş JSON string'ini döndürür.
+    pub fn get_output(&self) -> &String {
+        &self.output
+    }
+
+    // Helper: Bir virgül ekler eğer gerekli ise.
+    fn add_comma_if_needed(&mut self) {
+        if !self.is_first_field_in_struct {
+            self.output.push_str(&",".to_string());
+        }
+        self.is_first_field_in_struct = false;
+    }
+
+    // Helper: Bir virgül ekler eğer gerekli ise (vec için).
+    fn add_vec_comma_if_needed(&mut self) {
+        if !self.is_first_element_in_vec {
+            self.output.push_str(&",".to_string());
+        }
+        self.is_first_element_in_vec = false;
+    }
+
+    // String değerlerini JSON güvenli hale getirir (tırnaklama, kaçış karakterleri)
+    fn escape_string(&self, s: &String) -> String {
+        let mut escaped = String::new();
+        escaped.push_char('"');
+        for c in s.chars() {
+            match c {
+                '\\' => escaped.push_str(&"\\\\".to_string()),
+                '"' => escaped.push_str(&"\\\"".to_string()),
+                '\n' => escaped.push_str(&"\\n".to_string()),
+                '\r' => escaped.push_str(&"\\r".to_string()),
+                '\t' => escaped.push_str(&"\\t".to_string()),
+                _ => escaped.push_char(c),
+            }
+        }
+        escaped.push_char('"');
+        escaped
+    }
+}
+
+impl Serializer for JsonSerializer {
+    fn serialize_bool(&mut self, v: bool) -> Result<(), Error> {
+        self.output.push_str(&(if v { "true" } else { "false" }).to_string());
+        Ok(())
+    }
+
+    fn serialize_i64(&mut self, v: i64) -> Result<(), Error> {
+        self.output.push_str(&v.to_string()); // Varsayımsal to_string()
+        Ok(())
+    }
+
+    fn serialize_f64(&mut self, v: f64) -> Result<(), Error> {
+        self.output.push_str(&v.to_string()); // Varsayımsal to_string()
+        Ok(())
+    }
+
+    fn serialize_string(&mut self, v: String) -> Result<(), Error> {
+        self.output.push_str(&self.escape_string(&v));
+        Ok(())
+    }
+
+    fn serialize_option<T: Serialize>(&mut self, v: Option<T>) -> Result<(), Error> {
+        match v {
+            Option::Some(val) => val.serialize(self),
+            Option::None => self.output.push_str(&"null".to_string()),
+        }
+        Ok(())
+    }
+
+    fn serialize_vec<T: Serialize>(&mut self, v: Vec<T>) -> Result<(), Error> {
+        self.output.push_char('[');
+        self.is_first_element_in_vec = true;
+        for element in v.into_iter() { // Vec'i tüketir
+            self.add_vec_comma_if_needed();
+            element.serialize(self)?;
+        }
+        self.output.push_char(']');
+        Ok(())
+    }
+
+    fn serialize_struct_start(&mut self) -> Result<(), Error> {
+        self.output.push_char('{');
+        self.is_first_field_in_struct = true;
+        Ok(())
+    }
+
+    fn serialize_struct_end(&mut self) -> Result<(), Error> {
+        self.output.push_char('}');
+        Ok(())
+    }
+
+    fn serialize_field_key(&mut self, key: String) -> Result<(), Error> {
+        self.add_comma_if_needed();
+        self.output.push_str(&self.escape_string(&key));
+        self.output.push_str(&":".to_string());
+        Ok(())
+    }
+}
+
+// --- JSON Deserileştirici Implementasyonu (Basitleştirilmiş) ---
+
+/// `JsonDeserializer`: JSON formatından deserileştirmek için kullanılan bir `Deserializer` implementasyonu.
+/// Bu, çok basitleştirilmiş bir implementasyondur ve tam bir JSON parser'ı değildir.
+/// Tokenizasyon ve durum yönetimi gerektirir.
+pub struct JsonDeserializer {
+    input: String,
+    cursor: usize, // Mevcut okuma konumu
+}
+
+impl JsonDeserializer {
+    pub fn new(input: String) -> JsonDeserializer {
+        JsonDeserializer {
+            input: input,
+            cursor: 0,
+        }
+    }
+
+    // Helper: Bir sonraki boşluk olmayan karakteri atlar.
+    fn skip_whitespace(&mut self) {
+        while self.cursor < self.input.len() && self.input.chars().nth(self.cursor).unwrap().is_whitespace() {
+            self.cursor += 1;
+        }
+    }
+
+    // Helper: Belirli bir karakteri okur ve atlar.
+    fn consume_char(&mut self, expected: char) -> Result<(), Error> {
+        self.skip_whitespace();
+        if self.cursor >= self.input.len() {
+            return Err(Error::MissingValue(format!("Expected '{}', but end of input reached.", expected.to_string())));
+        }
+        let c = self.input.chars().nth(self.cursor).unwrap();
+        if c == expected {
+            self.cursor += 1;
+            Ok(())
+        } else {
+            Err(Error::InvalidData(format!("Expected '{}', got '{}'", expected.to_string(), c.to_string())))
+        }
+    }
+
+    // Helper: Bir string tokenını okur (örn. "true", "false", "null").
+    fn read_token(&mut self) -> Result<String, Error> {
+        self.skip_whitespace();
+        let start = self.cursor;
+        while self.cursor < self.input.len() &&
+              (self.input.chars().nth(self.cursor).unwrap().is_alphanumeric() ||
+               self.input.chars().nth(self.cursor).unwrap() == '-' ||
+               self.input.chars().nth(self.cursor).unwrap() == '.') // Sayılar için nokta da içer
+        {
+            self.cursor += 1;
+        }
+        if self.cursor == start {
+            return Err(Error::ParseError("No token found.".to_string()));
+        }
+        Ok(self.input.slice(start, self.cursor)) // Varsayımsal slice
+    }
+
+    // Helper: Tırnaklı bir string okur ve tırnakları kaldırır.
+    fn read_quoted_string(&mut self) -> Result<String, Error> {
+        self.consume_char('"')?;
+        let start = self.cursor;
+        while self.cursor < self.input.len() {
+            let c = self.input.chars().nth(self.cursor).unwrap();
+            if c == '"' {
+                break;
+            }
+            if c == '\\' {
+                self.cursor += 1; // Kaçış karakterini atla
+                // Burada kaçış karakteri işleme (örn. \n, \t, \\, \") eklenebilir.
+            }
+            self.cursor += 1;
+        }
+        if self.cursor >= self.input.len() {
+            return Err(Error::InvalidData("Unterminated string.".to_string()));
+        }
+        let s = self.input.slice(start, self.cursor); // Varsayımsal slice
+        self.consume_char('"')?;
+        Ok(s)
+    }
+
+    // Helper: Bir sayıyı okur (integer veya float).
+    fn read_number_string(&mut self) -> Result<String, Error> {
+        self.skip_whitespace();
+        let start = self.cursor;
+        let mut has_digit = false;
+        while self.cursor < self.input.len() {
+            let c = self.input.chars().nth(self.cursor).unwrap();
+            if c.is_digit(10) || c == '-' || c == '.' || c == 'e' || c == 'E' || c == '+' {
+                has_digit = true;
+                self.cursor += 1;
+            } else {
+                break;
+            }
+        }
+        if !has_digit || self.cursor == start {
+            return Err(Error::ParseError("No number found.".to_string()));
+        }
+        Ok(self.input.slice(start, self.cursor))
+    }
+}
+
+impl Deserializer for JsonDeserializer {
+    fn deserialize_bool(&mut self) -> Result<bool, Error> {
+        let token = self.read_token()?;
+        match token.to_lower().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(Error::TypeError(format!("Expected boolean, got '{}'", token))),
+        }
+    }
+
+    fn deserialize_i64(&mut self) -> Result<i64, Error> {
+        let num_str = self.read_number_string()?;
+        num_str.parse_i64().map_err(|_| Error::ParseError(format!("Failed to parse i64 from '{}'", num_str)))
+    }
+
+    fn deserialize_f64(&mut self) -> Result<f64, Error> {
+        let num_str = self.read_number_string()?;
+        num_str.parse_f64().map_err(|_| Error::ParseError(format!("Failed to parse f64 from '{}'", num_str)))
+    }
+
+    fn deserialize_string(&mut self) -> Result<String, Error> {
+        self.read_quoted_string()
+    }
+
+    fn deserialize_option<T: Deserialize>(&mut self) -> Result<Option<T>, Error> {
+        self.skip_whitespace();
+        if self.cursor + 3 < self.input.len() && self.input.slice(self.cursor, self.cursor + 4) == "null".to_string() {
+            self.cursor += 4;
+            Ok(Option::None)
+        } else {
+            T::deserialize(self).map(Option::Some)
+        }
+    }
+
+    fn deserialize_vec<T: Deserialize>(&mut self) -> Result<Vec<T>, Error> {
+        let mut vec = Vec::new();
+        self.consume_char('[')?;
+        self.skip_whitespace();
+        if self.input.chars().nth(self.cursor).unwrap() == ']' { // Boş dizi
+            self.consume_char(']')?;
+            return Ok(vec);
+        }
+
+        loop {
+            vec.push(T::deserialize(self)?);
+            self.skip_whitespace();
+            if self.input.chars().nth(self.cursor).unwrap() == ',' {
+                self.consume_char(',')?;
+            } else {
+                break;
+            }
+        }
+        self.consume_char(']')?;
+        Ok(vec)
+    }
+
+    fn deserialize_struct_start(&mut self) -> Result<(), Error> {
+        self.consume_char('{')
+    }
+
+    fn deserialize_struct_end(&mut self) -> Result<(), Error> {
+        self.consume_char('}')
+    }
+
+    fn deserialize_field_key(&mut self) -> Result<String, Error> {
+        let key = self.deserialize_string()?;
+        self.consume_char(':')?;
+        Ok(key)
+    }
+}
+
+// --- Temel Tipler İçin Serialize/Deserialize Implementasyonları ---
+
+// bool
+impl Serialize for bool {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_bool(*self)
+    }
+}
+impl Deserialize for bool {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_bool()
+    }
+}
+
+// i64
+impl Serialize for i64 {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_i64(*self)
+    }
+}
+impl Deserialize for i64 {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_i64()
+    }
+}
+
+// f64
+impl Serialize for f64 {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_f64(*self)
+    }
+}
+impl Deserialize for f64 {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_f64()
+    }
+}
+
+// String
+impl Serialize for String {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_string(self.clone())
+    }
+}
+impl Deserialize for String {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_string()
+    }
+}
+
+// Vec<T>
+impl<T: Serialize> Serialize for Vec<T> {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_vec(self.clone()) // Vec'i kopyala çünkü serialize_vec tüketiyor
+    }
+}
+impl<T: Deserialize> Deserialize for Vec<T> {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_vec()
+    }
+}
+
+// Option<T>
+impl<T: Serialize> Serialize for Option<T> {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> Result<(), Error> {
+        serializer.serialize_option(self.clone()) // Option'ı kopyala
+    }
+}
+impl<T: Deserialize> Deserialize for Option<T> {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, Error> {
+        deserializer.deserialize_option()
+    }
+}
+
+
+// --- `to_json` ve `from_json` kolaylaştırıcı fonksiyonlar ---
+
+/// `to_json<T: Serialize>(value: T) -> Result<String, Error>`:
+/// Herhangi bir `Serialize` edilebilir değeri JSON string'ine serileştirir.
+pub fn to_json<T: Serialize>(value: T) -> Result<String, Error> {
+    let mut serializer = JsonSerializer::new();
+    value.serialize(&mut serializer)?;
+    Ok(serializer.get_output().clone())
+}
+
+/// `from_json<T: Deserialize>(json_str: String) -> Result<T, Error>`:
+/// Bir JSON string'ini herhangi bir `Deserialize` edilebilir değere deserileştirir.
+pub fn from_json<T: Deserialize>(json_str: String) -> Result<T, Error> {
+    let mut deserializer = JsonDeserializer::new(json_str);
+    T::deserialize(&mut deserializer)
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::serialization::{self, Serialize, Deserialize};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::option::Option;
+import std::result::Result;
+import std::fmt;
+
+// Kendi özel struct'ımızı serileştirebilir ve deserileştirebilir hale getirelim
+struct User {
+    id: i64,
+    name: String,
+    is_active: bool,
+    emails: Vec<String>,
+    phone: Option<String>, // Opsiyonel alan
+}
+
+// User struct'ı için Serialize implementasyonu
+impl Serialize for User {
+    fn serialize<S: serialization::Serializer>(&self, serializer: &mut S) -> Result<(), serialization::Error> {
+        serializer.serialize_struct_start()?;
+        serializer.serialize_field_key("id".to_string())?;
+        serializer.serialize_i64(self.id)?;
+        serializer.serialize_field_key("name".to_string())?;
+        serializer.serialize_string(self.name.clone())?;
+        serializer.serialize_field_key("is_active".to_string())?;
+        serializer.serialize_bool(self.is_active)?;
+        serializer.serialize_field_key("emails".to_string())?;
+        serializer.serialize_vec(self.emails.clone())?;
+        serializer.serialize_field_key("phone".to_string())?;
+        serializer.serialize_option(self.phone.clone())?;
+        serializer.serialize_struct_end()
+    }
+}
+
+// User struct'ı için Deserialize implementasyonu
+impl Deserialize for User {
+    fn deserialize<D: serialization::Deserializer>(deserializer: &mut D) -> Result<Self, serialization::Error> {
+        deserializer.deserialize_struct_start()?;
+
+        let mut id = 0i64;
+        let mut name = String::new();
+        let mut is_active = false;
+        let mut emails = Vec::new();
+        let mut phone = Option::None;
+
+        let mut found_id = false;
+        let mut found_name = false;
+        let mut found_is_active = false;
+        let mut found_emails = false;
+
+        // Alanları döngü ile oku
+        // Bu kısım, struct alanlarının sırasız olabileceği JSON için daha karmaşıktır.
+        // Basitlik adına, burada belirli bir sırayı ve tüm alanların zorunlu olduğunu varsayıyoruz
+        // veya `if` kontrolleriyle opsiyonelliği yönetiyoruz.
+        // Gerçek bir parser'da bir token akışı ve state machine olurdu.
+
+        // Basit JSON için manuel alan okuma (sıranın önemli olduğu varsayımıyla)
+        // Normalde döngü içinde `deserializer.deserialize_field_key()` çağrılır ve anahtara göre işlem yapılır.
+
+        // id
+        let key_id = deserializer.deserialize_field_key()?;
+        if key_id != "id".to_string() { return Err(serialization::Error::InvalidData("Expected 'id' key.".to_string())); }
+        id = deserializer.deserialize_i64()?;
+        found_id = true;
+
+        // name
+        deserializer.deserialize_struct_start_or_comma()?; // Virgül veya başlangıç süslü parantez (basitleştirme)
+        let key_name = deserializer.deserialize_field_key()?;
+        if key_name != "name".to_string() { return Err(serialization::Error::InvalidData("Expected 'name' key.".to_string())); }
+        name = deserializer.deserialize_string()?;
+        found_name = true;
+
+        // is_active
+        deserializer.deserialize_struct_start_or_comma()?;
+        let key_is_active = deserializer.deserialize_field_key()?;
+        if key_is_active != "is_active".to_string() { return Err(serialization::Error::InvalidData("Expected 'is_active' key.".to_string())); }
+        is_active = deserializer.deserialize_bool()?;
+        found_is_active = true;
+
+        // emails
+        deserializer.deserialize_struct_start_or_comma()?;
+        let key_emails = deserializer.deserialize_field_key()?;
+        if key_emails != "emails".to_string() { return Err(serialization::Error::InvalidData("Expected 'emails' key.".to_string())); }
+        emails = deserializer.deserialize_vec()?;
+        found_emails = true;
+
+        // phone (opsiyonel olduğu için, önce virgül varsa dene)
+        deserializer.skip_whitespace();
+        if deserializer.peek_char() == ',' { // Varsayımsal peek_char()
+            deserializer.consume_char(',')?;
+            let key_phone = deserializer.deserialize_field_key()?;
+            if key_phone != "phone".to_string() { return Err(serialization::Error::InvalidData("Expected 'phone' key.".to_string())); }
+            phone = deserializer.deserialize_option()?;
+        }
+
+        deserializer.deserialize_struct_end()?;
+
+        // Zorunlu alanları kontrol et
+        if !found_id || !found_name || !found_is_active || !found_emails {
+            return Err(serialization::Error::MissingValue("One or more required fields missing.".to_string()));
+        }
+
+        Ok(User { id, name, is_active, emails, phone })
+    }
+}
+
+
+// `JsonDeserializer`'a yardımcı metotlar ekliyoruz
+impl serialization::Deserializer for serialization::JsonDeserializer {
+    // ... diğer metotlar (yukarıda tanımlı) ...
+
+    // Deserileştirme için özel helper: Struct içindeki elemanları okumak için
+    // Bu, JSON'daki virgül ve süslü parantez kapanışlarını doğru yönetmek için kullanılır.
+    // Çok basitleştirilmiş bir yaklaşımdır.
+    fn deserialize_struct_start_or_comma(&mut self) -> Result<(), serialization::Error> {
+        self.skip_whitespace();
+        let current_char = self.input.chars().nth(self.cursor);
+        match current_char {
+            Option::Some(',') => {
+                self.consume_char(',')?;
+                Ok(())
+            },
+            _ => Err(serialization::Error::InvalidData("Expected ',' or end of struct.".to_string())),
+        }
+    }
+
+    fn peek_char(&self) -> char {
+        if self.cursor < self.input.len() {
+            self.input.chars().nth(self.cursor).unwrap()
+        } else {
+            '\0' // null karakteri veya başka bir sentinel değeri
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting Serialization example...".to_string());
+
+    // 1. Serileştirme Örneği
+    let user1 = User {
+        id: 1,
+        name: "Alice".to_string(),
+        is_active: true,
+        emails: Vec::new(),
+        phone: Option::Some("123-456-7890".to_string()),
+    };
+    user1.emails.push("alice@example.com".to_string());
+    user1.emails.push("alice.work@example.org".to_string());
+
+
+    io::println("\n--- Serializing User 1 ---".to_string());
+    match serialization::to_json(user1.clone()) { // clone() çünkü user1 tüketilir
+        Result::Ok(json_str) => {
+            io::println(&("Serialized JSON: ".to_string() + &json_str));
+            // Beklenen çıktı (boşluksuz):
+            // {"id":1,"name":"Alice","is_active":true,"emails":["alice@example.com","alice.work@example.org"],"phone":"123-456-7890"}
+        },
+        Result::Err(e) => {
+            io::println(&("Serialization Error: ".to_string() + match e {
+                serialization::Error::InvalidData(s) => "Invalid data: ".to_string() + &s,
+                serialization::Error::TypeError(s) => "Type error: ".to_string() + &s,
+                serialization::Error::MissingValue(s) => "Missing value: ".to_string() + &s,
+                serialization::Error::Custom(s) => "Custom error: ".to_string() + &s,
+                serialization::Error::ParseError(s) => "Parse error: ".to_string() + &s,
+            }));
+        },
+    }
+
+    // 2. Deserileştirme Örneği (Yukarıdaki çıktıyı kullanacağız)
+    io::println("\n--- Deserializing JSON ---".to_string());
+    let json_input = "{\"id\":1,\"name\":\"Alice\",\"is_active\":true,\"emails\":[\"alice@example.com\",\"alice.work@example.org\"],\"phone\":\"123-456-7890\"}".to_string();
+
+    match serialization::from_json(json_input.clone()) { // clone() çünkü input tüketilir
+        Result::Ok(deserialized_user: User) => {
+            io::println("Deserialization Successful!".to_string());
+            io::println(&("  User ID: ".to_string() + deserialized_user.id.to_string()));
+            io::println(&("  User Name: ".to_string() + &deserialized_user.name));
+            io::println(&("  User Active: ".to_string() + deserialized_user.is_active.to_string()));
+            io::println(&("  User Emails[0]: ".to_string() + &deserialized_user.emails[0]));
+            if let Option::Some(phone) = deserialized_user.phone {
+                io::println(&("  User Phone: ".to_string() + &phone));
+            } else {
+                io::println("  User Phone: None".to_string());
+            }
+        },
+        Result::Err(e) => {
+            io::println(&("Deserialization Error: ".to_string() + match e {
+                serialization::Error::InvalidData(s) => "Invalid data: ".to_string() + &s,
+                serialization::Error::TypeError(s) => "Type error: ".to_string() + &s,
+                serialization::Error::MissingValue(s) => "Missing value: ".to_string() + &s,
+                serialization::Error::Custom(s) => "Custom error: ".to_string() + &s,
+                serialization::Error::ParseError(s) => "Parse error: ".to_string() + &s,
+            }));
+        },
+    }
+
+    // 3. Opsiyonel Alanın Olmadığı Durum
+    io::println("\n--- Deserializing with Missing Optional Field ---".to_string());
+    let json_no_phone = "{\"id\":2,\"name\":\"Bob\",\"is_active\":false,\"emails\":[\"bob@example.com\"]}".to_string();
+    match serialization::from_json(json_no_phone.clone()) {
+        Result::Ok(deserialized_user: User) => {
+            io::println("Deserialization Successful!".to_string());
+            io::println(&("  User ID: ".to_string() + deserialized_user.id.to_string()));
+            io::println(&("  User Name: ".to_string() + &deserialized_user.name));
+            if let Option::Some(phone) = deserialized_user.phone {
+                io::println(&("  User Phone: ".to_string() + &phone));
+            } else {
+                io::println("  User Phone: None (Correct)".to_string());
+            }
+        },
+        Result::Err(e) => {
+            io::println(&("Deserialization Error: ".to_string() + match e {
+                serialization::Error::InvalidData(s) => "Invalid data: ".to_string() + &s,
+                serialization::Error::TypeError(s) => "Type error: ".to_string() + &s,
+                serialization::Error::MissingValue(s) => "Missing value: ".to_string() + &s,
+                serialization::Error::Custom(s) => "Custom error: ".to_string() + &s,
+                serialization::Error::ParseError(s) => "Parse error: ".to_string() + &s,
+            }));
+        },
+    }
+
+    io::println("\nSerialization example finished.".to_string());
+}
