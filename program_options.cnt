@@ -1,0 +1,512 @@
+// program_options.cnt
+// Komut Satırı Argümanlarını Ayrıştırma Modülü
+// Program seçeneklerini tanımlamak, ayrıştırmak ve yönetmek için fonksiyonlar sağlar.
+
+import std::string::String;  // Metin işlemleri için
+import std::vec::Vec;       // Argüman listeleri için
+import std::option::Option; // Opsiyonel dönüş tipleri için
+import std::result::Result; // Hata yönetimi için
+import std::fmt;            // Hata mesajları için formatlama
+
+/// `OptionType`: Bir komut satırı seçeneğinin beklediği değerin türünü belirtir.
+pub enum OptionType {
+    /// Seçenek bir boolean bayrağıdır (örn. `--verbose`), değer beklemez.
+    /// Varlık, `true` anlamına gelir.
+    BoolFlag,
+    /// Seçenek bir string değer bekler (örn. `--file <path>`).
+    StringValue,
+    /// Seçenek bir tamsayı değeri bekler (örn. `--count <num>`).
+    IntValue,
+    // Gelecekte f64, listeler vb. eklenebilir.
+}
+
+/// `OptionDefinition`: Bir komut satırı seçeneğinin tanımını temsil eder.
+pub struct OptionDefinition {
+    pub long_name: String,            // Uzun isim (örn. "help", "version")
+    pub short_name: Option<char>,     // Kısa isim (örn. 'h', 'v')
+    pub description: String,          // Seçeneğin açıklaması (yardım metni için)
+    pub opt_type: OptionType,         // Beklenen değerin türü
+    pub required: bool,               // Seçeneğin zorunlu olup olmadığı
+    pub default_value: Option<String>,// Varsayılan değer (string olarak saklanır)
+}
+
+impl OptionDefinition {
+    /// Yeni bir `OptionDefinition` oluşturur.
+    pub fn new(long: String, short: Option<char>, desc: String, typ: OptionType, req: bool, def_val: Option<String>) -> OptionDefinition {
+        OptionDefinition {
+            long_name: long,
+            short_name: short,
+            description: desc,
+            opt_type: typ,
+            required: req,
+            default_value: def_val,
+        }
+    }
+}
+
+/// `OptionValue`: Ayrıştırılmış bir seçeneğin değerini tutar.
+/// Enum, ayrıştırılan değerin türüne göre farklı varyantlar sağlar.
+pub enum OptionValue {
+    Bool(bool),
+    String(String),
+    Int(i64),
+    // Gelecekte diğer türler
+}
+
+/// `ProgramOptionsError`: Ayrıştırma sırasında oluşabilecek hata türlerini temsil eder.
+pub enum ProgramOptionsError {
+    /// Tanımlanmamış bir seçenek bulundu.
+    UnknownOption(String),
+    /// Bir seçenek değer beklerken bulunamadı.
+    MissingValue(String),
+    /// Bir seçeneğin değeri yanlış türde.
+    InvalidValueType(String, String, String), // (option_name, expected_type, received_value)
+    /// Zorunlu bir seçenek bulunamadı.
+    RequiredOptionMissing(String),
+    /// Genel bir ayrıştırma hatası.
+    ParseError(String),
+}
+
+/// `ParsedOptions`: Başarılı bir şekilde ayrıştırılan seçenekleri tutan bir harita benzeri yapı.
+/// Seçenek isimlerini (long_name) OptionValue'lara eşler.
+pub struct ParsedOptions {
+    data: Vec<(String, OptionValue)>, // (Option Name, OptionValue) tuple'ları
+}
+
+impl ParsedOptions {
+    /// `new()`: Boş bir `ParsedOptions` örneği oluşturur.
+    fn new() -> ParsedOptions {
+        ParsedOptions { data: Vec::new() }
+    }
+
+    /// `get(&self, name: String) -> Option<&OptionValue>`:
+    /// Belirtilen isimdeki seçeneğin değerini döndürür.
+    pub fn get(&self, name: String) -> Option<&OptionValue> {
+        for (opt_name, opt_val) in self.data.iter() {
+            if *opt_name == name {
+                return Option::Some(opt_val);
+            }
+        }
+        Option::None
+    }
+
+    /// `has(&self, name: String) -> bool`: Belirtilen seçeneğin ayrıştırılıp ayrıştırılmadığını kontrol eder.
+    pub fn has(&self, name: String) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// `get_bool(&self, name: String) -> Option<bool>`:
+    /// Seçeneği `bool` olarak döndürür. Yanlış türse `None`.
+    pub fn get_bool(&self, name: String) -> Option<bool> {
+        match self.get(name) {
+            Option::Some(OptionValue::Bool(b)) => Option::Some(*b),
+            _ => Option::None,
+        }
+    }
+
+    /// `get_string(&self, name: String) -> Option<&String>`:
+    /// Seçeneği `String` olarak döndürür. Yanlış türse `None`.
+    pub fn get_string(&self, name: String) -> Option<&String> {
+        match self.get(name) {
+            Option::Some(OptionValue::String(s)) => Option::Some(s),
+            _ => Option::None,
+        }
+    }
+
+    /// `get_int(&self, name: String) -> Option<i64>`:
+    /// Seçeneği `i64` olarak döndürür. Yanlış türse `None`.
+    pub fn get_int(&self, name: String) -> Option<i64> {
+        match self.get(name) {
+            Option::Some(OptionValue::Int(i)) => Option::Some(*i),
+            _ => Option::None,
+        }
+    }
+
+    /// `insert(&mut self, name: String, value: OptionValue)`:
+    /// Ayrıştırılmış bir seçeneği ekler veya günceller.
+    fn insert(&mut self, name: String, value: OptionValue) {
+        // Mevcut bir girdiyi güncelleme veya yeni bir tane ekleme.
+        // Basitlik adına, sadece yeni bir tane ekliyoruz.
+        // Gerçek bir implementasyonda, aynı isme sahip birden fazla giriş olabilir veya üzerine yazılabilir.
+        // Bu örnek için, yalnızca son değeri tutarız.
+        let mut found = false;
+        for i in 0..self.data.len() {
+            if self.data[i].0 == name {
+                self.data[i].1 = value;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            self.data.push((name, value));
+        }
+    }
+}
+
+/// `OptionParser`: Seçenek tanımlarını ve komut satırı argümanlarını alarak ayrıştırma yapar.
+pub struct OptionParser {
+    definitions: Vec<OptionDefinition>,
+    help_text: String, // Otomatik oluşturulan yardım metni
+}
+
+impl OptionParser {
+    /// `new(definitions: Vec<OptionDefinition>) -> OptionParser`:
+    /// Belirtilen seçenek tanımlarıyla yeni bir ayrıştırıcı oluşturur.
+    pub fn new(definitions: Vec<OptionDefinition>) -> OptionParser {
+        let mut parser = OptionParser {
+            definitions: definitions,
+            help_text: String::new(),
+        };
+        parser.generate_help_text();
+        parser
+    }
+
+    /// `generate_help_text(&mut self)`: Tanımlara göre otomatik yardım metni oluşturur.
+    fn generate_help_text(&mut self) {
+        let mut help = String::new();
+        help.push_str(&"Usage: program_name [OPTIONS]\n\n".to_string());
+        help.push_str(&"Options:\n".to_string());
+
+        for def in self.definitions.iter() {
+            help.push_str(&"  ".to_string());
+            if let Option::Some(s) = def.short_name {
+                help.push_str(&("-".to_string() + &s.to_string()));
+                help.push_str(&", ".to_string());
+            } else {
+                help.push_str(&"    ".to_string()); // Hizalama için boşluk
+            }
+            help.push_str(&"--".to_string());
+            help.push_str(&def.long_name);
+
+            match def.opt_type {
+                OptionType::StringValue => help.push_str(&" <value>".to_string()),
+                OptionType::IntValue => help.push_str(&" <num>".to_string()),
+                _ => {} // BoolFlag için ek değer yok
+            }
+            help.push_str(&" ".to_string());
+            help.push_str(&def.description);
+            if def.required {
+                help.push_str(&" (Required)".to_string());
+            }
+            if let Option::Some(ref val) = def.default_value {
+                help.push_str(&format!(" (Default: {})", val)); // Varsayımsal format! makrosu
+            }
+            help.push_str(&"\n".to_string());
+        }
+        self.help_text = help;
+    }
+
+    /// `get_help_text(&self) -> &String`: Oluşturulan yardım metnini döndürür.
+    pub fn get_help_text(&self) -> &String {
+        &self.help_text
+    }
+
+    /// `parse_args(&self, args: Vec<String>) -> Result<ParsedOptions, ProgramOptionsError>`:
+    /// Komut satırı argümanlarını ayrıştırır ve bir `ParsedOptions` döndürür.
+    ///
+    /// `args` parametresi genellikle program adını içerecektir (örn. `["my_program", "--help"]`).
+    /// Program adını atlıyoruz ve sadece seçenekleri işliyoruz.
+    pub fn parse_args(&self, args: Vec<String>) -> Result<ParsedOptions, ProgramOptionsError> {
+        let mut parsed_options = ParsedOptions::new();
+        let mut i = 1; // Program adını atla
+
+        while i < args.len() {
+            let arg = &args[i];
+
+            if arg.starts_with("--") {
+                // Uzun form seçenek
+                let (opt_name, opt_val_str) = self.parse_long_option(arg)?;
+                self.process_option(&opt_name, opt_val_str, &mut parsed_options, &args, &mut i)?;
+            } else if arg.starts_with("-") && arg.len() > 1 && arg.chars().nth(1).unwrap().is_alphanumeric() {
+                // Kısa form seçenek (tek karakter)
+                let short_opt_char = arg.chars().nth(1).unwrap();
+                let def = self.find_def_by_short_name(short_opt_char)?;
+                self.process_option(&def.long_name, Option::None, &mut parsed_options, &args, &mut i)?;
+            } else {
+                // Geçersiz veya konumlu argüman (şimdilik desteklenmiyor)
+                return Result::Err(ProgramOptionsError::UnknownOption(arg.clone()));
+            }
+            i += 1; // Bir sonraki argümana geç
+        }
+
+        // Varsayılan değerleri ve zorunlu seçenekleri kontrol et
+        for def in self.definitions.iter() {
+            if !parsed_options.has(def.long_name.clone()) {
+                if def.required {
+                    return Result::Err(ProgramOptionsError::RequiredOptionMissing(def.long_name.clone()));
+                }
+                if let Option::Some(ref def_val) = def.default_value {
+                    // Varsayılan değeri ayrıştır ve ekle
+                    let processed_val = self.convert_string_to_option_value(def_val.clone(), &def.opt_type)
+                                           .map_err(|e| ProgramOptionsError::ParseError(e))?;
+                    parsed_options.insert(def.long_name.clone(), processed_val);
+                }
+            }
+        }
+
+        Result::Ok(parsed_options)
+    }
+
+    // --- Dahili Ayrıştırma Yardımcıları ---
+
+    /// `parse_long_option(&self, arg: &String) -> Result<(String, Option<String>), ProgramOptionsError>`:
+    /// `--name` veya `--name=value` formatını ayrıştırır.
+    fn parse_long_option(&self, arg: &String) -> Result<(String, Option<String>), ProgramOptionsError> {
+        let parts = arg.split_str("=").collect::<Vec<String>>(); // Varsayımsal split_str
+        if parts.len() > 2 {
+            return Result::Err(ProgramOptionsError::ParseError(
+                "Invalid long option format: ".to_string() + arg
+            ));
+        }
+
+        let opt_name = parts[0].slice(2, parts[0].len()); // "--" kısmını atla
+        let value = if parts.len() == 2 {
+            Option::Some(parts[1].clone())
+        } else {
+            Option::None
+        };
+        Result::Ok((opt_name, value))
+    }
+
+    /// `process_option(...)`: Ayrıştırılan bir seçeneği tanımlara göre işler ve `ParsedOptions`'a ekler.
+    fn process_option(&self, long_name: &String, explicit_val_str: Option<String>, parsed_options: &mut ParsedOptions, args: &Vec<String>, current_arg_idx: &mut usize) -> Result<(), ProgramOptionsError> {
+        let def = self.find_def_by_long_name(long_name.clone())?; // long_name'i kopyala
+
+        match def.opt_type {
+            OptionType::BoolFlag => {
+                if explicit_val_str.is_some() {
+                    return Result::Err(ProgramOptionsError::InvalidValueType(
+                        def.long_name.clone(), "BoolFlag".to_string(), explicit_val_str.unwrap()
+                    ));
+                }
+                parsed_options.insert(def.long_name.clone(), OptionValue::Bool(true));
+            }
+            OptionType::StringValue => {
+                let val_str = if let Option::Some(val) = explicit_val_str {
+                    val // `--option=value`
+                } else {
+                    *current_arg_idx += 1; // Sonraki argümana geç
+                    if *current_arg_idx >= args.len() {
+                        return Result::Err(ProgramOptionsError::MissingValue(def.long_name.clone()));
+                    }
+                    args[*current_arg_idx].clone() // `--option value`
+                };
+                parsed_options.insert(def.long_name.clone(), OptionValue::String(val_str));
+            }
+            OptionType::IntValue => {
+                let val_str = if let Option::Some(val) = explicit_val_str {
+                    val
+                } else {
+                    *current_arg_idx += 1;
+                    if *current_arg_idx >= args.len() {
+                        return Result::Err(ProgramOptionsError::MissingValue(def.long_name.clone()));
+                    }
+                    args[*current_arg_idx].clone()
+                };
+                let parsed_int = val_str.parse_i64() // Varsayımsal parse_i64()
+                                       .map_err(|_| ProgramOptionsError::InvalidValueType(
+                                           def.long_name.clone(), "Int".to_string(), val_str
+                                       ))?;
+                parsed_options.insert(def.long_name.clone(), OptionValue::Int(parsed_int));
+            }
+        }
+        Result::Ok(())
+    }
+
+    /// `find_def_by_long_name(&self, name: String) -> Result<&OptionDefinition, ProgramOptionsError>`:
+    /// Uzun isme göre bir seçenek tanımı bulur.
+    fn find_def_by_long_name(&self, name: String) -> Result<&OptionDefinition, ProgramOptionsError> {
+        for def in self.definitions.iter() {
+            if def.long_name == name {
+                return Result::Ok(def);
+            }
+        }
+        Result::Err(ProgramOptionsError::UnknownOption(name))
+    }
+
+    /// `find_def_by_short_name(&self, name: char) -> Result<&OptionDefinition, ProgramOptionsError>`:
+    /// Kısa isme göre bir seçenek tanımı bulur.
+    fn find_def_by_short_name(&self, name: char) -> Result<&OptionDefinition, ProgramOptionsError> {
+        for def in self.definitions.iter() {
+            if let Option::Some(s) = def.short_name {
+                if s == name {
+                    return Result::Ok(def);
+                }
+            }
+        }
+        Result::Err(ProgramOptionsError::UnknownOption(name.to_string()))
+    }
+
+    /// `convert_string_to_option_value(s: String, typ: &OptionType) -> Result<OptionValue, String>`:
+    /// Bir string değerini belirtilen OptionType'a dönüştürür.
+    fn convert_string_to_option_value(s: String, typ: &OptionType) -> Result<OptionValue, String> {
+        match *typ {
+            OptionType::BoolFlag => {
+                match s.to_lower().as_str() { // Varsayımsal to_lower, as_str
+                    "true" | "1" => Result::Ok(OptionValue::Bool(true)),
+                    "false" | "0" => Result::Ok(OptionValue::Bool(false)),
+                    _ => Result::Err("Invalid boolean value".to_string()),
+                }
+            }
+            OptionType::StringValue => Result::Ok(OptionValue::String(s)),
+            OptionType::IntValue => {
+                s.parse_i64().map(|i| OptionValue::Int(i))
+                            .map_err(|_| "Invalid integer value".to_string())
+            }
+        }
+    }
+}
+
+
+// --- Örnek Kullanım ---
+
+import std::cli::program_options::{self, OptionDefinition, OptionType, OptionValue, ProgramOptionsError};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::option::Option;
+import std::result::Result;
+
+fn main() {
+    io::println("Starting ProgramOptions example...".to_string());
+
+    // 1. Seçenek Tanımlamaları
+    let definitions = Vec::new();
+    definitions.push(OptionDefinition::new(
+        "help".to_string(), Option::Some('h'), "Show this help message.".to_string(),
+        OptionType::BoolFlag, false, Option::None
+    ));
+    definitions.push(OptionDefinition::new(
+        "version".to_string(), Option::Some('v'), "Print version information.".to_string(),
+        OptionType::BoolFlag, false, Option::None
+    ));
+    definitions.push(OptionDefinition::new(
+        "input".to_string(), Option::Some('i'), "Input file path.".to_string(),
+        OptionType::StringValue, true, Option::None // Zorunlu
+    ));
+    definitions.push(OptionDefinition::new(
+        "output".to_string(), Option::Some('o'), "Output directory.".to_string(),
+        OptionType::StringValue, false, Option::Some(".".to_string()) // Varsayılan değer
+    ));
+    definitions.push(OptionDefinition::new(
+        "count".to_string(), Option::Some('c'), "Number of items to process.".to_string(),
+        OptionType::IntValue, false, Option::Some("10".to_string()) // Varsayılan int değer
+    ));
+    definitions.push(OptionDefinition::new(
+        "verbose".to_string(), Option::None, "Enable verbose logging.".to_string(),
+        OptionType::BoolFlag, false, Option::None // Sadece uzun isim
+    ));
+
+    // 2. Parser Oluşturma
+    let parser = program_options::OptionParser::new(definitions);
+
+    // Yardım metnini göster
+    io::println("\n--- Program Help Text ---".to_string());
+    io::println(parser.get_help_text().clone());
+
+
+    // 3. Argümanları Ayrıştırma Testleri
+
+    io::println("\n--- Parsing Test Cases ---".to_string());
+
+    // Test Case 1: Başarılı Ayrıştırma (uzun isim, eşittir ile string, varsayılan int, bool)
+    let args1 = Vec::new();
+    args1.push("my_program".to_string());
+    args1.push("--input=data.txt".to_string());
+    args1.push("--verbose".to_string());
+    args1.push("--count".to_string());
+    args1.push("50".to_string());
+    args1.push("-o".to_string());
+    args1.push("/tmp/output".to_string());
+
+    io::println("\nParsing: --input=data.txt --verbose --count 50 -o /tmp/output".to_string());
+    match parser.parse_args(args1) {
+        Result::Ok(options) => {
+            io::println("Parse Successful!".to_string());
+            if let Option::Some(val) = options.get_string("input".to_string()) {
+                io::println(&("  Input: ".to_string() + val)); // data.txt
+            }
+            if let Option::Some(val) = options.get_bool("verbose".to_string()) {
+                io::println(&("  Verbose: ".to_string() + val.to_string())); // true
+            }
+            if let Option::Some(val) = options.get_int("count".to_string()) {
+                io::println(&("  Count: ".to_string() + val.to_string())); // 50
+            }
+            if let Option::Some(val) = options.get_string("output".to_string()) {
+                io::println(&("  Output: ".to_string() + val)); // /tmp/output
+            }
+        },
+        Result::Err(e) => {
+            io::println(&("Parse Error: ".to_string() + match e {
+                ProgramOptionsError::UnknownOption(s) => "Unknown option: ".to_string() + &s,
+                ProgramOptionsError::MissingValue(s) => "Missing value for option: ".to_string() + &s,
+                ProgramOptionsError::InvalidValueType(n, t, v) => "Invalid value type for ".to_string() + &n + ". Expected " + &t + ", got " + &v,
+                ProgramOptionsError::RequiredOptionMissing(s) => "Required option missing: ".to_string() + &s,
+                ProgramOptionsError::ParseError(s) => "General parse error: ".to_string() + &s,
+            }));
+        },
+    }
+
+    // Test Case 2: Zorunlu Seçenek Eksik
+    let args2 = Vec::new();
+    args2.push("my_program".to_string());
+    args2.push("--verbose".to_string());
+    io::println("\nParsing: --verbose (Missing --input)".to_string());
+    match parser.parse_args(args2) {
+        Result::Ok(_) => io::println("Parse Successful (expected error)!".to_string()),
+        Result::Err(e) => {
+            io::println(&("Parse Error (Expected): ".to_string() + match e {
+                ProgramOptionsError::RequiredOptionMissing(s) => "Required option missing: ".to_string() + &s,
+                _ => "Unexpected error type.".to_string(),
+            }));
+        },
+    }
+
+    // Test Case 3: Geçersiz Değer Tipi (int beklenirken string)
+    let args3 = Vec::new();
+    args3.push("my_program".to_string());
+    args3.push("--input=file.txt".to_string());
+    args3.push("--count".to_string());
+    args3.push("abc".to_string());
+    io::println("\nParsing: --input=file.txt --count abc (Invalid int value)".to_string());
+    match parser.parse_args(args3) {
+        Result::Ok(_) => io::println("Parse Successful (expected error)!".to_string()),
+        Result::Err(e) => {
+            io::println(&("Parse Error (Expected): ".to_string() + match e {
+                ProgramOptionsError::InvalidValueType(n, t, v) => "Invalid value type for ".to_string() + &n + ". Expected " + &t + ", got " + &v,
+                _ => "Unexpected error type.".to_string(),
+            }));
+        },
+    }
+
+    // Test Case 4: Varsayılan Değer Kullanımı
+    let args4 = Vec::new();
+    args4.push("my_program".to_string());
+    args4.push("--input=test.csv".to_string());
+    io::println("\nParsing: --input=test.csv (Using default --output and --count)".to_string());
+    match parser.parse_args(args4) {
+        Result::Ok(options) => {
+            io::println("Parse Successful!".to_string());
+            if let Option::Some(val) = options.get_string("input".to_string()) {
+                io::println(&("  Input: ".to_string() + val));
+            }
+            if let Option::Some(val) = options.get_string("output".to_string()) {
+                io::println(&("  Output: ".to_string() + val)); // Varsayılan "."
+            }
+            if let Option::Some(val) = options.get_int("count".to_string()) {
+                io::println(&("  Count: ".to_string() + val.to_string())); // Varsayılan "10"
+            }
+        },
+        Result::Err(e) => {
+            io::println(&("Parse Error: ".to_string() + match e {
+                ProgramOptionsError::UnknownOption(s) => "Unknown option: ".to_string() + &s,
+                ProgramOptionsError::MissingValue(s) => "Missing value for option: ".to_string() + &s,
+                ProgramOptionsError::InvalidValueType(n, t, v) => "Invalid value type for ".to_string() + &n + ". Expected " + &t + ", got " + &v,
+                ProgramOptionsError::RequiredOptionMissing(s) => "Required option missing: ".to_string() + &s,
+                ProgramOptionsError::ParseError(s) => "General parse error: ".to_string() + &s,
+            }));
+        },
+    }
+
+    io::println("\nProgramOptions example finished.".to_string());
+}
