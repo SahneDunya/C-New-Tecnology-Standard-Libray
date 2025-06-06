@@ -1,0 +1,67 @@
+// mod.cnt
+// std (Standart Kütüphane) Kök Modülü
+// CNT için temel ve yaygın olarak kullanılan modülleri düzenler ve dışa aktarır.
+
+// --- Temel Kütüphane Modülleri ---
+
+/// `error`: Hata işleme yapıları ve trait'leri.
+/// Uygulama genelinde hata yönetimi için standart bir arayüz sağlar.
+pub mod error;
+
+/// `result`: Başarılı veya hatalı sonuçları temsil eden `Result` enum'u.
+/// Hata işleme için idiomatik bir yol sunar.
+pub mod result;
+
+/// `string`: Dinamik boyutlu UTF-8 kodlu dize tipi.
+/// Metinsel verileri işlemek için temel fonksiyonları sağlar.
+pub mod string;
+
+/// `vec`: Dinamik boyutlu koleksiyon (vektör).
+/// Değişken boyutlu veri dizileri için esneklik sunar.
+pub mod vec;
+
+/// `fmt`: Formatlama makroları ve trait'leri.
+/// Hata ayıklama çıktısı ve kullanıcı dostu metinler oluşturmak için kullanılır.
+pub mod fmt;
+
+/// `cmp`: Karşılaştırma trait'leri ve fonksiyonları.
+/// Veri türleri arasında eşitlik, sıralama ve minimum/maksimum değerleri bulmak için kullanılır.
+pub mod cmp;
+
+// --- Gömülü Sistem Odaklı Modüller ---
+
+/// `io`: Giriş/Çıkış işlemleri.
+/// Seri port, konsol veya dosya sistemleri gibi çevre birimleriyle temel etkileşimi sağlar.
+pub mod io;
+
+/// `time`: Zamanla ilgili fonksiyonlar.
+/// Gecikmeler, zaman damgaları ve zamanlayıcılar için arayüzler sunar.
+pub mod time;
+
+/// `spirit`: Gömülü sistemlere özgü yardımcı fonksiyonlar.
+/// Düşük seviyeli donanım etkileşimleri, bellek yönetimi veya özel sistem çağrıları gibi.
+pub mod spirit; // Örneğin, `sleep_ms` gibi
+
+// --- Önceki Yanıtlardan Eklenen Modüller ---
+
+/// `ethernet`: Ethernet iletişim donanım soyutlama katmanı (HAL).
+/// Kablolu ağ iletişimi için düşük seviyeli işlevsellik sağlar.
+pub mod ethernet;
+
+/// `data`: Standart veri işleme, dönüştürme ve hata kontrol fonksiyonları.
+/// Bayt manipülasyonları, endianness dönüşümleri, checksum ve CRC hesaplamaları içerir.
+pub mod data;
+
+// --- Diğer Olası Modüller (Gelecekte Eklenebilecekler) ---
+
+/// `collections`: Gelişmiş veri yapıları (örn. HashMap, LinkedList, VecDeque).
+ pub mod collections;
+
+/// `sync`: Eşzamanlılık ve senkronizasyon araçları (mutex, semaphore, atomic).
+ pub mod sync;
+
+/// `fs`: Dosya sistemi erişimi.
+ pub mod fs;
+
+/// `net`: Yüksek seviyeli ağ protokolleri (TCP, UDP).
+ pub mod net;
