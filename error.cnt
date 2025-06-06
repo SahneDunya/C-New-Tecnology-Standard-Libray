@@ -1,0 +1,451 @@
+// error.cnt
+// Hata Yönetimi Modülü
+// Özel hata türleri tanımlamak, hataları işlemek ve hata mesajlarını biçimlendirmek için araçlar sağlar.
+
+import std::string::String;  // Hata mesajları için
+import std::fmt;            // Hata mesajları için formatlama
+
+/// `Error`: Tüm hata türlerinin uygulayacağı temel bir trait.
+/// Bu trait, hata nesnelerinin kendilerini String olarak ifade etmelerini ve
+/// potansiyel olarak diğer hataları "neden" olarak belirtmelerini sağlar.
+pub trait Error {
+    /// `description(&self) -> String`: Hatanın kısa, açıklayıcı bir açıklamasını döndürür.
+    fn description(&self) -> String;
+
+    /// `source(&self) -> Option<&(dyn Error)>`: Bu hataya neden olan temel hata zincirini döndürür.
+    /// Eğer yoksa `Option::None` döndürür. Dinamik bir trait nesnesi olarak dönüş.
+    fn source(&self) -> Option<&(dyn Error)>; // Varsayımsal `dyn` desteği
+
+    /// `to_string(&self) -> String`: Hatanın tam, biçimlendirilmiş bir metin gösterimini döndürür.
+    /// Varsayılan implementasyon `description` ve `source`'ı kullanabilir.
+    fn to_string(&self) -> String {
+        let mut msg = self.description();
+        if let Option::Some(source) = self.source() {
+            msg.push_str(&format!("\nCaused by: {}", source.to_string())); // Rekürsif çağrı
+        }
+        msg
+    }
+}
+
+// --- Standart Hata Türleri ---
+
+/// `BoxedError`: Herhangi bir `Error` implementasyonunu dinamik olarak depolayabilen bir tür.
+/// Fonksiyonların farklı hata türleri döndürmesi gerektiğinde kullanışlıdır.
+pub type BoxedError = Box<dyn Error>; // Varsayımsal Box ve dyn desteği
+
+/// `SystemError`: İşletim sistemi düzeyinde veya düşük seviyeli bir hatayı temsil eder.
+pub struct SystemError {
+    pub code: u64,
+    pub message: String,
+    pub source: Option<BoxedError>,
+}
+
+impl SystemError {
+    pub fn new(code: u64, message: String) -> SystemError {
+        SystemError {
+            code,
+            message,
+            source: Option::None,
+        }
+    }
+
+    pub fn with_source(code: u64, message: String, source: BoxedError) -> SystemError {
+        SystemError {
+            code,
+            message,
+            source: Option::Some(source),
+        }
+    }
+}
+
+impl Error for SystemError {
+    fn description(&self) -> String {
+        format!("System Error {}: {}", self.code.to_string(), self.message)
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        self.source.as_ref().map(|e| e.as_ref()) // Box'tan referans al
+    }
+}
+
+
+/// `ParseError`: Metin ayrıştırma (parsing) sırasında oluşan bir hatayı temsil eder.
+pub struct ParseError {
+    pub message: String,
+    pub input: String,
+    pub source: Option<BoxedError>,
+}
+
+impl ParseError {
+    pub fn new(message: String, input: String) -> ParseError {
+        ParseError {
+            message,
+            input,
+            source: Option::None,
+        }
+    }
+
+    pub fn with_source(message: String, input: String, source: BoxedError) -> ParseError {
+        ParseError {
+            message,
+            input,
+            source: Option::Some(source),
+        }
+    }
+}
+
+impl Error for ParseError {
+    fn description(&self) -> String {
+        format!("Parse Error: {} (Input: '{}')", self.message, self.input)
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        self.source.as_ref().map(|e| e.as_ref())
+    }
+}
+
+/// `InvalidInputError`: Fonksiyona geçersiz veya beklenmedik bir argüman verildiğinde oluşur.
+pub struct InvalidInputError {
+    pub param_name: String,
+    pub details: String,
+    pub source: Option<BoxedError>,
+}
+
+impl InvalidInputError {
+    pub fn new(param_name: String, details: String) -> InvalidInputError {
+        InvalidInputError {
+            param_name,
+            details,
+            source: Option::None,
+        }
+    }
+
+    pub fn with_source(param_name: String, details: String, source: BoxedError) -> InvalidInputError {
+        InvalidInputError {
+            param_name,
+            details,
+            source: Option::Some(source),
+        }
+    }
+}
+
+impl Error for InvalidInputError {
+    fn description(&self) -> String {
+        format!("Invalid Input for '{}': {}", self.param_name, self.details)
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        self.source.as_ref().map(|e| e.as_ref())
+    }
+}
+
+
+/// `IoError`: Girdi/Çıktı işlemleri sırasında oluşan bir hatayı temsil eder.
+/// (Genellikle `std::io` modülünde tanımlanır, ancak burada bir placeholder olarak verilmiştir).
+pub struct IoError {
+    pub kind: String, // Hata türü (örn. "FileNotFound", "PermissionDenied")
+    pub message: String,
+    pub path: Option<String>, // Hatanın oluştuğu dosya yolu
+    pub source: Option<BoxedError>,
+}
+
+impl IoError {
+    pub fn new(kind: String, message: String) -> IoError {
+        IoError {
+            kind,
+            message,
+            path: Option::None,
+            source: Option::None,
+        }
+    }
+
+    pub fn with_path(kind: String, message: String, path: String) -> IoError {
+        IoError {
+            kind,
+            message,
+            path: Option::Some(path),
+            source: Option::None,
+        }
+    }
+
+    pub fn with_source(kind: String, message: String, source: BoxedError) -> IoError {
+        IoError {
+            kind,
+            message,
+            path: Option::None,
+            source: Option::Some(source),
+        }
+    }
+}
+
+impl Error for IoError {
+    fn description(&self) -> String {
+        let mut desc = format!("IO Error ({}: {})", self.kind, self.message);
+        if let Option::Some(ref p) = self.path {
+            desc.push_str(&format!(" (Path: '{}')", p));
+        }
+        desc
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        self.source.as_ref().map(|e| e.as_ref())
+    }
+}
+
+
+// --- Hata İşleme Yardımcıları ---
+
+/// `Result<T, E>`: Bir işlemin ya başarılı bir değer `T` ya da bir hata `E` ile sonuçlandığını temsil eder.
+/// Bu, CNT'de hataları işlemek için birincil mekanizmadır.
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T, E> Result<T, E> {
+    /// `is_ok(&self) -> bool`: Sonucun `Ok` olup olmadığını kontrol eder.
+    pub fn is_ok(&self) -> bool {
+        match self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    /// `is_err(&self) -> bool`: Sonucun `Err` olup olmadığını kontrol eder.
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    /// `unwrap(self) -> T`: Eğer `Result` `Ok` ise değeri döndürür; aksi takdirde panik olur.
+    /// Geliştirme veya test ortamlarında basit hata işleme için kullanılır.
+    pub fn unwrap(self) -> T {
+        match self {
+            Result::Ok(val) => val,
+            Result::Err(e) => {
+                // Burada bir panik mekanizması çağrılmalı (örn. `panic!()`).
+                // Simülasyon olarak, hata mesajını yazıp programı sonlandıralım.
+                io::println(&format!("PANIC: Called `unwrap()` on an `Err` value: {}", e.to_string()));
+                // Gerçek bir senaryoda bu `exit(1)` gibi bir çağrı olurdu.
+                // Şu an için sadece io::println ile gösteriyoruz.
+                 panic!("Called `unwrap()` on an `Err` value."); // Varsayımsal panic macro
+                unreachable!(); // Bu noktaya asla ulaşılmamalı
+            }
+        }
+    }
+
+    /// `unwrap_err(self) -> E`: Eğer `Result` `Err` ise hatayı döndürür; aksi takdirde panik olur.
+    pub fn unwrap_err(self) -> E {
+        match self {
+            Result::Ok(_) => {
+                io::println("PANIC: Called `unwrap_err()` on an `Ok` value.".to_string());
+                unreachable!();
+            }
+            Result::Err(e) => e,
+        }
+    }
+
+    /// `ok(self) -> Option<T>`: Eğer `Result` `Ok` ise `Option::Some(T)` döndürür; aksi takdirde `Option::None` döndürür.
+    pub fn ok(self) -> Option<T> {
+        match self {
+            Result::Ok(val) => Option::Some(val),
+            Result::Err(_) => Option::None,
+        }
+    }
+
+    /// `err(self) -> Option<E>`: Eğer `Result` `Err` ise `Option::Some(E)` döndürür; aksi takdirde `Option::None` döndürür.
+    pub fn err(self) -> Option<E> {
+        match self {
+            Result::Ok(_) => Option::None,
+            Result::Err(err) => Option::Some(err),
+        }
+    }
+
+    /// `map<U, F>(self, f: F) -> Result<U, E>`:
+    /// Eğer `Result` `Ok` ise, değeri verilen fonksiyon `f` ile dönüştürür ve `Result::Ok(U)` döndürür.
+    /// Eğer `Result` `Err` ise, hatayı olduğu gibi döndürür.
+    /// `f`: `FnOnce(T) -> U` closure'ı.
+    pub fn map<U, F>(self, f: F) -> Result<U, E>
+    where F: FnOnce(T) -> U
+    {
+        match self {
+            Result::Ok(val) => Result::Ok(f(val)),
+            Result::Err(err) => Result::Err(err),
+        }
+    }
+
+    /// `map_err<F2>(self, f: F2) -> Result<T, F2::Output>`:
+    /// Eğer `Result` `Err` ise, hatayı verilen fonksiyon `f` ile dönüştürür ve `Result::Err(U)` döndürür.
+    /// Eğer `Result` `Ok` ise, değeri olduğu gibi döndürür.
+    /// `f`: `FnOnce(E) -> F2::Output` closure'ı.
+    pub fn map_err<F2>(self, f: F2) -> Result<T, F2::Output>
+    where F2: FnOnce(E) -> F2::Output
+    {
+        match self {
+            Result::Ok(val) => Result::Ok(val),
+            Result::Err(err) => Result::Err(f(err)),
+        }
+    }
+
+    /// `and_then<U, F>(self, f: F) -> Result<U, E>`:
+    /// Monadik bir `bind` işlemi. Eğer `Result` `Ok` ise, değeri verilen fonksiyon `f`'ye geçirir.
+    /// `f`, yeni bir `Result<U, E>` döndürür. Eğer `Result` `Err` ise, hatayı olduğu gibi döndürür.
+    /// `f`: `FnOnce(T) -> Result<U, E>` closure'ı.
+    pub fn and_then<U, F>(self, f: F) -> Result<U, E>
+    where F: FnOnce(T) -> Result<U, E>
+    {
+        match self {
+            Result::Ok(val) => f(val),
+            Result::Err(err) => Result::Err(err),
+        }
+    }
+}
+
+// --- Makrolar ve Yardımcı Fonksiyonlar (Örnek) ---
+
+/// `bail!(msg: String)`: Belirtilen mesajla genel bir hata (`CustomError` veya benzeri) döndüren makro.
+// Makrolar CNT'de nasıl tanımlanır, varsayımsal bir gösterim.
+ #[macro_export]
+ macro_rules! bail {
+     ($msg:expr) => {
+         return Result::Err(error::CustomError::new($msg))
+     };
+ }
+
+/// `format_error_chain(err: &(dyn Error)) -> String`:
+/// Bir hata zincirini (kaynak hatalar dahil) okunabilir bir string olarak biçimlendirir.
+pub fn format_error_chain(err: &(dyn Error)) -> String {
+    let mut result = err.description();
+    let mut current_err = err.source();
+    while let Option::Some(source) = current_err {
+        result.push_str(&format!("\n  Caused by: {}", source.description()));
+        current_err = source.source();
+    }
+    result
+}
+
+// --- Örnek Kullanım ---
+
+import std::error::{self, Error, SystemError, ParseError, InvalidInputError, IoError, Result, BoxedError};
+import std::string::String;
+import std::io; // for println in main and unwrap
+
+// Örnek bir fonksiyon: Bir string'i tamsayıya dönüştürmeye çalışır
+fn safe_parse_i64(s: String) -> Result<i64, ParseError> {
+    if s.is_empty() {
+        return Result::Err(ParseError::new("Input string is empty".to_string(), s));
+    }
+    // Varsayımsal olarak String::parse_i64() başarısız olabilir
+    // Rust'taki s.parse::<i64>() gibi düşünün.
+    match s.parse_i64() { // Varsayımsal String metodu
+        Result::Ok(num) => Result::Ok(num),
+        Result::Err(_) => Result::Err(ParseError::new("Invalid integer format".to_string(), s)),
+    }
+}
+
+// Başka bir örnek fonksiyon: Bir dosyayı okur (hata döndürebilir)
+fn read_config_file(path: String) -> Result<String, IoError> {
+    io::println(&format!("Attempting to read file: {}", path));
+    if path == "non_existent.cfg".to_string() {
+        return Result::Err(IoError::with_path("FileNotFound".to_string(), "The specified config file was not found".to_string(), path));
+    }
+    if path == "permission_denied.cfg".to_string() {
+        return Result::Err(IoError::with_path("PermissionDenied".to_string(), "Access to the config file is denied".to_string(), path));
+    }
+    Result::Ok("config_key=value\nother_key=another_value".to_string())
+}
+
+
+fn process_data(data_str: String) -> Result<i64, BoxedError> {
+    io::println(&format!("Processing data: {}", data_str));
+    // safe_parse_i64'ten gelen ParseError'ı BoxedError'a dönüştür.
+    let number = safe_parse_i64(data_str)
+        .map_err(|e| BoxedError::new(e))?; // ? operatörü burada varsayımsal
+
+    if number < 0 {
+        return Result::Err(BoxedError::new(InvalidInputError::new(
+            "data_str".to_string(),
+            "Number cannot be negative".to_string(),
+        )));
+    }
+    Result::Ok(number * 2)
+}
+
+
+fn main() {
+    io::println("Starting Error Handling example...".to_string());
+
+    // --- Result::Ok kullanımı ---
+    let valid_num_str = "123".to_string();
+    match safe_parse_i64(valid_num_str) {
+        Result::Ok(num) => io::println(&format!("Parsed number: {}", num.to_string())), // Output: "Parsed number: 123"
+        Result::Err(e) => io::println(&format!("Error parsing number: {}", e.description())),
+    }
+
+    // --- Result::Err kullanımı ---
+    let invalid_num_str = "abc".to_string();
+    match safe_parse_i64(invalid_num_str) {
+        Result::Ok(num) => io::println(&format!("Parsed number: {}", num.to_string())),
+        Result::Err(e) => io::println(&format!("Error parsing number: {}", e.description())), // Output: "Error parsing number: Parse Error: Invalid integer format (Input: 'abc')"
+    }
+
+    // --- `unwrap()` ile panikleme örneği (Yorum Satırı - Kullanılmaması tavsiye edilir) ---
+     let bad_input = "xyz".to_string();
+     let num_unwrapped = safe_parse_i64(bad_input).unwrap(); // BURADA PANİK OLUR!
+     io::println(&format!("Unwrapped number: {}", num_unwrapped.to_string()));
+
+
+    // --- Hata zinciri ve BoxedError kullanımı ---
+    io::println("\n--- Error Chaining with BoxedError ---".to_string());
+
+    let file_parse_test_path = "non_existent.cfg".to_string();
+    match read_config_file(file_parse_test_path.clone())
+        .and_then(|config_str| {
+            // Varsayımsal olarak config_str'ı ayrıştırmayı deneyelim
+            // Bu ayrıştırma da bir hata verebilir
+            let first_line = config_str.split("\n").next().unwrap_or("".to_string()); // Varsayımsal split
+            safe_parse_i64(first_line.split("=").last().unwrap_or("".to_string())) // "value" kısmını alıp i64'e parse et
+                .map_err(|e| BoxedError::new(e)) // ParseError'ı BoxedError'a dönüştür
+        })
+        .map_err(|e| {
+            // Okuma veya ayrıştırma hatasını bir üst seviye hataya sar
+            BoxedError::new(SystemError::with_source(
+                1001,
+                "Failed to load and parse configuration".to_string(),
+                e // Önceki hatayı kaynak olarak ata
+            ))
+        })
+    {
+        Result::Ok(data) => io::println(&format!("Successfully processed config data: {}", data.to_string())),
+        Result::Err(e) => {
+            io::println(&format!("Full error chain for config processing:"));
+            io::println(&error::format_error_chain(e.as_ref()));
+            // Output benzeri:
+            // Full error chain for config processing:
+            // System Error 1001: Failed to load and parse configuration
+            //   Caused by: IO Error (FileNotFound: The specified config file was not found) (Path: 'non_existent.cfg')
+        }
+    }
+
+
+    // --- process_data fonksiyonu ile hata işleme ---
+    io::println("\n--- Using process_data (complex flow) ---".to_string());
+
+    match process_data("50".to_string()) {
+        Result::Ok(res) => io::println(&format!("Result for '50': {}", res.to_string())), // Output: "Result for '50': 100"
+        Result::Err(e) => io::println(&format!("Error processing '50': {}", error::format_error_chain(e.as_ref()))),
+    }
+
+    match process_data("-10".to_string()) {
+        Result::Ok(res) => io::println(&format!("Result for '-10': {}", res.to_string())),
+        Result::Err(e) => io::println(&format!("Error processing '-10': {}", error::format_error_chain(e.as_ref()))), // Output: "Error processing '-10': Invalid Input for 'data_str': Number cannot be negative"
+    }
+
+    match process_data("not_a_number".to_string()) {
+        Result::Ok(res) => io::println(&format!("Result for 'not_a_number': {}", res.to_string())),
+        Result::Err(e) => io::println(&format!("Error processing 'not_a_number': {}", error::format_error_chain(e.as_ref()))),
+        // Output: "Error processing 'not_a_number': Parse Error: Invalid integer format (Input: 'not_a_number')"
+    }
+
+
+    io::println("\nError Handling example finished.".to_string());
+}
