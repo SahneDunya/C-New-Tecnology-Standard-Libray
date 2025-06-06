@@ -1,0 +1,441 @@
+// spi.cnt
+// Seri Çevresel Arayüz (SPI) Modülü
+// Tam çift yönlü, senkron seri haberleşme için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli SPI donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::gpio::GpioPin;  // Chip Select (CS) pinini yönetmek için GPIO modülü
+import std::vec::Vec;       // Veri tamponları için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `io::Port` veya `mem::register` gibi bir kütüphane/modül aracılığıyla.
+// Ayrıca, saat (clock) yönetimi modülüne ihtiyaç duyulabilir.
+
+/// `SpiError`: SPI işlemleri sırasında oluşabilecek hata türleri.
+pub enum SpiError {
+    /// Geçersiz SPI ID'si veya pin konfigürasyonu.
+    InvalidConfiguration(String),
+    /// Veri transferi zaman aşımına uğradı.
+    Timeout(String),
+    /// Donanım birimi meşgul.
+    SpiBusy(String),
+    /// FIFO (İlk Giren İlk Çıkar) tamponu hatası.
+    FifoError(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Çip Seçme (Chip Select) pini hatası.
+    ChipSelectError(String),
+    /// Genel bir SPI hatası.
+    Custom(String),
+}
+
+impl Error for SpiError {
+    fn description(&self) -> String {
+        match self {
+            SpiError::InvalidConfiguration(msg) => format!("Invalid SPI Configuration: {}", msg),
+            SpiError::Timeout(msg) => format!("SPI Timeout: {}", msg),
+            SpiError::SpiBusy(msg) => format!("SPI Busy: {}", msg),
+            SpiError::FifoError(msg) => format!("SPI FIFO Error: {}", msg),
+            SpiError::HardwareAccessError(msg) => format!("SPI Hardware Access Error: {}", msg),
+            SpiError::ChipSelectError(msg) => format!("SPI Chip Select Error: {}", msg),
+            SpiError::Custom(msg) => format!("SPI Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `SpiMode`: SPI saat polaritesi (CPOL) ve saat fazı (CPHA) ayarları.
+/// Bu modlar, master ve slave cihazlar arasındaki veri aktarım zamanlamasını belirler.
+///
+/// | Mod | CPOL (Saat Polaritesi) | CPHA (Saat Fazı) | Açıklama                                       |
+/// |-----|------------------------|------------------|------------------------------------------------|
+/// | 0   | 0 (Düşük)              | 0 (İlk kenar)    | Veri saat darbesinin yükselen kenarında örneklenir. |
+/// | 1   | 0 (Düşük)              | 1 (İkinci kenar) | Veri saat darbesinin düşen kenarında örneklenir.   |
+/// | 2   | 1 (Yüksek)             | 0 (İlk kenar)    | Veri saat darbesinin düşen kenarında örneklenir.   |
+/// | 3   | 1 (Yüksek)             | 1 (İkinci kenar) | Veri saat darbesinin yükselen kenarında örneklenir. |
+pub enum SpiMode {
+    Mode0, // CPOL = 0, CPHA = 0
+    Mode1, // CPOL = 0, CPHA = 1
+    Mode2, // CPOL = 1, CPHA = 0
+    Mode3, // CPOL = 1, CPHA = 1
+}
+
+/// `SpiBitOrder`: Verilerin en anlamlı bitten (MSB) mi yoksa en az anlamlı bitten (LSB) mi
+/// önce gönderildiğini veya alındığını belirler.
+pub enum SpiBitOrder {
+    MsbFirst,
+    LsbFirst,
+}
+
+/// `SpiConfig`: SPI biriminin yapılandırma ayarları.
+pub struct SpiConfig {
+    pub baud_rate: u32,       // SPI saat frekansı (Hz cinsinden)
+    pub mode: SpiMode,        // SPI modu (CPOL ve CPHA)
+    pub bit_order: SpiBitOrder, // Bit sırası (MSB First veya LSB First)
+    pub data_bits: u8,        // Her transferde kaç veri biti (genellikle 8 veya 16)
+    // Diğer potansiyel ayarlar (örn. master/slave modu, FIFO boyutları)
+}
+
+impl Default for SpiConfig {
+    fn default() -> SpiConfig {
+        SpiConfig {
+            baud_rate: 1_000_000, // 1 MHz varsayılan
+            mode: SpiMode::Mode0,
+            bit_order: SpiBitOrder::MsbFirst,
+            data_bits: 8, // 8-bit transfer varsayılan
+        }
+    }
+}
+
+/// `Spi`: Tek bir SPI birimini temsil eden yapı.
+/// Bu yapı, SPI'ın durumunu, ilgili donanım kayıtlarını ve bir çip seçme (CS) pinini soyutlar.
+pub struct Spi {
+    id: u8, // SPI birimi ID'si (örneğin SPI0, SPI1)
+    config: SpiConfig,
+    cs_pin: Option<GpioPin>, // Bu SPI birimiyle kullanılan Chip Select (CS) pini (opsiyonel)
+    is_initialized: bool,
+    // Gerçek bir implementasyonda, burada SPI biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, dr_offset: u32, sr_offset: u32, cr_offset: u32
+}
+
+impl Spi {
+    /// `new(id: u8, config: SpiConfig, cs_pin_num: Option<u8>) -> Result<Spi, SpiError>`:
+    /// Belirtilen ID, yapılandırma ve opsiyonel bir Çip Seçme (CS) pin numarası için
+    /// yeni bir `Spi` örneği oluşturur ve başlatır.
+    /// CS pini sağlanırsa, otomatik olarak output olarak yapılandırılır ve deasserted (pasif) duruma getirilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bu fonksiyon güvenli değildir, çünkü bir SPI birimini başlatmak ve yapılandırmak,
+    /// donanım kaynaklarını ayırabilir, pinleri alternatif fonksiyona geçirebilir (SCK, MOSI, MISO)
+    /// ve varsayılan donanım kayıtlarını etkileyebilir. Ayrıca GPIO pinlerini kontrol etmek de unsafe'dir.
+    pub unsafe fn new(id: u8, config: SpiConfig, cs_pin_num: Option<u8>) -> Result<Spi, SpiError> {
+        // Varsayımsal donanım sınırı kontrolü
+        if id >= MAX_SPI_UNITS {
+            return Result::Err(SpiError::InvalidConfiguration(
+                format!("SPI ID {} is out of range.", id.to_string())
+            ));
+        }
+
+        // Konfigürasyonun geçerliliğini kontrol et (örn. baud hızı, data bits)
+        if config.baud_rate == 0 || config.baud_rate > MAX_SPI_BAUD_RATE ||
+           !(config.data_bits == 8 || config.data_bits == 16) { // Varsayımsal olarak sadece 8 veya 16 bit
+            return Result::Err(SpiError::InvalidConfiguration(
+                format!("Invalid baud rate {} or data bits {}.", config.baud_rate.to_string(), config.data_bits.to_string())
+            ));
+        }
+
+        let mut cs_gpio_pin: Option<GpioPin> = Option::None;
+        if let Option::Some(pin_num) = cs_pin_num {
+            match GpioPin::new(pin_num) {
+                Result::Ok(mut pin) => {
+                    match pin.set_as_output() {
+                        Result::Ok(_) => {
+                            // CS pini normalde HIGH (pasif) olarak başlar.
+                            // Slave seçimi için LOW'a çekilir.
+                            match pin.set_high() {
+                                Result::Ok(_) => cs_gpio_pin = Option::Some(pin),
+                                Result::Err(e) => return Result::Err(SpiError::ChipSelectError(
+                                    format!("Failed to set CS pin high: {}", e.description())
+                                )),
+                            }
+                        },
+                        Result::Err(e) => return Result::Err(SpiError::ChipSelectError(
+                            format!("Failed to configure CS pin as output: {}", e.description())
+                        )),
+                    }
+                },
+                Result::Err(e) => return Result::Err(SpiError::ChipSelectError(
+                    format!("Failed to create CS GpioPin: {}", e.description())
+                )),
+            }
+        }
+
+        // SPI donanımını başlat ve yapılandır (saati aç, pinleri SPI moduna ayarla, baud hızı, mod vb.).
+        io::println(&format!("HW_API: Initializing SPI Unit {} with config: {{ Baud: {}, Mode: {:?}, BitOrder: {:?}, DataBits: {} }}.",
+            id.to_string(), config.baud_rate.to_string(), config.mode, config.bit_order, config.data_bits.to_string()));
+        // os_api::spi_init(id, &config);
+
+        Result::Ok(Spi {
+            id,
+            config,
+            cs_pin: cs_gpio_pin,
+            is_initialized: true,
+        })
+    }
+
+    /// `transfer(&self, tx_buffer: &[u8], rx_buffer: &mut [u8]) -> Result<(), SpiError>`:
+    /// SPI üzerinden veri gönderir ve aynı anda veri alır.
+    /// `tx_buffer` gönderilecek verileri içerir, `rx_buffer` alınan verileri depolamak için kullanılır.
+    /// Her iki tamponun boyutu aynı olmalıdır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım transfer kaydına doğrudan yazma ve okuma işlemleri içerdiğinden güvenli değildir.
+    /// Yanlış kullanım, veri bozulmasına veya donanım kilitlenmelerine neden olabilir.
+    /// Ayrıca CS pini kontrolü de unsafe'dir.
+    pub unsafe fn transfer(&self, tx_buffer: &[u8], rx_buffer: &mut [u8]) -> Result<(), SpiError> {
+        if tx_buffer.len() != rx_buffer.len() {
+            return Result::Err(SpiError::InvalidConfiguration(
+                "TX and RX buffers must have the same length.".to_string()
+            ));
+        }
+        if !self.is_initialized {
+            return Result::Err(SpiError::Custom("SPI not initialized.".to_string()));
+        }
+        if tx_buffer.is_empty() {
+            return Result::Ok(()); // Boş transfer, sorun yok
+        }
+
+        // Çip Seçme (CS) pinini aktif hale getir (LOW)
+        if let Option::Some(mut cs) = self.cs_pin.as_ref() {
+            match cs.set_low() { // CS pini genellikle aktif LOW'dur
+                Result::Ok(_) => io::println(&format!("HW_API: CS pin {} asserted (LOW).", cs.get_pin_num().to_string())),
+                Result::Err(e) => return Result::Err(SpiError::ChipSelectError(
+                    format!("Failed to assert CS pin: {}", e.description())
+                )),
+            }
+        }
+
+        io::println(&format!("HW_API: Starting SPI Unit {} transfer ({} bytes).", self.id.to_string(), tx_buffer.len().to_string()));
+
+        for i in 0..tx_buffer.len() {
+            let tx_byte = tx_buffer[i];
+            // Gerçekte, SPI transfer fonksiyonu burada çağrılır.
+            // Bu, TX FIFO'ya yazmayı, RX FIFO'dan okumayı ve donanımın meşgul olmasını beklemeyi içerir.
+             let (rx_byte_res, status_flags) = os_api::spi_transfer_byte(self.id, tx_byte, self.config.data_bits, 100); // 100ms timeout
+             if rx_byte_res.is_err() {
+            //     // CS pinini pasif hale getirip hatayı döndür
+                 if let Option::Some(mut cs) = self.cs_pin.as_ref() { cs.set_high(); }
+                 return Result::Err(SpiError::Timeout("SPI transfer timeout.".to_string()));
+             }
+             rx_buffer[i] = rx_byte_res.unwrap();
+            
+            // Simülasyon: Gönderilen baytı (veya biraz değiştirilmiş halini) alıcıya kopyala
+            rx_buffer[i] = tx_byte + 1; // Basit bir simülasyon değişimi
+            io::println(&format!("  TX: 0x{:X}, RX: 0x{:X}", tx_byte, rx_buffer[i]));
+        }
+
+        // Çip Seçme (CS) pinini pasif hale getir (HIGH)
+        if let Option::Some(mut cs) = self.cs_pin.as_ref() {
+            match cs.set_high() {
+                Result::Ok(_) => io::println(&format!("HW_API: CS pin {} deasserted (HIGH).", cs.get_pin_num().to_string())),
+                Result::Err(e) => return Result::Err(SpiError::ChipSelectError(
+                    format!("Failed to deassert CS pin: {}", e.description())
+                )),
+            }
+        }
+
+        Result::Ok(())
+    }
+
+    /// `write(&self, tx_buffer: &[u8]) -> Result<(), SpiError>`:
+    /// SPI üzerinden veri gönderir. Alınan veriler göz ardı edilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `transfer`'ı çağırdığı için güvenli değildir.
+    pub unsafe fn write(&self, tx_buffer: &[u8]) -> Result<(), SpiError> {
+        let mut dummy_rx_buffer = Vec::new_with_capacity(tx_buffer.len());
+        dummy_rx_buffer.resize(tx_buffer.len());
+        self.transfer(tx_buffer, &mut dummy_rx_buffer.as_slice())
+    }
+
+    /// `read(&self, rx_buffer: &mut [u8], dummy_byte: u8) -> Result<(), SpiError>`:
+    /// SPI üzerinden veri okur. Okuma sırasında gönderilecek boş (dummy) baytı belirtir.
+    /// Okuma işlemi, bu boş baytı gönderirken gerçekleşir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// `transfer`'ı çağırdığı için güvenli değildir.
+    pub unsafe fn read(&self, rx_buffer: &mut [u8], dummy_byte: u8) -> Result<(), SpiError> {
+        let mut tx_buffer = Vec::new_with_capacity(rx_buffer.len());
+        for _ in 0..rx_buffer.len() {
+            tx_buffer.push(dummy_byte);
+        }
+        self.transfer(tx_buffer.as_slice(), rx_buffer)
+    }
+
+    /// `get_config(&self) -> &SpiConfig`:
+    /// Mevcut SPI yapılandırmasını döndürür.
+    pub fn get_config(&self) -> &SpiConfig {
+        &self.config
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum SPI birimi sayısını belirtir.
+const MAX_SPI_UNITS: u8 = 2; // Örneğin, SPI0 ve SPI1
+// Varsayımsal maksimum SPI baud hızı
+const MAX_SPI_BAUD_RATE: u32 = 20_000_000; // Örneğin, 20 MHz
+
+// --- Örnek Kullanım için Gerekli Dummy GPIO Modülü ---
+// Bu modül, Spi modülünün çalışması için temel GPIO bağımlılığını sağlar.
+pub mod std {
+    pub mod gpio {
+        use super::super::super::Result;
+        use super::super::super::Error;
+        use super::super::super::String;
+
+        #[derive(Debug)]
+        pub enum GpioError {
+            InvalidPin(String),
+            PinInUse(String),
+            HardwareAccessError(String),
+            Custom(String),
+        }
+
+        impl Error for GpioError {
+            fn description(&self) -> String {
+                format!("{:?}", self) // Basitlik adına
+            }
+            fn source(&self) -> Option<&(dyn Error)> {
+                Option::None
+            }
+        }
+
+        pub struct GpioPin {
+            pin_num: u8,
+            is_output: bool,
+            current_state: bool, // true for HIGH, false for LOW
+        }
+
+        impl GpioPin {
+            pub unsafe fn new(pin_num: u8) -> Result<GpioPin, GpioError> {
+                if pin_num > 31 { // Varsayımsal maks pin sayısı
+                    return Result::Err(GpioError::InvalidPin(format!("Pin {} invalid.", pin_num.to_string())));
+                }
+                super::io::println(&format!("HW_API: Initializing GPIO Pin {}.", pin_num.to_string()));
+                Result::Ok(GpioPin { pin_num, is_output: false, current_state: false })
+            }
+
+            pub unsafe fn set_as_output(&mut self) -> Result<(), GpioError> {
+                super::io::println(&format!("HW_API: Setting Pin {} as Output.", self.pin_num.to_string()));
+                self.is_output = true;
+                Result::Ok(())
+            }
+
+            pub unsafe fn set_high(&mut self) -> Result<(), GpioError> {
+                if !self.is_output { return Result::Err(GpioError::Custom("Pin not configured as output.".to_string())); }
+                super::io::println(&format!("HW_API: Setting Pin {} HIGH.", self.pin_num.to_string()));
+                self.current_state = true;
+                Result::Ok(())
+            }
+
+            pub unsafe fn set_low(&mut self) -> Result<(), GpioError> {
+                if !self.is_output { return Result::Err(GpioError::Custom("Pin not configured as output.".to_string())); }
+                super::io::println(&format!("HW_API: Setting Pin {} LOW.", self.pin_num.to_string()));
+                self.current_state = false;
+                Result::Ok(())
+            }
+
+            pub fn get_pin_num(&self) -> u8 {
+                self.pin_num
+            }
+        }
+    }
+
+    // Dummy `std::time` for mock
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            super::io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+
+fn main() {
+    io::println("Starting SPI example...".to_string());
+
+    // SPI Unit 0'ı kullanalım
+    io::println("\n--- Initializing SPI Unit 0 ---".to_string());
+
+    // Varsayılan yapılandırma: 1MHz, Mode0, MSB First, 8-bit veri
+    let mut config = SpiConfig::default();
+    config.baud_rate = 5_000_000; // 5 MHz
+    config.mode = SpiMode::Mode0;
+    config.data_bits = 8;
+
+    // SPI Unit 0 için CS pini olarak GPIO 4'ü kullanalım
+    let cs_pin_num = Option::Some(4);
+
+    // UNSAFE BLOCK - SPI birimini başlatmak ve kontrol etmek unsafe'dir.
+    unsafe {
+        let spi_res = Spi::new(0, config, cs_pin_num); // SPI Unit 0
+
+        let mut spi_instance: Option<Spi> = Option::None;
+
+        match spi_res {
+            Result::Ok(spi) => {
+                io::println("SPI Unit 0 created successfully.".to_string());
+                spi_instance = Option::Some(spi);
+            },
+            Result::Err(e) => io::println(&format!("Error creating SPI: {}", e.description())),
+        }
+
+        if let Option::Some(mut spi) = spi_instance {
+            io::println("\n--- Performing SPI Transfer (Write & Read) ---".to_string());
+            let tx_data = [0xAA, 0x55, 0x01, 0x02]; // Gönderilecek veri
+            let mut rx_data = Vec::new_with_capacity(tx_data.len());
+            rx_data.resize(tx_data.len()); // Alınan veri için yer ayır
+
+            match spi.transfer(&tx_data, &mut rx_data.as_slice()) {
+                Result::Ok(_) => {
+                    io::println(&format!("SPI transfer complete."));
+                    io::println(&format!("  Sent: {:?}", tx_data.as_slice()));
+                    io::println(&format!("  Received: {:?}", rx_data.as_slice()));
+                },
+                Result::Err(e) => io::println(&format!("Error during SPI transfer: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(100); // Kısa bir gecikme
+
+            io::println("\n--- Performing SPI Write Only ---".to_string());
+            let write_only_data = [0x11, 0x22, 0x33];
+            match spi.write(&write_only_data) {
+                Result::Ok(_) => io::println(&format!("SPI write only complete. Sent: {:?}", write_only_data.as_slice())),
+                Result::Err(e) => io::println(&format!("Error during SPI write: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(100);
+
+            io::println("\n--- Performing SPI Read Only (using dummy byte) ---".to_string());
+            let mut read_data = Vec::new_with_capacity(5);
+            read_data.resize(5); // 5 bayt okuyacağız
+            let dummy_byte = 0xFF; // Okurken gönderilecek boş bayt
+            match spi.read(&mut read_data.as_slice(), dummy_byte) {
+                Result::Ok(_) => io::println(&format!("SPI read only complete. Read: {:?}", read_data.as_slice())),
+                Result::Err(e) => io::println(&format!("Error during SPI read: {}", e.description())),
+            }
+
+            // Geçersiz konfigürasyon denemesi (çok yüksek baud hızı)
+            io::println("\n--- Attempting to Create SPI with Invalid Baud Rate (Expected Error) ---".to_string());
+            let invalid_config = SpiConfig {
+                baud_rate: MAX_SPI_BAUD_RATE + 1, // Max baud rate'den büyük
+                ..SpiConfig::default()
+            };
+            match Spi::new(1, invalid_config, Option::None) { // SPI Unit 1
+                Result::Ok(_) => io::println("This should not happen: Successfully created SPI with invalid baud rate!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidConfiguration
+            }
+            spi_instance = Option::Some(spi); // Güncellenmiş örneği geri kaydet
+        }
+    }
+
+    io::println("\nSPI example finished.".to_string());
+}
