@@ -1,0 +1,557 @@
+// rtc.cnt
+// Gerçek Zaman Saati (RTC) Modülü
+// Doğru zaman ve tarih bilgilerini takip etmek için bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli RTC donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::rtc_controller` gibi bir kütüphane/modülü aracılığıyla.
+
+/// `RtcError`: RTC işlemleri sırasında oluşabilecek hata türleri.
+pub enum RtcError {
+    /// Geçersiz zaman veya tarih değeri.
+    InvalidTime(String),
+    /// RTC birimi başlatılmadı veya yapılandırılmadı.
+    NotInitialized(String),
+    /// RTC meşgul veya kilitlenmiş.
+    Busy(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Alarm zaten kurulu.
+    AlarmAlreadySet(String),
+    /// Alarm kurulu değil.
+    AlarmNotSet(String),
+    /// Genel bir RTC hatası.
+    Custom(String),
+}
+
+impl Error for RtcError {
+    fn description(&self) -> String {
+        match self {
+            RtcError::InvalidTime(msg) => format!("Invalid Time or Date: {}", msg),
+            RtcError::NotInitialized(msg) => format!("RTC Not Initialized: {}", msg),
+            RtcError::Busy(msg) => format!("RTC Busy: {}", msg),
+            RtcError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            RtcError::AlarmAlreadySet(msg) => format!("Alarm Already Set: {}", msg),
+            RtcError::AlarmNotSet(msg) => format!("Alarm Not Set: {}", msg),
+            RtcError::Custom(msg) => format!("RTC Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `DayOfWeek`: Haftanın günleri.
+pub enum DayOfWeek {
+    Sunday = 0,
+    Monday = 1,
+    Tuesday = 2,
+    Wednesday = 3,
+    Thursday = 4,
+    Friday = 5,
+    Saturday = 6,
+}
+
+impl fmt::Debug for DayOfWeek {
+    fn fmt(&self, f: &mut fmt::Formatter) {
+        match self {
+            DayOfWeek::Sunday => f.write_str("Sunday"),
+            DayOfWeek::Monday => f.write_str("Monday"),
+            DayOfWeek::Tuesday => f.write_str("Tuesday"),
+            DayOfWeek::Wednesday => f.write_str("Wednesday"),
+            DayOfWeek::Thursday => f.write_str("Thursday"),
+            DayOfWeek::Friday => f.write_str("Friday"),
+            DayOfWeek::Saturday => f.write_str("Saturday"),
+        }
+    }
+}
+
+/// `DateTime`: RTC'nin takip ettiği tarih ve saat bilgilerini tutan yapı.
+/// Yıl, ay, gün, haftanın günü, saat, dakika ve saniyeyi içerir.
+/// Milisaniye hassasiyeti bazı RTC'lerde desteklense de, burada temel RTC için hariç bırakılmıştır.
+#[derive(Copy, Clone, PartialEq, Eq)] // Kopyalanabilir, karşılaştırılabilir olsun
+pub struct DateTime {
+    pub year: u16,       // 2000-2099 arası yaygın olarak desteklenir
+    pub month: u8,       // 1-12
+    pub day: u8,         // 1-31
+    pub day_of_week: DayOfWeek, // 0-6 (Pazar-Cumartesi)
+    pub hour: u8,        // 0-23
+    pub minute: u8,      // 0-59
+    pub second: u8,      // 0-59
+}
+
+impl fmt::Debug for DateTime {
+    fn fmt(&self, f: &mut fmt::Formatter) {
+        f.write_str(&format!(
+            "{:04}-{:02}-{:02} {:?} {:02}:{:02}:{:02}",
+            self.year.to_string(), self.month.to_string(), self.day.to_string(),
+            self.day_of_week, self.hour.to_string(), self.minute.to_string(), self.second.to_string()
+        ));
+    }
+}
+
+impl DateTime {
+    /// `new(...) -> Result<DateTime, RtcError>`: Yeni bir DateTime örneği oluşturur.
+    /// Geçersiz tarih/saat değerleri için hata döner.
+    pub fn new(year: u16, month: u8, day: u8, day_of_week: DayOfWeek, hour: u8, minute: u8, second: u8) -> Result<DateTime, RtcError> {
+        if year < 2000 || year > 2099 { // Yaygın RTC aralığı
+            return Result::Err(RtcError::InvalidTime("Year out of valid range (2000-2099).".to_string()));
+        }
+        if month == 0 || month > 12 {
+            return Result::Err(RtcError::InvalidTime("Month out of valid range (1-12).".to_string()));
+        }
+        if day == 0 || day > 31 { // Basit kontrol, ayın günlerini tam kontrol etmez
+            return Result::Err(RtcError::InvalidTime("Day out of valid range (1-31).".to_string()));
+        }
+        if hour > 23 || minute > 59 || second > 59 {
+            return Result::Err(RtcError::InvalidTime("Hour, minute or second out of valid range.".to_string()));
+        }
+
+        // Basit bir artık yıl kontrolü (sadece 29 Şubat için)
+        if month == 2 && day > 29 {
+            return Result::Err(RtcError::InvalidTime("February cannot have more than 29 days.".to_string()));
+        }
+        if month == 2 && day == 29 && (year % 4 != 0 || (year % 100 == 0 && year % 400 != 0)) {
+            return Result::Err(RtcError::InvalidTime(format!("Year {} is not a leap year, February cannot have 29 days.", year.to_string())));
+        }
+
+        Result::Ok(DateTime {
+            year, month, day, day_of_week, hour, minute, second
+        })
+    }
+}
+
+
+/// `Rtc`: RTC birimini temsil eden yapı.
+pub struct Rtc {
+    id: u8, // RTC birimi ID'si (örneğin RTC0)
+    is_initialized: bool,
+    // Gerçek bir implementasyonda, burada RTC biriminin donanım register adresleri
+    // veya bir port nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, control_reg: u32, time_reg: u32, date_reg: u32, alarm_reg: u32
+}
+
+// Varsayımsal global statik depolama alanı
+static mut RTC_INSTANCE: Option<Rtc> = Option::None; // Tek bir RTC örneği için (singleton)
+
+/// `init(rtc_id: u8) -> Result<(), RtcError>`:
+/// RTC modülünü başlatır ve belirtilen RTC birimini yapılandırır.
+/// Genellikle yedek pil kontrolünü ve ilk zaman ayarını içerir.
+/// Yalnızca bir kez çağrılmalıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım RTC birimini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init(rtc_id: u8) -> Result<(), RtcError> {
+    if RTC_INSTANCE.is_some() {
+        return Result::Err(RtcError::Custom("RTC module already initialized.".to_string()));
+    }
+    if rtc_id >= MAX_RTC_UNITS { // MAX_RTC_UNITS tanımlanmış bir sabit olmalı
+        return Result::Err(RtcError::InvalidTime(
+            format!("RTC ID {} is out of range.", rtc_id.to_string())
+        ));
+    }
+
+    io::println(&format!("HW_API: Initializing RTC Unit {}.", rtc_id.to_string()));
+    // Gerçekte, RTC donanımının saatleri açılır, varsayılan değerler ayarlanır,
+    // pil durumu kontrol edilir ve gerekirse ilk kez ayarlanır.
+     os_api::rtc_init(rtc_id);
+
+    let rtc = Rtc {
+        id: rtc_id,
+        is_initialized: true,
+    };
+    RTC_INSTANCE = Option::Some(rtc);
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), RtcError>`:
+/// RTC modülünü devre dışı bırakır ve kaynakları serbest bırakır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım RTC birimini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), RtcError> {
+    if RTC_INSTANCE.is_none() {
+        return Result::Err(RtcError::NotInitialized("RTC module not initialized.".to_string()));
+    }
+
+    io::println("HW_API: De-initializing RTC Module.".to_string());
+     os_api::rtc_deinit(RTC_INSTANCE.as_ref().unwrap().id);
+    RTC_INSTANCE = Option::None;
+    Result::Ok(())
+}
+
+
+impl Rtc {
+    /// `get_instance() -> Result<&'static mut Rtc, RtcError>`:
+    /// Başlatılmış RTC örneğine erişim sağlar (Singleton deseni).
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `RTC_INSTANCE`'a mutlak erişim sağladığından güvenli değildir.
+    pub unsafe fn get_instance() -> Result<&'static mut Rtc, RtcError> {
+        if let Option::Some(ref mut rtc) = RTC_INSTANCE {
+            Result::Ok(rtc)
+        } else {
+            Result::Err(RtcError::NotInitialized("RTC module not initialized. Call init() first.".to_string()))
+        }
+    }
+
+    /// `set_time(&mut self, datetime: &DateTime) -> Result<(), RtcError>`:
+    /// RTC'nin zamanını ve tarihini ayarlar.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım RTC kayıtlarını doğrudan değiştirdiğinden güvenli değildir.
+    pub unsafe fn set_time(&mut self, datetime: &DateTime) -> Result<(), RtcError> {
+        if !self.is_initialized {
+            return Result::Err(RtcError::NotInitialized("RTC not initialized.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Setting RTC Unit {} time to {:?}.", self.id.to_string(), datetime));
+        // Gerçekte, RTC donanımının zaman ve tarih kayıtları güncellenir.
+         os_api::rtc_set_time(self.id, datetime);
+        Result::Ok(())
+    }
+
+    /// `get_time(&self) -> Result<DateTime, RtcError>`:
+    /// RTC'den mevcut zaman ve tarih bilgilerini okur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım RTC kayıtlarını doğrudan okuduğundan güvenli değildir.
+    pub unsafe fn get_time(&self) -> Result<DateTime, RtcError> {
+        if !self.is_initialized {
+            return Result::Err(RtcError::NotInitialized("RTC not initialized.".to_string()));
+        }
+
+        // Gerçekte, RTC donanımından zaman ve tarih kayıtları okunur.
+        // Bu veriler ham BCD (İkili Kodlu Ondalık) formatında olabilir ve dönüştürülmesi gerekebilir.
+         let raw_time = os_api::rtc_read_time(self.id);
+         let raw_date = os_api::rtc_read_date(self.id);
+         let datetime = convert_raw_to_datetime(raw_time, raw_date); // Varsayımsal yardımcı fonksiyon
+
+        // Simülasyon: Örnek bir zaman döndürelim (gerçekte RTC'den okunur)
+        // Her çağrıda zamanı biraz ilerletelim
+        static mut SIM_YEAR: u16 = 2025;
+        static mut SIM_MONTH: u8 = 6;
+        static mut SIM_DAY: u8 = 6;
+        static mut SIM_HOUR: u8 = 12;
+        static mut SIM_MINUTE: u8 = 25;
+        static mut SIM_SECOND: u8 = 41;
+        static mut SIM_DAY_OF_WEEK: DayOfWeek = DayOfWeek::Friday;
+
+        SIM_SECOND += 1;
+        if SIM_SECOND >= 60 {
+            SIM_SECOND = 0;
+            SIM_MINUTE += 1;
+            if SIM_MINUTE >= 60 {
+                SIM_MINUTE = 0;
+                SIM_HOUR += 1;
+                if SIM_HOUR >= 24 {
+                    SIM_HOUR = 0;
+                    SIM_DAY += 1;
+                    SIM_DAY_OF_WEEK = match SIM_DAY_OF_WEEK {
+                        DayOfWeek::Saturday => DayOfWeek::Sunday,
+                        _ => (SIM_DAY_OF_WEEK as u8 + 1) as DayOfWeek,
+                    };
+                    // Basit gün/ay/yıl artırma mantığı, tam takvim doğrulaması yok
+                    if SIM_DAY > 30 { // Basit simülasyon
+                        SIM_DAY = 1;
+                        SIM_MONTH += 1;
+                        if SIM_MONTH > 12 {
+                            SIM_MONTH = 1;
+                            SIM_YEAR += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let sim_dt_res = DateTime::new(
+            SIM_YEAR, SIM_MONTH, SIM_DAY, SIM_DAY_OF_WEEK,
+            SIM_HOUR, SIM_MINUTE, SIM_SECOND
+        );
+        match sim_dt_res {
+            Result::Ok(dt) => {
+                io::println(&format!("HW_API: Read RTC Unit {} time: {:?}.", self.id.to_string(), dt));
+                Result::Ok(dt)
+            },
+            Result::Err(e) => {
+                io::println(&format!("SIMULATION ERROR: Could not create simulated DateTime: {}", e.description()));
+                Result::Err(RtcError::Custom("Simulated time error.".to_string()))
+            }
+        }
+    }
+
+    /// `set_alarm(&mut self, datetime: &DateTime, callback: fn()) -> Result<(), RtcError>`:
+    /// Belirtilen zaman ve tarih için bir alarm kurar. Alarm tetiklendiğinde `callback` çağrılır.
+    /// Bazı RTC'ler yalnızca saat/dakika/saniye alarmı destekler. Tam tarih/saat desteği varsayılmıştır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım RTC alarm kayıtlarını değiştirdiğinden ve bir kesme işleyicisi (callback)
+    /// kaydettiğinden güvenli değildir. `callback` fonksiyonunun kesme güvenli olması kritik öneme sahiptir.
+    pub unsafe fn set_alarm(&mut self, datetime: &DateTime, callback: fn()) -> Result<(), RtcError> {
+        if !self.is_initialized {
+            return Result::Err(RtcError::NotInitialized("RTC not initialized.".to_string()));
+        }
+
+        // Simülasyon için tek bir alarm desteği
+        if self.is_alarm_set() {
+            return Result::Err(RtcError::AlarmAlreadySet("An alarm is already set.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Setting RTC Unit {} alarm to {:?}.", self.id.to_string(), datetime));
+        // Gerçekte, RTC donanımının alarm kayıtları ayarlanır ve alarm kesmesi etkinleştirilir.
+         os_api::rtc_set_alarm(self.id, datetime);
+         os_api::rtc_enable_alarm_interrupt(self.id);
+
+        // Alarm callback'ini global olarak sakla (basit simülasyon)
+        ALARM_CALLBACK = Option::Some(callback);
+        ALARM_DATETIME = Option::Some(*datetime); // Alarm zamanını sakla
+        Result::Ok(())
+    }
+
+    /// `disable_alarm(&mut self) -> Result<(), RtcError>`:
+    /// Kurulmuş olan alarmı devre dışı bırakır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım RTC alarm kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn disable_alarm(&mut self) -> Result<(), RtcError> {
+        if !self.is_initialized {
+            return Result::Err(RtcError::NotInitialized("RTC not initialized.".to_string()));
+        }
+        if !self.is_alarm_set() {
+            return Result::Err(RtcError::AlarmNotSet("No alarm is currently set.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Disabling RTC Unit {} alarm.", self.id.to_string()));
+        // Gerçekte, RTC donanımının alarm kesmesi devre dışı bırakılır.
+         os_api::rtc_disable_alarm_interrupt(self.id);
+
+        ALARM_CALLBACK = Option::None;
+        ALARM_DATETIME = Option::None;
+        Result::Ok(())
+    }
+
+    /// `is_alarm_set(&self) -> bool`:
+    /// Şu anda bir alarmın kurulu olup olmadığını kontrol eder.
+    pub fn is_alarm_set(&self) -> bool {
+        // Gerçekte, donanım alarm durumu bayrağı okunur.
+        // Simülasyon için global değişkene bakıyoruz.
+        unsafe { ALARM_CALLBACK.is_some() }
+    }
+
+    /// `get_battery_status(&self) -> Result<bool, RtcError>`:
+    /// RTC'nin yedek pilinin durumunu kontrol eder. `true` pilin iyi durumda olduğunu, `false` düşük veya boş olduğunu gösterir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım RTC pil durumu kayıtlarını okuduğundan güvenli değildir.
+    pub unsafe fn get_battery_status(&self) -> Result<bool, RtcError> {
+        if !self.is_initialized {
+            return Result::Err(RtcError::NotInitialized("RTC not initialized.".to_string()));
+        }
+        io::println(&format!("HW_API: Checking RTC Unit {} battery status.", self.id.to_string()));
+        // Gerçekte, RTC donanımından pil durumu bayrağı okunur.
+         Result::Ok(os_api::rtc_get_battery_status(self.id));
+
+        // Simülasyon: Her zaman true dönelim
+        Result::Ok(true)
+    }
+
+    /// `_simulate_alarm_trigger()`:
+    /// Bu fonksiyon, geliştirme ve test amacıyla bir RTC alarmının tetiklenmesini simüle etmek için kullanılır.
+    /// Gerçek bir donanım üzerinde çağrılmamalıdır!
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Normalde donanım tarafından tetiklenecek bir olayı manuel olarak tetiklediğinden güvenli değildir.
+    /// Sadece test senaryoları için kullanılır.
+    pub unsafe fn _simulate_alarm_trigger(&mut self) {
+        if !self.is_initialized {
+            io::println("SIMULATION WARNING: RTC not initialized. Cannot simulate alarm.".to_string());
+            return;
+        }
+
+        io::println("SIMULATION: RTC Alarm Triggered!".to_string());
+        if let Option::Some(callback) = ALARM_CALLBACK {
+            callback(); // Kayıtlı callback'i çağır
+            // Tek atımlık alarm varsayımı: Alarmı devre dışı bırak
+            let _ = self.disable_alarm();
+        } else {
+            io::println("SIMULATION WARNING: No alarm callback registered.".to_string());
+        }
+    }
+}
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum RTC birimi sayısını belirtir.
+const MAX_RTC_UNITS: u8 = 1; // Genellikle tek bir RTC birimi olur.
+
+// Alarm durumu için global statik değişkenler (simülasyon amaçlı)
+static mut ALARM_CALLBACK: Option<fn()> = Option::None;
+static mut ALARM_DATETIME: Option<DateTime> = Option::None;
+
+
+// --- Örnek Kullanım ---
+
+import std::rtc::{self, Rtc, DateTime, DayOfWeek, RtcError};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+// Global flag for alarm triggered status (for example purposes only)
+static mut ALARM_TRIGGERED: bool = false;
+
+// Alarm Geri Çağırma Fonksiyonu (ISR benzeri)
+fn my_alarm_callback() {
+    unsafe {
+        io::println("  >>> ALARM: RTC Alarm has triggered!".to_string());
+        ALARM_TRIGGERED = true;
+    }
+}
+
+fn main() {
+    io::println("Starting RTC example...".to_string());
+
+    // UNSAFE BLOCK - RTC altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        io::println("\n--- Initializing RTC Module ---".to_string());
+        match rtc::init(0) { // RTC Unit 0
+            Result::Ok(_) => io::println("RTC module initialized.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing RTC module: {}", e.description()));
+                return;
+            }
+        }
+
+        let mut rtc_instance: Option<&'static mut Rtc> = Option::None;
+
+        match Rtc::get_instance() {
+            Result::Ok(instance) => {
+                io::println("RTC instance obtained.".to_string());
+                rtc_instance = Option::Some(instance);
+            },
+            Result::Err(e) => io::println(&format!("Error getting RTC instance: {}", e.description())),
+        }
+
+        if let Option::Some(rtc) = rtc_instance {
+            // Mevcut zamanı oku (ilk okuma, simüle edilmiş varsayılan değerler)
+            io::println("\n--- Reading current RTC time (initial) ---".to_string());
+            match rtc.get_time() {
+                Result::Ok(dt) => io::println(&format!("Current RTC Time: {:?}", dt)),
+                Result::Err(e) => io::println(&format!("Error reading RTC time: {}", e.description())),
+            }
+
+            // Yeni bir zaman ayarla
+            io::println("\n--- Setting new RTC time ---".to_string());
+            let new_time_res = DateTime::new(2025, 12, 25, DayOfWeek::Thursday, 10, 30, 0);
+            match new_time_res {
+                Result::Ok(new_time) => {
+                    match rtc.set_time(&new_time) {
+                        Result::Ok(_) => io::println("RTC time set successfully.".to_string()),
+                        Result::Err(e) => io::println(&format!("Error setting RTC time: {}", e.description())),
+                    }
+                },
+                Result::Err(e) => io::println(&format!("Error creating new DateTime: {}", e.description())),
+            }
+
+            // Ayarlanan zamanı tekrar oku
+            io::println("\n--- Reading RTC time after setting ---".to_string());
+            match rtc.get_time() {
+                Result::Ok(dt) => io::println(&format!("RTC Time (after set): {:?}", dt)),
+                Result::Err(e) => io::println(&format!("Error reading RTC time: {}", e.description())),
+            }
+
+            // Pil durumunu kontrol et
+            io::println("\n--- Checking RTC Battery Status ---".to_string());
+            match rtc.get_battery_status() {
+                Result::Ok(status) => {
+                    if status {
+                        io::println("RTC battery is good.".to_string());
+                    } else {
+                        io::println("RTC battery is low or empty.".to_string());
+                    }
+                },
+                Result::Err(e) => io::println(&format!("Error getting RTC battery status: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(100);
+
+            // Bir alarm kur
+            io::println("\n--- Setting an RTC Alarm ---".to_string());
+            let alarm_time_res = DateTime::new(2025, 12, 25, DayOfWeek::Thursday, 10, 30, 5); // 5 saniye sonrası
+            match alarm_time_res {
+                Result::Ok(alarm_time) => {
+                    ALARM_TRIGGERED = false; // Bayrağı sıfırla
+                    match rtc.set_alarm(&alarm_time, my_alarm_callback) {
+                        Result::Ok(_) => io::println(&format!("Alarm set for: {:?}", alarm_time)),
+                        Result::Err(e) => io::println(&format!("Error setting alarm: {}", e.description())),
+                    }
+                },
+                Result::Err(e) => io::println(&format!("Error creating alarm DateTime: {}", e.description())),
+            }
+
+            std::spirit::sleep_ms(1000); // 1 saniye bekle
+
+            io::println("\n--- Waiting for alarm (simulated)... ---".to_string());
+            let mut wait_count = 0;
+            while !ALARM_TRIGGERED && wait_count < 10 { // Maksimum 10 saniye bekle (simülasyon)
+                std::spirit::sleep_ms(1000); // Gerçekte burada alarm kesmesi beklenir
+                // Simülasyonda alarmı manuel olarak tetikleyelim
+                if rtc.is_alarm_set() { // Alarm hala kuruluysa tetikleyebiliriz
+                    rtc._simulate_alarm_trigger();
+                }
+                wait_count += 1;
+            }
+
+            if ALARM_TRIGGERED {
+                io::println("Alarm triggered successfully!".to_string());
+            } else {
+                io::println("Alarm did not trigger in simulated time.".to_string());
+            }
+
+            // Alarmın devre dışı bırakıldığını kontrol et (tek atımlık alarm varsayımı nedeniyle)
+            io::println(&format!("Is alarm set after trigger (should be false)? {}", rtc.is_alarm_set().to_string()));
+
+            // Zaten kurulu olmayan bir alarmı devre dışı bırakmaya çalış (beklenen hata)
+            io::println("\n--- Attempting to disable alarm that is not set (Expected Error) ---".to_string());
+            match rtc.disable_alarm() {
+                Result::Ok(_) => io::println("This should not happen: Successfully disabled non-existent alarm!".to_string()),
+                Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: AlarmNotSet
+            }
+        }
+
+        // Modülü de-initialize et
+        io::println("\n--- De-initializing RTC Module ---".to_string());
+        match rtc::deinit() {
+            Result::Ok(_) => io::println("RTC module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing RTC module: {}", e.description())),
+        }
+    }
+
+    io::println("\nRTC example finished.".to_string());
+}
