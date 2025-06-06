@@ -1,0 +1,342 @@
+// memory_protection.cnt
+// Bellek Koruma ve Erişim Kontrolü Modülü
+// Programın bellek bölgelerinin erişim izinlerini (okuma, yazma, çalıştırma) yönetmek için araçlar sağlar.
+// Bu fonksiyonlar işletim sistemi ile doğrudan etkileşime girer ve 'unsafe' kullanım gerektirir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+
+// Varsayımsal olarak, CNT'de ham işaretçi türleri (`*mut u8`, `*const u8`) mevcuttur.
+// Bu modülün, işletim sistemi bellek yönetimi API'lerine (örn. mmap, VirtualProtect, mprotect)
+// soyutlanmış bir arayüz sağladığı varsayılır.
+
+/// `ProtectionFlags`: Bellek bölgesi için erişim izinlerini tanımlayan bayraklar.
+pub enum ProtectionFlags {
+    /// Erişim yok (herhangi bir erişim hataya neden olur).
+    NoAccess,
+    /// Okuma izni.
+    Read,
+    /// Okuma ve yazma izni.
+    ReadWrite,
+    /// Okuma ve çalıştırma izni.
+    ReadExecute,
+    /// Okuma, yazma ve çalıştırma izni.
+    ReadWriteExecute,
+    /// Özel: Kopyalama üzerine yazma (copy-on-write) ile okuma/yazma.
+    /// Genellikle haritalanmış dosyalar veya paylaşımlı bellek için kullanılır.
+    ReadWriteCopy,
+}
+
+impl ProtectionFlags {
+    /// `to_os_flags(&self) -> u32`:
+    /// Dahili olarak işletim sisteminin beklediği bayrak değerine dönüştürür.
+    /// Bu, işletim sistemine özel bir eşlemedir.
+    fn to_os_flags(&self) -> u32 {
+        match self {
+            ProtectionFlags::NoAccess        => 0x0001, // Varsayımsal OS değeri
+            ProtectionFlags::Read            => 0x0002,
+            ProtectionFlags::ReadWrite       => 0x0004,
+            ProtectionFlags::ReadExecute     => 0x0008,
+            ProtectionFlags::ReadWriteExecute => 0x0010,
+            ProtectionFlags::ReadWriteCopy   => 0x0020,
+        }
+    }
+
+    /// `from_os_flags(os_flags: u32) -> Option<ProtectionFlags>`:
+    /// İşletim sistemi bayrak değerinden `ProtectionFlags` enum'una dönüştürür.
+    fn from_os_flags(os_flags: u32) -> Option<ProtectionFlags> {
+        match os_flags {
+            0x0001 => Option::Some(ProtectionFlags::NoAccess),
+            0x0002 => Option::Some(ProtectionFlags::Read),
+            0x0004 => Option::Some(ProtectionFlags::ReadWrite),
+            0x0008 => Option::Some(ProtectionFlags::ReadExecute),
+            0x0010 => Option::Some(ProtectionFlags::ReadWriteExecute),
+            0x0020 => Option::Some(ProtectionFlags::ReadWriteCopy),
+            _ => Option::None, // Bilinmeyen bayrak
+        }
+    }
+}
+
+
+/// `MemoryProtectionError`: Bellek koruma işlemleri sırasında oluşabilecek hata türleri.
+pub enum MemoryProtectionError {
+    /// Geçersiz bellek adresi veya uzunluk.
+    InvalidAddressOrLength(String),
+    /// Erişim izinleri ayarlanamadı (örn. yeterli yetki yok).
+    PermissionDenied(String),
+    /// İşletim sistemi çağrısı başarısız oldu.
+    OsError(SystemError),
+    /// Genel bir bellek koruma hatası.
+    Custom(String),
+}
+
+impl Error for MemoryProtectionError {
+    fn description(&self) -> String {
+        match self {
+            MemoryProtectionError::InvalidAddressOrLength(msg) => format!("Invalid Address or Length: {}", msg),
+            MemoryProtectionError::PermissionDenied(msg) => format!("Permission Denied: {}", msg),
+            MemoryProtectionError::OsError(e) => format!("OS Error: {}", e.description()),
+            MemoryProtectionError::Custom(msg) => format!("Memory Protection Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        match self {
+            MemoryProtectionError::OsError(e) => Option::Some(e),
+            _ => Option::None,
+        }
+    }
+}
+
+
+// --- Bellek Koruma Fonksiyonları ---
+
+/// `set_protection(addr: *mut u8, len: u64, flags: ProtectionFlags) -> Result<(), MemoryProtectionError>`:
+/// Belirtilen bellek bölgesinin (başlangıç adresi `addr` ve `len` uzunluğunda) erişim izinlerini ayarlar.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `addr` geçerli, tahsis edilmiş ve erişilebilir bir bellek bölgesinin başlangıcını göstermelidir.
+/// - `len`, bölgenin geçerli uzunluğunu temsil etmelidir.
+/// - Yanlış kullanım, programın çökmesine (segmentation fault) veya güvenlik açıklarına yol açabilir.
+pub unsafe fn set_protection(addr: *mut u8, len: u64, flags: ProtectionFlags) -> Result<(), MemoryProtectionError> {
+    if addr.is_null() || len == 0 {
+        return Result::Err(MemoryProtectionError::InvalidAddressOrLength("Address is null or length is zero.".to_string()));
+    }
+
+    // Varsayımsal işletim sistemi API çağrısı
+    // Örneğin, Windows'ta `VirtualProtect`, Linux'ta `mprotect`.
+    // Düşük seviyeli bir fonksiyonu simüle ediyoruz.
+    let os_flags = flags.to_os_flags();
+    io::println(&format!("OS_API: Calling `set_protection` for address {:?} with length {} and flags {:x}", addr, len.to_string(), os_flags));
+
+    // OS çağrısının başarılı olduğunu varsayalım.
+    // Gerçek bir implementasyonda, OS API'sinin dönüş değeri kontrol edilirdi.
+     if !os_api::set_memory_protection(addr, len, os_flags) {
+         return Result::Err(MemoryProtectionError::OsError(
+             SystemError::new(os_api::get_last_error_code(), "Failed to set memory protection".to_string())
+         ));
+     }
+    Result::Ok(())
+}
+
+/// `get_protection(addr: *const u8) -> Result<ProtectionFlags, MemoryProtectionError>`:
+/// Belirtilen bellek adresinin mevcut erişim izinlerini sorgular ve döndürür.
+/// Genellikle sayfa hizalı bir adres beklenir.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `addr` geçerli, tahsis edilmiş ve sorgulanabilir bir bellek adresini göstermelidir.
+/// - Yanlış kullanım, hatalı izin bilgileri alınmasına veya erişim hatasına yol açabilir.
+pub unsafe fn get_protection(addr: *const u8) -> Result<ProtectionFlags, MemoryProtectionError> {
+    if addr.is_null() {
+        return Result::Err(MemoryProtectionError::InvalidAddressOrLength("Address is null.".to_string()));
+    }
+
+    // Varsayımsal işletim sistemi API çağrısı
+    // Örneğin, Windows'ta `VirtualQuery`, Linux'ta `mincore` veya `/proc/self/maps` okuma.
+    io::println(&format!("OS_API: Calling `get_protection` for address {:?}", addr));
+
+    // Simülasyon olarak, bir varsayılan izin döndürelim veya önceden ayarlanmış bir değeri.
+    // Gerçek bir implementasyonda OS API'sinden gelen değer kullanılırdı.
+    let simulated_os_flags = ProtectionFlags::ReadWriteExecute.to_os_flags(); // Örnek olarak
+
+    match ProtectionFlags::from_os_flags(simulated_os_flags) {
+        Option::Some(flags) => Result::Ok(flags),
+        Option::None => Result::Err(MemoryProtectionError::Custom("Unknown OS protection flags received.".to_string())),
+    }
+}
+
+/// `lock_memory(addr: *mut u8, len: u64) -> Result<(), MemoryProtectionError>`:
+/// Belirtilen bellek bölgesini fiziksel bellekte kilitler (sayfaların diske takas edilmesini engeller).
+/// Özellikle gerçek zamanlı sistemler veya kritik bellek bölgeleri için kullanılır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `addr` geçerli, tahsis edilmiş ve erişilebilir bir bellek bölgesinin başlangıcını göstermelidir.
+/// - `len`, bölgenin geçerli uzunluğunu temsil etmelidir.
+/// - Yanlış kullanım, sistem performansını etkileyebilir veya sistem kaynaklarını tüketebilir.
+pub unsafe fn lock_memory(addr: *mut u8, len: u64) -> Result<(), MemoryProtectionError> {
+    if addr.is_null() || len == 0 {
+        return Result::Err(MemoryProtectionError::InvalidAddressOrLength("Address is null or length is zero.".to_string()));
+    }
+
+    // Varsayımsal işletim sistemi API çağrısı (örn. mlock, VirtualLock)
+    io::println(&format!("OS_API: Calling `lock_memory` for address {:?} with length {}", addr, len.to_string()));
+
+     if !os_api::lock_memory_pages(addr, len) {
+         return Result::Err(MemoryProtectionError::OsError(
+             SystemError::new(os_api::get_last_error_code(), "Failed to lock memory pages".to_string())
+         ));
+     }
+    Result::Ok(())
+}
+
+/// `unlock_memory(addr: *mut u8, len: u64) -> Result<(), MemoryProtectionError>`:
+/// Daha önce `lock_memory` ile kilitlenmiş bir bellek bölgesinin kilidini açar.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Bu fonksiyon güvenli değildir çünkü:
+/// - `addr` ve `len`, daha önce kilitlenmiş bir bölgeyle eşleşmelidir.
+/// - Yanlış kullanım, hatalara veya sistem kaynaklarının yanlış yönetimine yol açabilir.
+pub unsafe fn unlock_memory(addr: *mut u8, len: u64) -> Result<(), MemoryProtectionError> {
+    if addr.is_null() || len == 0 {
+        return Result::Err(MemoryProtectionError::InvalidAddressOrLength("Address is null or length is zero.".to_string()));
+    }
+
+    // Varsayımsal işletim sistemi API çağrısı (örn. munlock, VirtualUnlock)
+    io::println(&format!("OS_API: Calling `unlock_memory` for address {:?} with length {}", addr, len.to_string()));
+
+    // if !os_api::unlock_memory_pages(addr, len) {
+         return Result::Err(MemoryProtectionError::OsError(
+             SystemError::new(os_api::get_last_error_code(), "Failed to unlock memory pages".to_string())
+         ));
+     }
+    Result::Ok(())
+}
+
+// --- Örnek Kullanım ---
+
+import std::memory_protection::{self, ProtectionFlags, MemoryProtectionError};
+import std::io;
+import std::string::String;
+import std::vec::Vec;
+import std::result::Result;
+import std::error::Error; // To use .to_string() on errors
+import std::memory_utils; // For allocate/deallocate mocks and Layout
+
+// Dummy `std::mem` for size_of and align_of from memory_utils example
+pub mod std {
+    pub mod mem {
+        pub fn size_of<T>() -> u64 {
+            // Placeholder: Replace with actual type size calculation
+            match String::from_type_name::<T>() { // Varsayımsal `from_type_name`
+                "i64" => 8,
+                "f64" => 8,
+                "bool" => 1,
+                "u8" => 1,
+                "String" => 24, // Example: pointer + capacity + length
+                _ => 8, // Default or more sophisticated lookup
+            }
+        }
+        pub fn align_of<T>() -> u64 {
+            // Placeholder: Replace with actual type alignment calculation
+            match String::from_type_name::<T>() {
+                "i64" => 8,
+                "f64" => 8,
+                "bool" => 1,
+                "u8" => 1,
+                "String" => 8, // Example: pointer alignment
+                _ => 8,
+            }
+        }
+    }
+}
+
+// Helper for simulating u64.is_power_of_two()
+// In a real CNT, this would likely be a built-in method or a math utility.
+trait PowerOfTwoCheck {
+    fn is_power_of_two(&self) -> bool;
+}
+
+impl PowerOfTwoCheck for u64 {
+    fn is_power_of_two(&self) -> bool {
+        if *self == 0 { return false; }
+        (*self & (*self - 1)) == 0
+    }
+}
+
+
+fn main() {
+    io::println("Starting Memory Protection Utilities example...".to_string());
+
+    // --- Bellek Tahsisi ve Koruma Ayarı ---
+    io::println("\n--- Memory Allocation and Protection Setting ---".to_string());
+
+    let page_size = 4096; // Varsayımsal sistem sayfa boyutu
+    let alloc_layout_res = memory_utils::Layout::from_size_align(page_size, page_size);
+
+    let allocated_ptr: *mut u8;
+    let mut success_alloc = false;
+
+    match alloc_layout_res {
+        Result::Ok(layout) => {
+            unsafe {
+                // Belleği tahsis et (mock olarak)
+                // Gerçekte, burada memory_utils::allocate çağrısı olurdu.
+                // Basitlik adına, doğrudan bir Vec'in ilk elemanının adresini kullanıyoruz.
+                let mut dummy_vec: Vec<u8> = Vec::new();
+                dummy_vec.resize(page_size as usize, 0u8);
+                allocated_ptr = &mut dummy_vec[0];
+                io::println(&format!("Simulated allocation of {} bytes at {:?}", page_size.to_string(), allocated_ptr));
+                success_alloc = true;
+
+                if allocated_ptr.is_null() {
+                    io::println("Failed to simulate allocation.".to_string());
+                    success_alloc = false;
+                }
+            }
+        },
+        Result::Err(e) => {
+            io::println(&format!("Failed to create allocation layout: {}", e.description()));
+            allocated_ptr = std::ptr::null_mut(); // Rust'taki karşılığı, null pointer
+        }
+    }
+
+    if success_alloc {
+        unsafe {
+            // Bellek alanına bazı veriler yaz
+            memory_utils::memset(allocated_ptr, 0xAA, 10).unwrap(); // İlk 10 baytı 0xAA ile doldur
+            io::println("Memory initialized with 0xAA.".to_string());
+            memory_utils::print_memory_block(allocated_ptr, 16, &"Initial Memory".to_string());
+
+
+            // 1. Okuma/Yazma izni ayarla
+            io::println("\nSetting ReadWrite protection...".to_string());
+            match memory_protection::set_protection(allocated_ptr, page_size, ProtectionFlags::ReadWrite) {
+                Result::Ok(_) => io::println("Protection set to ReadWrite.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting protection: {}", e.description())),
+            }
+
+            // Mevcut korumayı sorgula
+            match memory_protection::get_protection(allocated_ptr) {
+                Result::Ok(flags) => io::println(&format!("Current protection flags: {:?}", flags.to_os_flags())), // Simülasyonda 0x0010 dönecek
+                Result::Err(e) => io::println(&format!("Error getting protection: {}", e.description())),
+            }
+
+            // Bellek bölgesini kilitle
+            io::println("\nLocking memory...".to_string());
+            match memory_protection::lock_memory(allocated_ptr, page_size) {
+                Result::Ok(_) => io::println("Memory locked successfully.".to_string()),
+                Result::Err(e) => io::println(&format!("Error locking memory: {}", e.description())),
+            }
+
+            // Bellek bölgesinin kilidini aç
+            io::println("\nUnlocking memory...".to_string());
+            match memory_protection::unlock_memory(allocated_ptr, page_size) {
+                Result::Ok(_) => io::println("Memory unlocked successfully.".to_string()),
+                Result::Err(e) => io::println(&format!("Error unlocking memory: {}", e.description())),
+            }
+
+            // 2. Sadece Okuma izni ayarla
+            io::println("\nSetting Read-only protection...".to_string());
+            match memory_protection::set_protection(allocated_ptr, page_size, ProtectionFlags::Read) {
+                Result::Ok(_) => io::println("Protection set to Read.".to_string()),
+                Result::Err(e) => io::println(&format!("Error setting protection: {}", e.description())),
+            }
+            // Bu noktada, eğer gerçek bir sistemde olsaydık, allocated_ptr'ye yazmaya çalışmak bir seg-fault'a neden olurdu.
+            // Örneğin: *allocated_ptr = 0xBB; // Bu satır bir hata tetikleyebilir!
+
+            // Belleği serbest bırak (mock olarak)
+            // Gerçekte memory_utils::deallocate çağrısı olurdu.
+            io::println(&format!("Simulated deallocation of memory at {:?}", allocated_ptr));
+             drop(dummy_vec); // Vec'in scope dışına çıkıp belleği serbest bırakmasını sağlar
+        }
+    } else {
+        io::println("Skipping memory protection tests due to allocation failure.".to_string());
+    }
+
+    io::println("\nMemory Protection Utilities example finished.".to_string());
+}
