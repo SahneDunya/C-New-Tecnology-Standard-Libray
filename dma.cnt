@@ -1,0 +1,602 @@
+// dma.cnt
+// Doğrudan Bellek Erişimi (DMA) Modülü
+// CPU müdahalesi olmadan bellek ve çevre birimleri arasında veri transferi için
+// bir donanım soyutlama katmanı sağlar.
+// Bu fonksiyonlar düşük seviyeli DMA denetleyicisi donanımıyla etkileşime girer ve 'unsafe' kullanım gerektirebilir.
+
+import std::result::Result; // Hata yönetimi için
+import std::error::{Error, SystemError, InvalidInputError, BoxedError}; // Hata türleri için
+import std::string::String; // Hata mesajları için
+import std::fmt;            // Debug yazdırma için
+import std::collections::HashMap; // DMA transfer durumu ve geri çağırmaları saklamak için (varsayımsal)
+import std::ptr;           // Bellek adresleri ve pointer manipülasyonu için
+
+// Varsayımsal olarak, CNT'de donanım kayıtlarına doğrudan erişim için bir mekanizma
+// (örneğin, belleğe eşlenmiş G/Ç adresleri veya özel komutlar) mevcuttur.
+// `mem::register` veya `sys::dma_controller` gibi bir kütüphane/modül aracılığıyla.
+
+/// `DmaError`: DMA işlemleri sırasında oluşabilecek hata türleri.
+pub enum DmaError {
+    /// Geçersiz DMA kanal ID'si.
+    InvalidChannelId(String),
+    /// Geçersiz bellek adresi veya boyutu.
+    InvalidAddressOrSize(String),
+    /// DMA kanalı meşgul veya zaten kullanımda.
+    ChannelBusy(String),
+    /// DMA transferi zaman aşımına uğradı.
+    Timeout(String),
+    /// Donanım transferi sırasında hata oluştu.
+    TransferError(String),
+    /// Donanım kaydı erişim hatası.
+    HardwareAccessError(String),
+    /// Geri çağırma (callback) fonksiyonu zaten kayıtlı veya kayıtlı değil.
+    CallbackError(String),
+    /// Genel bir DMA hatası.
+    Custom(String),
+}
+
+impl Error for DmaError {
+    fn description(&self) -> String {
+        match self {
+            DmaError::InvalidChannelId(msg) => format!("Invalid DMA Channel ID: {}", msg),
+            DmaError::InvalidAddressOrSize(msg) => format!("Invalid Address or Size for DMA: {}", msg),
+            DmaError::ChannelBusy(msg) => format!("DMA Channel Busy: {}", msg),
+            DmaError::Timeout(msg) => format!("DMA Timeout: {}", msg),
+            DmaError::TransferError(msg) => format!("DMA Transfer Error: {}", msg),
+            DmaError::HardwareAccessError(msg) => format!("Hardware Access Error: {}", msg),
+            DmaError::CallbackError(msg) => format!("DMA Callback Error: {}", msg),
+            DmaError::Custom(msg) => format!("DMA Error: {}", msg),
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn Error)> {
+        Option::None // Basitlik adına kaynak hatası yok
+    }
+}
+
+/// `DmaDirection`: DMA transferinin yönü.
+pub enum DmaDirection {
+    /// Bellekten çevre birimine.
+    MemoryToPeripheral,
+    /// Çevre biriminden belleğe.
+    PeripheralToMemory,
+    /// Bellekten belleğe.
+    MemoryToMemory,
+}
+
+/// `DmaDataWidth`: Her transfer adımında aktarılan veri genişliği.
+pub enum DmaDataWidth {
+    /// 8-bit (Byte)
+    Byte,
+    /// 16-bit (Half-Word)
+    HalfWord,
+    /// 32-bit (Word)
+    Word,
+}
+
+/// `DmaTransferMode`: DMA transferinin bitiş davranışı.
+pub enum DmaTransferMode {
+    /// Tek seferlik transfer, belirtilen bayt sayısı aktarıldığında durur.
+    Normal,
+    /// Sürekli transfer, belirtilen bayt sayısı aktarıldığında başa döner.
+    Circular,
+}
+
+/// `DmaConfig`: Bir DMA kanalının yapılandırma ayarları.
+pub struct DmaConfig {
+    pub direction: DmaDirection,
+    pub data_width: DmaDataWidth,
+    pub transfer_mode: DmaTransferMode,
+    pub enable_source_increment: bool, // Kaynak adres otomatik artırılsın mı?
+    pub enable_destination_increment: bool, // Hedef adres otomatik artırılsın mı?
+    // Ayrıca, çevre birimi isteği (request) kaynağı, öncelik gibi ayarlar da olabilir.
+     pub peripheral_request: DmaPeripheralRequest, // (örn. SPI_TX, UART_RX)
+     pub priority: DmaChannelPriority,
+}
+
+impl Default for DmaConfig {
+    fn default() -> DmaConfig {
+        DmaConfig {
+            direction: DmaDirection::MemoryToMemory,
+            data_width: DmaDataWidth::Byte,
+            transfer_mode: DmaTransferMode::Normal,
+            enable_source_increment: true,
+            enable_destination_increment: true,
+        }
+    }
+}
+
+/// `DmaChannel`: Tek bir DMA kanalını temsil eden yapı.
+/// Bu yapı, DMA kanalının durumunu ve ilgili donanım kayıtlarını soyutlar.
+pub struct DmaChannel {
+    id: u8, // DMA Kanalı ID'si (örneğin Channel 0, Channel 1)
+    config: DmaConfig,
+    is_initialized: bool,
+    is_active: bool, // Kanal aktif bir transferde mi?
+    // Gerçek bir implementasyonda, burada DMA denetleyicisinin register adresleri
+    // veya bir channel nesnesi gibi düşük seviyeli detaylar tutulurdu.
+    // Örneğin: base_addr: u64, control_reg: u32, source_addr_reg: u32, dest_addr_reg: u32, count_reg: u32
+}
+
+// Varsayımsal global statik depolama alanı ve kilit mekanizması
+// Gerçek bir OS/HAL ortamında, bu statik değerler daha güvenli ve donanım tarafından
+// yönetilen yapılara veya singleton'lara bağlanacaktır.
+static mut DMA_CHANNELS: [Option<DmaChannel>; MAX_DMA_CHANNELS as usize] = [Option::None; MAX_DMA_CHANNELS as usize];
+static mut DMA_CALLBACKS: Option<HashMap<u8, fn(Result<(), DmaError>)>> = Option::None; // Kanal ID'sine göre callback'leri sakla
+static mut IS_DMA_MODULE_INITIALIZED: bool = false; // Modül başlatıldı mı?
+
+/// `init() -> Result<(), DmaError>`:
+/// DMA modülünü başlatır. Bu fonksiyon, genellikle DMA denetleyicisini yapılandırır.
+/// Yalnızca bir kez çağrılmalıdır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım DMA denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn init() -> Result<(), DmaError> {
+    if IS_DMA_MODULE_INITIALIZED {
+        return Result::Err(DmaError::Custom("DMA module already initialized.".to_string()));
+    }
+
+    io::println("HW_API: Initializing DMA Controller.".to_string());
+    // Gerçekte, DMA denetleyicisi (DMA Controller) burada başlatılır ve varsayılan ayarlar yapılır.
+     os_api::dma_controller_init();
+
+    // Callback HashMap'ini başlat
+    DMA_CALLBACKS = Option::Some(HashMap::new());
+    IS_DMA_MODULE_INITIALIZED = true;
+    Result::Ok(())
+}
+
+/// `deinit() -> Result<(), DmaError>`:
+/// DMA modülünü devre dışı bırakır ve tüm aktif transferleri durdurur, kaynakları serbest bırakır.
+///
+/// # Güvenli Olmayan (Unsafe)
+/// Donanım DMA denetleyicisini ve global statik verileri değiştirdiğinden güvenli değildir.
+pub unsafe fn deinit() -> Result<(), DmaError> {
+    if !IS_DMA_MODULE_INITIALIZED {
+        return Result::Err(DmaError::Custom("DMA module not initialized.".to_string()));
+    }
+
+    io::println("HW_API: De-initializing DMA Controller and clearing channels.".to_string());
+    // Tüm aktif DMA transferlerini durdur
+    for i in 0..MAX_DMA_CHANNELS as usize {
+        if let Option::Some(channel) = &mut DMA_CHANNELS[i] {
+            if channel.is_active {
+                // os_api::dma_stop_channel(channel.id);
+                channel.is_active = false;
+            }
+        }
+        DMA_CHANNELS[i] = Option::None; // Kanalı sıfırla
+    }
+
+    DMA_CALLBACKS = Option::None;
+    IS_DMA_MODULE_INITIALIZED = false;
+    Result::Ok(())
+}
+
+impl DmaChannel {
+    /// `new(id: u8, config: DmaConfig) -> Result<DmaChannel, DmaError>`:
+    /// Belirtilen ID ve yapılandırma için yeni bir `DmaChannel` örneği oluşturur.
+    /// Kanalı donanım seviyesinde yapılandırmaz, sadece yazılım temsili oluşturur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `DMA_CHANNELS` dizisini değiştirdiğinden güvenli değildir.
+    pub unsafe fn new(id: u8, config: DmaConfig) -> Result<DmaChannel, DmaError> {
+        if !IS_DMA_MODULE_INITIALIZED {
+            return Result::Err(DmaError::Custom("DMA module not initialized. Call init() first.".to_string()));
+        }
+        if id >= MAX_DMA_CHANNELS {
+            return Result::Err(DmaError::InvalidChannelId(
+                format!("DMA Channel ID {} is out of range.", id.to_string())
+            ));
+        }
+        if DMA_CHANNELS[id as usize].is_some() {
+            return Result::Err(DmaError::ChannelBusy(
+                format!("DMA Channel {} is already in use.", id.to_string())
+            ));
+        }
+
+        let channel = DmaChannel {
+            id,
+            config,
+            is_initialized: false, // Donanım seviyesinde henüz yapılandırılmadı
+            is_active: false,
+        };
+
+        // Kanalı global diziye kaydet
+        DMA_CHANNELS[id as usize] = Option::Some(channel);
+        Result::Ok(DMA_CHANNELS[id as usize].as_ref().unwrap().clone()) // Varsayımsal clone
+    }
+
+    /// `configure(&mut self) -> Result<(), DmaError>`:
+    /// DMA kanalını donanım seviyesinde yapılandırır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım DMA kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn configure(&mut self) -> Result<(), DmaError> {
+        if !IS_DMA_MODULE_INITIALIZED {
+            return Result::Err(DmaError::Custom("DMA module not initialized.".to_string()));
+        }
+        if self.is_active {
+            return Result::Err(DmaError::ChannelBusy(
+                format!("DMA Channel {} is active, cannot reconfigure.", self.id.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Configuring DMA Channel {} with config: {{ Direction: {:?}, DataWidth: {:?}, TransferMode: {:?} }}.",
+            self.id.to_string(), self.config.direction, self.config.data_width, self.config.transfer_mode));
+        // Gerçekte, DMA kanalının kontrol kayıtları (direction, data width, increment, transfer mode, vb.)
+        // burada ayarlanır.
+         os_api::dma_configure_channel(self.id, &self.config);
+
+        self.is_initialized = true;
+        Result::Ok(())
+    }
+
+    /// `start_transfer(&mut self, source_addr: *const u8, dest_addr: *mut u8, num_bytes: usize) -> Result<(), DmaError>`:
+    /// Belirtilen kaynak adresten hedef adrese belirli sayıda bayt transferini başlatır.
+    /// Bu, bellek-bellek veya bellek-çevre birimi transferleri için kullanılabilir.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Bellek adresleri ve donanım DMA kayıtları ile doğrudan çalıştığından güvenli değildir.
+    /// Yanlış adresler veya boyutlar, sistem kararsızlığına veya veri bozulmasına neden olabilir.
+    pub unsafe fn start_transfer(&mut self, source_addr: *const u8, dest_addr: *mut u8, num_bytes: usize) -> Result<(), DmaError> {
+        if !self.is_initialized {
+            return Result::Err(DmaError::Custom(
+                format!("DMA Channel {} not configured. Call configure() first.", self.id.to_string())
+            ));
+        }
+        if self.is_active {
+            return Result::Err(DmaError::ChannelBusy(
+                format!("DMA Channel {} is already active.", self.id.to_string())
+            ));
+        }
+        if source_addr.is_null() || dest_addr.is_null() || num_bytes == 0 {
+            return Result::Err(DmaError::InvalidAddressOrSize("Source, destination cannot be null, and num_bytes must be > 0.".to_string()));
+        }
+
+        io::println(&format!("HW_API: Starting DMA Channel {} transfer: 0x{:X} -> 0x{:X}, {} bytes.",
+            self.id.to_string(), source_addr as u64, dest_addr as u64, num_bytes.to_string()));
+
+        // Gerçekte, DMA kaynak ve hedef adres kayıtları, transfer boyutu ayarlanır ve kanal etkinleştirilir.
+         os_api::dma_set_source(self.id, source_addr);
+         os_api::dma_set_destination(self.id, dest_addr);
+         os_api::dma_set_transfer_count(self.id, num_bytes);
+         os_api::dma_enable_channel(self.id);
+
+        self.is_active = true;
+        Result::Ok(())
+    }
+
+    /// `stop_transfer(&mut self) -> Result<(), DmaError>`:
+    /// Devam eden bir DMA transferini durdurur.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım DMA kayıtlarını değiştirdiğinden güvenli değildir.
+    pub unsafe fn stop_transfer(&mut self) -> Result<(), DmaError> {
+        if !self.is_active {
+            return Result::Err(DmaError::Custom(
+                format!("DMA Channel {} is not active.", self.id.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Stopping DMA Channel {} transfer.", self.id.to_string()));
+         os_api::dma_disable_channel(self.id);
+
+        self.is_active = false;
+        Result::Ok(())
+    }
+
+    /// `is_transfer_complete(&self) -> Result<bool, DmaError>`:
+    /// Mevcut transferin tamamlanıp tamamlanmadığını kontrol eder.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım DMA durum kayıtlarını okuduğundan güvenli değildir.
+    pub unsafe fn is_transfer_complete(&self) -> Result<bool, DmaError> {
+        if !self.is_initialized {
+            return Result::Err(DmaError::Custom(
+                format!("DMA Channel {} not configured.", self.id.to_string())
+            ));
+        }
+        if !self.is_active {
+            return Result::Ok(true); // Aktif değilse tamamlanmış sayılır
+        }
+
+        // Gerçekte, DMA durum kayıtlarından transferin tamamlanıp tamamlanmadığı bayrağı okunur.
+         let status = os_api::dma_get_status(self.id);
+         if status.has_transfer_error() { return Result::Err(DmaError::TransferError("DMA transfer error occurred.".to_string())); }
+         return Result::Ok(status.is_complete());
+
+        // Simülasyon: Rastgele bir bit döndürelim
+        Result::Ok((std::time::nanos() % 2) == 0)
+    }
+
+    /// `get_remaining_count(&self) -> Result<usize, DmaError>`:
+    /// Mevcut transferde kalan veri sayısını döndürür.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Donanım DMA kayıtlarını okuduğundan güvenli değildir.
+    pub unsafe fn get_remaining_count(&self) -> Result<usize, DmaError> {
+        if !self.is_initialized {
+            return Result::Err(DmaError::Custom(
+                format!("DMA Channel {} not configured.", self.id.to_string())
+            ));
+        }
+        if !self.is_active {
+            return Result::Ok(0); // Aktif değilse kalan yok
+        }
+        // Gerçekte, DMA kalan transfer sayısı kaydından okunur.
+         return Result::Ok(os_api::dma_get_remaining_count(self.id));
+
+        // Simülasyon
+        Result::Ok((std::time::nanos() % 100) as usize) // 0-99 arası kalan
+    }
+
+    /// `register_callback(&self, callback: fn(Result<(), DmaError>)) -> Result<(), DmaError>`:
+    /// Bir DMA transferi tamamlandığında veya bir hata oluştuğunda çağrılacak bir geri çağırma (callback)
+    /// fonksiyonu kaydeder. Bu, kesme tabanlı DMA işlemleri için kullanılır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `DMA_CALLBACKS` HashMap'ini değiştirdiğinden güvenli değildir.
+    /// `callback` fonksiyonunun kesme güvenli (async-signal-safe) olması kritik öneme sahiptir.
+    pub unsafe fn register_callback(&self, callback: fn(Result<(), DmaError>)) -> Result<(), DmaError> {
+        if !IS_DMA_MODULE_INITIALIZED {
+            return Result::Err(DmaError::Custom("DMA module not initialized.".to_string()));
+        }
+        let callbacks = DMA_CALLBACKS.as_mut().ok_or(DmaError::Custom("Callback map not available.".to_string()))?;
+        if callbacks.contains_key(&self.id) {
+            return Result::Err(DmaError::CallbackError(
+                format!("Callback already registered for DMA Channel {}.", self.id.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Registering callback for DMA Channel {}.", self.id.to_string()));
+         os_api::dma_enable_interrupts(self.id); // DMA transfer tamamlandığında kesme tetiklensin
+        callbacks.insert(self.id, callback);
+        Result::Ok(())
+    }
+
+    /// `unregister_callback(&self) -> Result<(), DmaError>`:
+    /// Kanal için kayıtlı geri çağırma fonksiyonunu kaldırır.
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Global statik `DMA_CALLBACKS` HashMap'ini değiştirdiğinden güvenli değildir.
+    pub unsafe fn unregister_callback(&self) -> Result<(), DmaError> {
+        if !IS_DMA_MODULE_INITIALIZED {
+            return Result::Err(DmaError::Custom("DMA module not initialized.".to_string()));
+        }
+        let callbacks = DMA_CALLBACKS.as_mut().ok_or(DmaError::Custom("Callback map not available.".to_string()))?;
+        if !callbacks.contains_key(&self.id) {
+            return Result::Err(DmaError::CallbackError(
+                format!("No callback registered for DMA Channel {}.", self.id.to_string())
+            ));
+        }
+
+        io::println(&format!("HW_API: Unregistering callback for DMA Channel {}.", self.id.to_string()));
+         os_api::dma_disable_interrupts(self.id);
+        callbacks.remove(&self.id);
+        Result::Ok(())
+    }
+
+    /// `_simulate_dma_interrupt(channel_id: u8, success: bool)`:
+    /// Bu fonksiyon, geliştirme ve test amacıyla bir DMA transfer tamamlama/hata kesmesini simüle etmek için kullanılır.
+    /// Gerçek bir donanım üzerinde çağrılmamalıdır!
+    ///
+    /// # Güvenli Olmayan (Unsafe)
+    /// Normalde donanım tarafından tetiklenecek bir olayı manuel olarak tetiklediğinden güvenli değildir.
+    /// Sadece test senaryoları için kullanılır.
+    pub unsafe fn _simulate_dma_interrupt(channel_id: u8, success: bool) {
+        io::println(&format!("SIMULATION: DMA Interrupt triggered for Channel {}. Success: {}", channel_id.to_string(), success.to_string()));
+        if IS_DMA_MODULE_INITIALIZED {
+            if let Option::Some(callbacks) = DMA_CALLBACKS.as_ref() {
+                if let Option::Some(callback) = callbacks.get(&channel_id) {
+                    // Simülasyonda kanalı pasif hale getir
+                    if let Option::Some(channel) = &mut DMA_CHANNELS[channel_id as usize] {
+                        channel.is_active = false;
+                    }
+
+                    if success {
+                        callback(Result::Ok(()));
+                    } else {
+                        callback(Result::Err(DmaError::TransferError(format!("Simulated error on Channel {}.", channel_id.to_string()))));
+                    }
+                } else {
+                    io::println(&format!("SIMULATION WARNING: No callback registered for DMA Channel {}.", channel_id.to_string()));
+                }
+            }
+        } else {
+            io::println("SIMULATION WARNING: DMA module not initialized. Cannot simulate.".to_string());
+        }
+    }
+
+    // Basit bir örnek için DmaChannel'ı kopyalanabilir yapalım. Gerçekte karmaşık olabilir.
+    fn clone(&self) -> DmaChannel {
+        DmaChannel {
+            id: self.id,
+            config: DmaConfig {
+                direction: self.config.direction,
+                data_width: self.config.data_width,
+                transfer_mode: self.config.transfer_mode,
+                enable_source_increment: self.config.enable_source_increment,
+                enable_destination_increment: self.config.enable_destination_increment,
+            },
+            is_initialized: self.is_initialized,
+            is_active: self.is_active,
+        }
+    }
+}
+
+
+// Varsayımsal bir sabit, donanım üzerindeki maksimum DMA kanalı sayısını belirtir.
+const MAX_DMA_CHANNELS: u8 = 4; // Örneğin, 4 DMA kanalı olabilir.
+
+
+// --- Örnek Kullanım ---
+
+import std::dma::{self, DmaChannel, DmaConfig, DmaError, DmaDirection, DmaDataWidth, DmaTransferMode};
+import std::io;
+import std::string::String;
+import std::result::Result;
+import std::error::Error;
+import std::fmt;
+import std::ptr; // For raw pointers
+
+// Dummy `std::time` for mock
+pub mod std {
+    pub mod time {
+        pub fn nanos() -> u64 {
+            // Placeholder: simulate a growing nanosecond counter
+            static mut COUNTER: u64 = 0;
+            unsafe {
+                COUNTER += 1000; // Increment for unique random values
+                COUNTER
+            }
+        }
+    }
+    // Simulate a basic sleep functionality for demonstration
+    pub mod spirit {
+        pub fn sleep_ms(ms: u32) {
+            io::println(&format!(" (simulating a {} ms delay)", ms.to_string()));
+            // In a real system, this would involve a busy-wait or a timer-based delay.
+        }
+    }
+}
+
+// Global flag to indicate DMA completion (for synchronous waiting example)
+static mut DMA_TRANSFER_DONE: bool = false;
+
+// DMA Transfer Tamamlama Geri Çağırması (Callback)
+// Bu, bir DMA transferi tamamlandığında veya bir hata oluştuğunda çağrılır.
+fn dma_completion_callback(result: Result<(), DmaError>) {
+    unsafe {
+        match result {
+            Result::Ok(_) => {
+                io::println("  >>> DMA Callback: Transfer Completed Successfully!".to_string());
+                DMA_TRANSFER_DONE = true;
+            },
+            Result::Err(e) => {
+                io::println(&format!("  >>> DMA Callback: Transfer Failed! Error: {}", e.description()));
+                DMA_TRANSFER_DONE = true;
+            },
+        }
+    }
+}
+
+fn main() {
+    io::println("Starting DMA example...".to_string());
+
+    // UNSAFE BLOCK - DMA altyapısını başlatmak ve yönetmek unsafe'dir.
+    unsafe {
+        io::println("\n--- Initializing DMA Module ---".to_string());
+        match dma::init() {
+            Result::Ok(_) => io::println("DMA module initialized.".to_string()),
+            Result::Err(e) => {
+                io::println(&format!("Error initializing DMA module: {}", e.description()));
+                return;
+            }
+        }
+
+        // --- Memory-to-Memory Transfer Example ---
+        io::println("\n--- Setting up Memory-to-Memory DMA Transfer on Channel 0 ---".to_string());
+
+        let mut source_buffer: [u8; 16] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                           0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F];
+        let mut destination_buffer: [u8; 16] = [0xFF; 16]; // Hedef tamponu varsayılan değerlerle doldur
+
+        io::println(&format!("Source Buffer (initial): {:?}", source_buffer.as_slice()));
+        io::println(&format!("Destination Buffer (initial): {:?}", destination_buffer.as_slice()));
+
+        let mut dma_config = DmaConfig::default();
+        dma_config.direction = DmaDirection::MemoryToMemory;
+        dma_config.data_width = DmaDataWidth::Byte;
+        dma_config.transfer_mode = DmaTransferMode::Normal;
+        dma_config.enable_source_increment = true;
+        dma_config.enable_destination_increment = true;
+
+        let mut dma_channel_0_res = DmaChannel::new(0, dma_config);
+        let mut dma_channel_0: Option<DmaChannel> = Option::None;
+
+        match dma_channel_0_res {
+            Result::Ok(channel) => {
+                io::println("DMA Channel 0 created.".to_string());
+                dma_channel_0 = Option::Some(channel);
+            },
+            Result::Err(e) => io::println(&format!("Error creating DMA Channel 0: {}", e.description())),
+        }
+
+        if let Option::Some(ref mut channel_0) = dma_channel_0 {
+            match channel_0.configure() {
+                Result::Ok(_) => io::println("DMA Channel 0 configured.".to_string()),
+                Result::Err(e) => io::println(&format!("Error configuring DMA Channel 0: {}", e.description())),
+            }
+
+            match channel_0.register_callback(dma_completion_callback) {
+                Result::Ok(_) => io::println("Callback registered for DMA Channel 0.".to_string()),
+                Result::Err(e) => io::println(&format!("Error registering callback: {}", e.description())),
+            }
+
+            // Transferi başlat
+            DMA_TRANSFER_DONE = false; // Bayrağı sıfırla
+            let num_bytes_to_transfer = source_buffer.len();
+            match channel_0.start_transfer(source_buffer.as_ptr(), destination_buffer.as_mut_ptr(), num_bytes_to_transfer) {
+                Result::Ok(_) => io::println("DMA transfer started on Channel 0.".to_string()),
+                Result::Err(e) => io::println(&format!("Error starting DMA transfer: {}", e.description())),
+            }
+
+            // Simülasyon: Transferin tamamlanmasını bekle
+            io::println("Waiting for DMA transfer to complete...".to_string());
+            let mut timeout_count = 0;
+            while !DMA_TRANSFER_DONE && timeout_count < 10 {
+                std::spirit::sleep_ms(100);
+                // Gerçekte burada transferin tamamlanmasını bekleriz (kesme veya polling ile)
+                // For simulation, we'll manually trigger the interrupt.
+                external_interrupts::_simulate_dma_interrupt(channel_0.id, true); // Simüle et
+                timeout_count += 1;
+            }
+
+            io::println("DMA transfer completion checked.".to_string());
+            io::println(&format!("Source Buffer (after transfer): {:?}", source_buffer.as_slice()));
+            io::println(&format!("Destination Buffer (after transfer): {:?}", destination_buffer.as_slice()));
+
+            if source_buffer.as_slice() == destination_buffer.as_slice() {
+                io::println("Verification: Memory-to-Memory transfer successful!".to_string());
+            } else {
+                io::println("Verification: Memory-to-Memory transfer FAILED!".to_string());
+            }
+
+            // Kanalın kalan sayısını kontrol et
+            match channel_0.get_remaining_count() {
+                Result::Ok(count) => io::println(&format!("Remaining bytes on Channel 0: {}", count.to_string())),
+                Result::Err(e) => io::println(&format!("Error getting remaining count: {}", e.description())),
+            }
+
+            // Kanalın aktif olup olmadığını kontrol et
+            match channel_0.is_transfer_complete() {
+                Result::Ok(is_complete) => io::println(&format!("Channel 0 transfer complete: {}", is_complete.to_string())),
+                Result::Err(e) => io::println(&format!("Error checking transfer status: {}", e.description())),
+            }
+
+            // Callback'i kaldır
+            match channel_0.unregister_callback() {
+                Result::Ok(_) => io::println("Callback unregistered for DMA Channel 0.".to_string()),
+                Result::Err(e) => io::println(&format!("Error unregistering callback: {}", e.description())),
+            }
+        }
+
+        // --- Attempting to create a DMA channel with an invalid ID (Expected Error) ---
+        io::println("\n--- Attempting to Create DMA Channel with Invalid ID (Expected Error) ---".to_string());
+        let invalid_dma_config = DmaConfig::default();
+        match DmaChannel::new(MAX_DMA_CHANNELS + 1, invalid_dma_config) {
+            Result::Ok(_) => io::println("This should not happen: Successfully created DMA Channel with invalid ID!".to_string()),
+            Result::Err(e) => io::println(&format!("Expected error: {}", e.description())), // Expected: InvalidChannelId
+        }
+
+        // Modülü de-initialize et
+        io::println("\n--- De-initializing DMA Module ---".to_string());
+        match dma::deinit() {
+            Result::Ok(_) => io::println("DMA module de-initialized.".to_string()),
+            Result::Err(e) => io::println(&format!("Error de-initializing DMA module: {}", e.description())),
+        }
+    }
+
+    io::println("\nDMA example finished.".to_string());
+}
